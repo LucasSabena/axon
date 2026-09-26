@@ -791,6 +791,9 @@ app.all('/p/:port/*', async (c) => {
     }
     resHeaders.set(k, v);
   }
+  // Rewritten HTML is request-context-dependent (origin/proxy prefix): never
+  // let the browser cache a stale copy with an old (or broken) ws base URL.
+  resHeaders.set('cache-control', 'no-store');
 
   const type = upstream.headers.get('content-type') || '';
   if (type.includes('text/html')) {
