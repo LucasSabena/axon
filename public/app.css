@@ -568,6 +568,7 @@ td.num { white-space: nowrap; font-variant-numeric: tabular-nums; font-family: v
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .app-chip svg { width: 13px; height: 13px; flex-shrink: 0; color: var(--text-faint); }
+.app-chip img { width: 14px; height: 14px; flex-shrink: 0; object-fit: contain; border-radius: 3px; }
 .app-chip .mono { font-family: var(--font-mono); font-size: 0.78rem; }
 .app-chip .chip-src { font-family: var(--font-mono); font-size: 0.66rem; color: var(--text-faint); background: var(--bg-overlay); border-radius: 4px; padding: 1px 5px; }
 .program-card.has-update { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
