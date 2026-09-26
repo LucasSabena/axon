@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { serveStatic } from 'hono/bun';
 import { readFile } from 'fs/promises';
+import { existsSync } from 'fs';
 import {
   requireAuth,
   verifyPassword,
@@ -11,7 +12,7 @@ import {
 } from './auth';
 import { loadConfig, saveConfig } from './config';
 import { getServerStats, getServerHosts } from './stats';
-import { setHostUser, hostExec } from './host';
+import { setHostUser, hostExec, hostToContainer } from './host';
 import {
   configurePorts,
   listPortProcesses,
@@ -56,7 +57,7 @@ import {
   listAllDnsRecords,
   getRemoteTunnelConfig,
 } from './cloudflare';
-import type { DomainMapping, Project } from './types';
+import type { DomainMapping, DomainStatus, Project } from './types';
 
 const PORT = parseInt(process.env.PORT || '3457', 10);
 const BASE_DOMAIN = process.env.BASE_DOMAIN || 'example.com';
@@ -389,6 +390,75 @@ app.get('/api/docker/:id/logs', async (c) => {
 // ---------- Domains (unchanged Cloudflare logic) ----------
 
 app.get('/api/domains', async (c) => c.json({ ok: true, domains: config.domains }));
+
+// Probe every domain publicly and, when it's down, diagnose why: stopped
+// process, deleted project, stopped container, or a tunnel routing problem.
+app.get('/api/domains/status', async (c) => {
+  const portProcs = await listPortProcesses();
+  const listening = new Set<number>();
+  for (const p of portProcs) for (const l of p.listeners ?? []) listening.add(l.port);
+  const containers = await listContainers().catch(() => [] as Awaited<ReturnType<typeof listContainers>>);
+  const dockerPorts = new Set(
+    containers.filter((ct) => ct.state === 'running').flatMap((ct) => ct.publicPorts)
+  );
+  const projects = getProjects();
+
+  const statuses = await Promise.all(
+    config.domains.map(async (d) => [d.id, await probeDomain(d, listening, dockerPorts, projects)] as const)
+  );
+  return c.json({ ok: true, statuses: Object.fromEntries(statuses) });
+});
+
+async function probeDomain(
+  d: DomainMapping,
+  listening: Set<number>,
+  dockerPorts: Set<number>,
+  projects: Project[]
+): Promise<DomainStatus> {
+  let httpStatus: number | undefined;
+  try {
+    const res = await fetch(`https://${d.fullDomain}/`, {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(7000),
+    });
+    httpStatus = res.status;
+    res.body?.cancel().catch(() => {});
+    if (res.status < 400) return { state: 'up', httpStatus };
+    if (res.status === 401 || res.status === 403) {
+      return { state: 'warn', httpStatus, reason: `La app responde pero pide autenticación (HTTP ${res.status})` };
+    }
+    if (res.status < 500) {
+      return { state: 'warn', httpStatus, reason: `La app está viva pero la ruta responde HTTP ${res.status}` };
+    }
+  } catch { /* timeout / DNS / TLS → diagnose below */ }
+
+  let reason: string;
+  if (d.processType === 'docker') {
+    reason = dockerPorts.has(d.port)
+      ? 'El contenedor corre y publica el puerto, pero el túnel no lo alcanza (revisar ingress de cloudflared)'
+      : 'El contenedor está detenido o ya no publica ese puerto';
+  } else if (!listening.has(d.port)) {
+    const proj = projects.find((p) => p.name === d.projectName || p.id === d.projectName);
+    if (proj?.cwd && !existsSync(hostToContainer(proj.cwd))) {
+      reason = 'El proyecto fue borrado del disco';
+    } else {
+      reason = `El proyecto está detenido — nada escucha en el puerto ${d.port}`;
+    }
+  } else {
+    let localOk = false;
+    try {
+      const r = await fetch(d.target.startsWith('http') ? d.target : `http://localhost:${d.port}`, {
+        redirect: 'manual', signal: AbortSignal.timeout(3000),
+      });
+      localOk = true;
+      r.body?.cancel().catch(() => {});
+    } catch { /* port listens but not HTTP */ }
+    reason = localOk
+      ? 'El proceso responde en local pero el túnel no enruta hasta él (revisar cloudflared)'
+      : `Algo escucha en el puerto ${d.port} pero no responde HTTP`;
+  }
+  return { state: 'down', httpStatus, reason };
+}
 
 app.post('/api/domains/import', async (c) => {
   const remote = await getRemoteTunnelConfig();
