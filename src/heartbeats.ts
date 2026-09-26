@@ -63,6 +63,16 @@ export function allHeartbeats(): Record<string, Heartbeat[]> {
   return Object.fromEntries(store);
 }
 
+// Drop history for ids that no longer exist in config.domains — otherwise
+// deleted domains accumulate dead entries in memory and heartbeats.json.
+export function pruneHeartbeats(validIds: Set<string>): void {
+  let dirty = false;
+  for (const id of store.keys()) {
+    if (!validIds.has(id)) { store.delete(id); dirty = true; }
+  }
+  if (dirty) saveSoon();
+}
+
 // uptime % over the last N ticks
 export function uptimePct(id: string, last = 288): number | null {
   const arr = (store.get(id) || []).slice(-last);

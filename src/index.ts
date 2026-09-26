@@ -60,7 +60,7 @@ import {
 } from './cloudflare';
 import type { DomainMapping, DomainStatus, Project } from './types';
 import { notify, setNotifyUrl } from './notify';
-import { loadHeartbeats, recordHeartbeat, lastState, allHeartbeats, uptimePct } from './heartbeats';
+import { loadHeartbeats, recordHeartbeat, lastState, allHeartbeats, uptimePct, pruneHeartbeats } from './heartbeats';
 
 const PORT = parseInt(process.env.PORT || '3457', 10);
 const BASE_DOMAIN = process.env.BASE_DOMAIN || 'example.com';
@@ -81,6 +81,7 @@ async function hbProbe(fullDomain: string): Promise<{ s: 'up' | 'warn' | 'down';
   const t0 = performance.now();
   try {
     const res = await fetch(`https://${fullDomain}/`, { signal: AbortSignal.timeout(10_000), redirect: 'manual' });
+    res.body?.cancel().catch(() => {});
     const ms = Math.round(performance.now() - t0);
     if (res.status >= 200 && res.status < 400) return { s: 'up', ms };
     if (res.status === 401 || res.status === 403 || res.status === 404) return { s: 'warn', ms };
@@ -92,6 +93,7 @@ async function hbProbe(fullDomain: string): Promise<{ s: 'up' | 'warn' | 'down';
 
 async function heartbeatTick(): Promise<void> {
   const domains = config.domains || [];
+  pruneHeartbeats(new Set(domains.map((d) => d.id)));
   await Promise.allSettled(
     domains.map(async (d) => {
       const r = await hbProbe(d.fullDomain);
@@ -276,7 +278,13 @@ app.get('/api/programs/installed', async (c) => {
     listDesktopApps().catch(() => []),
     installedPackagesSummary().catch(() => ({ apt: { total: 0 }, snaps: [], pnpmGlobals: [] })),
   ]);
-  return c.json({ ok: true, desktopApps, packages });
+  // Resolve icon availability server-side so the frontend never requests
+  // /api/icons/<name> that would 404 (console noise on every render).
+  const resolved = await Promise.all(
+    desktopApps.map(async (a: { icon?: string | null }) =>
+      a.icon && !(await resolveIcon(a.icon)) ? { ...a, icon: null } : a),
+  );
+  return c.json({ ok: true, desktopApps: resolved, packages });
 });
 
 app.get('/api/programs/packages', async (c) => {
@@ -555,6 +563,7 @@ app.post('/api/domains/import', async (c) => {
   for (const entry of remote.config.config.ingress || []) {
     if (!entry.hostname || entry.hostname === `ports.${BASE_DOMAIN}`) continue;
     const subdomain = entry.hostname.replace(new RegExp(`\\.${escapeRegExp(BASE_DOMAIN)}$`), '');
+    if (!subdomain || subdomain === entry.hostname) { skipped.push(entry.hostname); continue; }
     const serviceMatch = entry.service.match(/:\/\/localhost:(\d+)/);
     const port = serviceMatch ? parseInt(serviceMatch[1], 10) : 0;
     if (!port || config.domains.some((d) => d.fullDomain === entry.hostname)) {
@@ -720,6 +729,7 @@ app.post('/api/domains/bulk-delete', async (c) => {
     ok: true,
     removed: removed.length,
     failed: failed.length,
+    failedIds: failed,
     syncOk: sync.success,
     syncError: sync.error,
   });
@@ -783,13 +793,31 @@ app.all('/p/:port/*', async (c) => {
   for (const [k, v] of upstream.headers.entries()) {
     const kl = k.toLowerCase();
     if (HOP_BY_HOP.has(kl) || kl === 'x-frame-options') continue;
-    // keep redirects inside the proxy prefix
-    if (kl === 'location' && v.startsWith('/')) { resHeaders.set(k, `/p/${port}${v}`); continue; }
+    // fetch() already decoded the body — a forwarded content-encoding makes
+    // the browser decompress twice, and a stale content-length truncates
+    // rewritten HTML. Drop both; the runtime re-computes framing.
+    if (kl === 'content-encoding' || kl === 'content-length') continue;
+    // keep redirects inside the proxy prefix — root-absolute, absolute
+    // loopback URLs, and URLs pointing at the proxied port itself.
+    if (kl === 'location') {
+      const abs = v.match(/^https?:\/\/(?:0\.0\.0\.0|127\.0\.0\.1|localhost)(?::(\d+))?(\/.*)?$/);
+      if (v.startsWith('/') && !v.startsWith('//')) { resHeaders.set(k, `/p/${port}${v}`); continue; }
+      if (abs) { resHeaders.set(k, `/p/${abs[1] || port}${abs[2] || '/'}`); continue; }
+    }
     if (kl === 'content-security-policy') {
       resHeaders.set(k, v.replace(/frame-ancestors[^;]*(;|$)/g, ''));
       continue;
     }
+    if (kl === 'set-cookie') continue; // handled below via getSetCookie()
     resHeaders.set(k, v);
+  }
+  // Cookies: scope each proxied app's cookies to its own prefix so sessions
+  // don't leak into the dashboard API or sibling /p/N/ apps.
+  for (const sc of upstream.headers.getSetCookie?.() ?? []) {
+    resHeaders.append('set-cookie', sc
+      .replace(/;\s*domain=[^;]*/gi, '')
+      .replace(/;\s*path=[^;]*/gi, `; Path=/p/${port}`)
+      + (/;\s*path=/i.test(sc) ? '' : `; Path=/p/${port}`));
   }
   // Rewritten HTML is request-context-dependent (origin/proxy prefix): never
   // let the browser cache a stale copy with an old (or broken) ws base URL.
@@ -819,8 +847,20 @@ app.all('/p/:port/*', async (c) => {
       }
     );
     // rewrite root-absolute URLs so assets route back through the proxy
-    html = html.replace(/((?:href|src|action|srcset)\s*=\s*["'])\/(?!\/|p\/)/g, `$1/p/${port}/`);
+    html = html.replace(/((?:href|src|action|poster|formaction)\s*=\s*["'])\/(?!\/|p\/)/g, `$1/p/${port}/`);
+    // srcset is a comma-separated candidate list — prefix each entry.
+    html = html.replace(/(srcset\s*=\s*["'])([^"']*)/gi,
+      (_m, attr: string, val: string) => attr + val.replace(/(^|,)\s*\/(?!\/|p\/)/g, `$1/p/${port}/`));
+    // meta refresh redirects ("0;url=/login") — keep inside the prefix.
+    html = html.replace(/(content\s*=\s*["'][^"']*url\s*=\s*)\/(?!\/|p\/)/gi, `$1/p/${port}/`);
     return new Response(html, { status: upstream.status, headers: resHeaders });
+  }
+  // Stylesheets can carry root-absolute url(/fonts/x.woff2) refs — prefix them
+  // so proxied apps don't 404 their assets. data:/blob: untouched (no leading /).
+  if (type.includes('text/css')) {
+    const css = (await upstream.text())
+      .replace(/url\(\s*(['"]?)\/(?!\/|p\/|data:|blob:)/g, `url($1/p/${port}/`);
+    return new Response(css, { status: upstream.status, headers: resHeaders });
   }
   return new Response(upstream.body, { status: upstream.status, headers: resHeaders });
 });
@@ -874,6 +914,30 @@ app.post('/api/system/power', async (c) => {
 
 // ---------- Convert process to systemd user service ----------
 
+// systemd unit values: quote each argv element so spaces survive, and escape
+// % (specifier expansion) in every interpolated field.
+function sdQuote(s: string): string {
+  // Inside double quotes systemd only treats \ and " specially; % must be %%.
+  return `"${s.replace(/%/g, '%%').replace(/([\\"])/g, '\\$1')}"`;
+}
+function buildUnit(name: string, argv: string[], cwd: string): string {
+  return `[Unit]
+Description=pm-${name} (creado desde Ports Manager)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=${cwd.replace(/%/g, '%%')}
+ExecStart=${argv.map(sdQuote).join(' ')}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+`;
+}
+
 app.post('/api/systemd/create-service', async (c) => {
   const body = await c.req.json<{ pid?: number; name?: string }>().catch(() => ({}));
   const pid = Number(body.pid);
@@ -896,21 +960,7 @@ app.post('/api/systemd/create-service', async (c) => {
   const argv = cmdlineRaw.split('\0').filter(Boolean);
   if (!argv.length || !cwd) return fail(c, 500, 'No pude determinar el comando o el directorio del proceso');
 
-  const unit = `[Unit]
-Description=pm-${name} (creado desde Ports Manager)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=${cwd}
-ExecStart=${argv.join(' ')}
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-`;
+  const unit = buildUnit(name, argv, cwd);
 
   const b64 = Buffer.from(unit, 'utf-8').toString('base64');
   const dir = 'mkdir -p ~/.config/systemd/user';
@@ -936,21 +986,7 @@ app.post('/api/systemd/preview-service', async (c) => {
   const argv = cmdlineRaw.split('\0').filter(Boolean);
   const cwd = cwdRes.ok ? cwdRes.stdout.trim() : '';
   const name = String(body.name || '').toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 48);
-  const unit = `[Unit]
-Description=pm-${name || 'servicio'} (creado desde Ports Manager)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=${cwd || '?'}
-ExecStart=${argv.join(' ')}
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-`;
+  const unit = buildUnit(name || 'servicio', argv, cwd || '/');
   return c.json({ ok: true, unit, cwd, command: argv.join(' '), suggested: `pm-${name || 'servicio'}.service` });
 });
 
@@ -965,7 +1001,7 @@ app.onError((err, c) => {
 // /ws/term — authenticated WebSocket that bridges to a host tmux session via
 // `script` (provides the PTY). The tmux session 'pm-term' persists across
 // browser refreshes and reconnects.
-interface WsProxyData { kind: 'proxy'; upstream: WebSocket; pending: unknown[] }
+interface WsProxyData { kind: 'proxy'; upstream: WebSocket; pendingClient: unknown[]; pendingServer: unknown[]; ws: Bun.ServerWebSocket<WsData> | null }
 interface WsTermData { kind: 'term'; proc?: ReturnType<typeof Bun.spawn>; session?: string; cols?: number; rows?: number }
 type WsData = WsProxyData | WsTermData;
 
@@ -1002,23 +1038,55 @@ export default {
     const isWs = req.headers.get('upgrade')?.toLowerCase() === 'websocket';
     const wsMatch = url.pathname.match(/^\/p\/(\d+)(\/.*)?$/);
     if (wsMatch && isWs) {
-      const token = req.headers.get('cookie')?.match(/ports_session=([^;]+)/)?.[1];
+      const token = req.headers.get('cookie')?.match(/(?:^|;\s*)ports_session=([^;]+)/)?.[1];
       if (!token || !(await verifySessionToken(token))) return new Response('Unauthorized', { status: 401 });
-      // Forward the client's subprotocol list (noVNC requires 'binary') both
-      // to the upstream socket and back in the 101 response.
+      // Forward the client's subprotocol list (noVNC requires 'binary').
+      // Upstream handlers attach NOW — before server.upgrade — so frames
+      // that arrive early (RFB greeting, banners) and close/error events
+      // can't be lost in the window between connect and websocket.open().
       const protos = (req.headers.get('sec-websocket-protocol') || '')
         .split(',').map(s => s.trim()).filter(Boolean);
-      const upstream = protos.length
-        ? new WebSocket(`ws://127.0.0.1:${wsMatch[1]}${wsMatch[2] || '/'}${url.search}`, protos)
-        : new WebSocket(`ws://127.0.0.1:${wsMatch[1]}${wsMatch[2] || '/'}${url.search}`);
+      let upstream: WebSocket;
+      try {
+        upstream = protos.length
+          ? new WebSocket(`ws://127.0.0.1:${wsMatch[1]}${wsMatch[2] || '/'}${url.search}`, protos)
+          : new WebSocket(`ws://127.0.0.1:${wsMatch[1]}${wsMatch[2] || '/'}${url.search}`);
+      } catch {
+        return new Response('Upstream inválido', { status: 502 });
+      }
       upstream.binaryType = 'arraybuffer';
-      const upgradeHeaders = protos.length ? { 'Sec-WebSocket-Protocol': protos[0] } : undefined;
-      if (server.upgrade(req, { headers: upgradeHeaders, data: { kind: 'proxy', upstream, pending: [] as unknown[] } satisfies WsData })) return;
+      const data: WsData = { kind: 'proxy', upstream, pendingClient: [], pendingServer: [], ws: null };
+      let resolveOpen: ((ok: boolean) => void) | null = null;
+      upstream.onopen = () => {
+        for (const m of data.pendingClient.splice(0)) upstream.send(m as never);
+        resolveOpen?.(true); resolveOpen = null;
+      };
+      upstream.onmessage = (e) => {
+        if (data.ws) { try { data.ws.send(e.data as string | ArrayBuffer); } catch { /* closed */ } }
+        else data.pendingServer.push(e.data);
+      };
+      upstream.onclose = upstream.onerror = () => {
+        resolveOpen?.(false); resolveOpen = null;
+        try { data.ws?.close(); } catch { /* closed */ }
+      };
+      // Wait for the upstream handshake before answering the client so we can
+      // echo the subprotocol the upstream ACTUALLY negotiated — and reject
+      // with 502 instead of leaving a dead socket hanging forever.
+      const opened = await Promise.race([
+        new Promise<boolean>((r) => { resolveOpen = r; }),
+        new Promise<boolean>((r) => setTimeout(() => { resolveOpen = null; r(false); }, 10_000)),
+      ]);
+      if (!opened) {
+        try { upstream.close(); } catch { /* gone */ }
+        return new Response(`Nada responde en el puerto ${wsMatch[1]} (websocket)`, { status: 502 });
+      }
+      const upgradeHeaders = upstream.protocol ? { 'Sec-WebSocket-Protocol': upstream.protocol } : undefined;
+      if (server.upgrade(req, { headers: upgradeHeaders, data })) return;
       upstream.close();
       return new Response('WS upgrade failed', { status: 500 });
     }
     if (isWs && url.pathname === '/ws/term') {
-      const token = req.headers.get('cookie')?.match(/ports_session=([^;]+)/)?.[1];
+      const token = req.headers.get('cookie')?.match(/(?:^|;\s*)ports_session=([^;]+)/)?.[1];
       if (!token || !(await verifySessionToken(token))) return new Response('Unauthorized', { status: 401 });
       const data: WsData = {
         kind: 'term',
@@ -1034,10 +1102,12 @@ export default {
   websocket: {
     open(ws: Bun.ServerWebSocket<WsData>) {
       if (ws.data.kind === 'term') { startTermSocket(ws); return; }
-      const up = ws.data.upstream;
-      up.onopen = () => { for (const m of ws.data.pending.splice(0)) up.send(m as never); };
-      up.onmessage = (e) => { try { ws.send(e.data as string | ArrayBuffer); } catch { /* closed */ } };
-      up.onclose = up.onerror = () => { try { ws.close(); } catch { /* closed */ } };
+      // Handlers were attached in fetch() before upgrade — just link the
+      // socket and flush any upstream frames buffered in between.
+      ws.data.ws = ws;
+      for (const m of ws.data.pendingServer.splice(0)) {
+        try { ws.send(m as string | ArrayBuffer); } catch { break; }
+      }
     },
     message(ws: Bun.ServerWebSocket<WsData>, msg: string | Buffer) {
       if (ws.data.kind === 'term') {
@@ -1047,7 +1117,7 @@ export default {
             const j = JSON.parse(msg);
             if (j.t === 'r' && Number.isFinite(j.c) && Number.isFinite(j.r)) {
               const sess = t.session || 'pm-term';
-              const c = Math.min(j.c, 500), r = Math.min(j.r, 200);
+              const c = Math.max(2, Math.min(j.c, 500)), r = Math.max(2, Math.min(j.r, 200));
               hostExec(`tmux resize-window -t ${sess} -x ${c} -y ${r} 2>/dev/null; tmux refresh-client -t ${sess} -C ${c},${r} 2>/dev/null; true`, { user: 'user', timeoutMs: 4000 }).catch(() => {});
               return;
             }
@@ -1059,15 +1129,19 @@ export default {
           return;
         }
         const stdin = t.proc?.stdin as { write(d: string | Buffer): void; flush(): void } | undefined;
-        if (stdin) { stdin.write(msg); stdin.flush(); }
+        try { stdin?.write(msg); stdin?.flush(); } catch { /* proc exited */ }
         return;
       }
       const up = ws.data.upstream;
       if (up.readyState === WebSocket.OPEN) up.send(msg as never);
-      else ws.data.pending.push(msg);
+      else ws.data.pendingClient.push(msg);
     },
     close(ws: Bun.ServerWebSocket<WsData>) {
       if (ws.data.kind === 'term') {
+        // Killing runuser orphans bash→script→tmux-client on the host; detach
+        // the tmux client first so the whole chain exits cleanly, then kill.
+        const sess = ws.data.session || 'pm-term';
+        hostExec(`tmux detach-client -s ${sess} 2>/dev/null; true`, { user: 'user', timeoutMs: 3000 }).catch(() => {});
         try { (ws.data.proc as { kill(s?: string): void } | undefined)?.kill('SIGKILL'); } catch { /* gone */ }
         return;
       }

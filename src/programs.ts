@@ -593,9 +593,11 @@ const ICON_DIRS = [
 ];
 
 export async function resolveIcon(iconName: string): Promise<string | null> {
-  if (!iconName || iconName.includes('..')) return null;
-  // Absolute path already
+  if (!iconName || iconName.includes('..') || iconName.includes('\0')) return null;
+  // Absolute path (desktop entries may store one) — only serve real image
+  // files so the endpoint can't read arbitrary host files.
   if (iconName.startsWith('/')) {
+    if (!/\.(png|svg|xpm|ico|jpe?g|webp)$/i.test(iconName)) return null;
     const p = hostToContainerFs(iconName);
     if (p) return p;
   }
