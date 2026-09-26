@@ -1810,6 +1810,7 @@ function unloadBrowser() {
 
 loaders.navegador = loadBrowser;
 $('#browser-open-ext').addEventListener('click', () => window.open(browserUrl, '_blank', 'noopener'));
+$('#browser-reload').addEventListener('click', () => { unloadBrowser(); loadBrowser(); });
 
 // ---------- QR pairing ----------
 
