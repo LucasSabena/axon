@@ -577,6 +577,20 @@ tr.domain-dead .domain-link { opacity: 0.55; text-decoration: line-through; }
 .app-chip .chip-src { font-family: var(--font-mono); font-size: 0.66rem; color: var(--text-faint); background: var(--bg-overlay); border-radius: 4px; padding: 1px 5px; }
 .program-card.has-update { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 .program-card.has-update .program-icon { color: var(--accent); }
+.program-auth { display: flex; align-items: center; gap: 7px; margin: 2px 0 8px; font-size: 0.8rem; }
+.program-auth .auth-account { color: var(--text); font-weight: 550; }
+.auth-btn {
+  display: inline-flex; align-items: center; gap: 4px; margin-left: auto;
+  background: var(--bg-overlay); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text-dim); font-size: 0.72rem; padding: 2px 8px; cursor: pointer;
+}
+.auth-btn:hover { color: var(--text); border-color: var(--border-hover); }
+.auth-btn svg { width: 11px; height: 11px; }
+.auth-hint { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; color: var(--text-faint); font-size: 0.72rem; cursor: help; }
+.auth-hint svg { width: 11px; height: 11px; }
+.program-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.program-ok { display: inline-flex; align-items: center; gap: 6px; color: var(--ok); font-size: 0.8rem; font-weight: 550; }
+.program-ok svg { width: 14px; height: 14px; }
 
 /* ---------- Docker ---------- */
 

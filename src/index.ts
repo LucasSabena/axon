@@ -231,12 +231,28 @@ app.post('/api/programs/:id/update', async (c) => {
   return c.json({ ok: true, job });
 });
 
+app.post('/api/programs/:id/login', async (c) => {
+  const def = programById(c.req.param('id'));
+  if (!def?.auth?.login) return fail(c, 400, 'Este programa no tiene login automatizable');
+  const job = runJob(`Login ${def.name}`, def.auth.login.map((s) => ({ ...s, group: def.name })));
+  return c.json({ ok: true, job });
+});
+
+app.post('/api/programs/:id/logout', async (c) => {
+  const def = programById(c.req.param('id'));
+  if (!def?.auth?.logout) return fail(c, 400, 'Este programa no tiene logout automatizable');
+  const job = runJob(`Logout ${def.name}`, def.auth.logout.map((s) => ({ ...s, group: def.name })));
+  return c.json({ ok: true, job });
+});
+
 app.post('/api/programs/update-all', async (c) => {
   const programs = await detectPrograms();
-  const steps = programs.filter((p) => p.installed).flatMap((p) =>
+  // Only programs with a known pending update — don't reinstall everything.
+  const pending = programs.filter((p) => p.installed && (p.latestVersion || p.pendingUpdates));
+  const steps = pending.flatMap((p) =>
     (programById(p.id)?.steps || []).map((s) => ({ ...s, label: `${p.name} — ${s.label}`, group: p.name }))
   );
-  if (!steps.length) return fail(c, 400, 'No hay programas detectados para actualizar');
+  if (!steps.length) return fail(c, 400, 'Todo está al día — no hay actualizaciones pendientes');
   const job = runJob('Actualización completa', steps);
   return c.json({ ok: true, job });
 });

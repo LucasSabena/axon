@@ -19,7 +19,12 @@ const PROGRAMS: ProgramDef[] = [
     npmPkg: '@openai/codex',
     detect: [{ cmd: 'command -v codex', user: 'user' }],
     version: { cmd: 'codex --version 2>/dev/null | head -1', user: 'user' },
-    steps: [{ label: 'pnpm update codex', cmd: 'pnpm update -g @openai/codex --latest', user: 'user' }],
+    auth: {
+      check: { cmd: 'python3 -c "import json,base64;d=json.load(open(\'$HOME/.codex/auth.json\'));t=d.get(\'tokens\',{});tok=t.get(\'id_token\') or t.get(\'access_token\');p=tok.split(\'.\')[1];p+=\'=\'*(-len(p)%4);print(json.loads(base64.urlsafe_b64decode(p)).get(\'email\',\'cuenta\'))" 2>/dev/null', user: 'user' },
+      login: [{ label: 'codex login (device)', cmd: 'codex login --device-auth', user: 'user' }],
+      logout: [{ label: 'codex logout', cmd: 'codex logout', user: 'user' }],
+    },
+    steps: [{ label: 'pnpm update codex', cmd: 'pnpm add -g @openai/codex@latest', user: 'user' }],
   },
   {
     id: 'claude-code',
@@ -29,7 +34,15 @@ const PROGRAMS: ProgramDef[] = [
     npmPkg: '@anthropic-ai/claude-code',
     detect: [{ cmd: 'command -v claude', user: 'user' }],
     version: { cmd: 'claude --version 2>/dev/null | head -1', user: 'user' },
-    steps: [{ label: 'pnpm update claude-code', cmd: 'pnpm update -g @anthropic-ai/claude-code --latest', user: 'user' }],
+    auth: {
+      check: { cmd: 'e=$(python3 -c "import json;print(json.load(open(\'$HOME/.claude.json\')).get(\'oauthAccount\',{}).get(\'emailAddress\',\'\'))" 2>/dev/null); [ -n "$e" ] && echo "$e"', user: 'user' },
+      logout: [
+        { label: 'Borrar credenciales', cmd: 'rm -f $HOME/.claude/.credentials.json', user: 'user' },
+        { label: 'Limpiar cuenta', cmd: 'python3 -c "import json;p=\'$HOME/.claude.json\';d=json.load(open(p));d.pop(\'oauthAccount\',None);json.dump(d,open(p,\'w\'))"', user: 'user' },
+      ],
+      loginHint: 'Abrí una terminal, ejecutá `claude` y usá /login',
+    },
+    steps: [{ label: 'pnpm update claude-code', cmd: 'pnpm add -g @anthropic-ai/claude-code@latest', user: 'user' }],
   },
   {
     id: 'opencode',
@@ -39,7 +52,11 @@ const PROGRAMS: ProgramDef[] = [
     npmPkg: '@opencode/cli',
     detect: [{ cmd: 'command -v opencode', user: 'user' }],
     version: { cmd: 'opencode --version 2>/dev/null | head -1', user: 'user' },
-    steps: [{ label: 'pnpm update opencode', cmd: 'pnpm update -g @opencode/cli --latest', user: 'user' }],
+    auth: {
+      check: { cmd: 'python3 -c "import json,sys;k=list(json.load(open(\'$HOME/.local/share/opencode/auth.json\')).keys());print(\', \'.join(k));sys.exit(0 if k else 1)" 2>/dev/null', user: 'user' },
+      loginHint: 'Ejecutá `opencode auth login` en una terminal (es interactivo)',
+    },
+    steps: [{ label: 'pnpm update opencode', cmd: 'pnpm add -g @opencode/cli@latest', user: 'user' }],
   },
   {
     id: 'devin',
@@ -48,6 +65,11 @@ const PROGRAMS: ProgramDef[] = [
     channel: 'script',
     detect: [{ cmd: 'command -v devin', user: 'user' }],
     version: { cmd: 'devin --version 2>/dev/null | head -1', user: 'user' },
+    auth: {
+      check: { cmd: 'devin auth status 2>/dev/null | grep -iE "logged in|account|@" | head -1', user: 'user' },
+      login: [{ label: 'devin auth login', cmd: 'devin auth login', user: 'user' }],
+      logout: [{ label: 'devin auth logout', cmd: 'devin auth logout', user: 'user' }],
+    },
     steps: [{ label: 'devin update', cmd: 'yes | devin update', user: 'user' }],
   },
   {
@@ -58,6 +80,10 @@ const PROGRAMS: ProgramDef[] = [
     npmPkg: '@openchamber/web',
     detect: [{ cmd: 'command -v openchamber', user: 'user' }],
     version: { cmd: 'openchamber --version 2>/dev/null | head -1', user: 'user' },
+    auth: {
+      check: { cmd: '[ -f $HOME/.config/openchamber/github-auth.json ] && echo "GitHub vinculado"', user: 'user' },
+      loginHint: 'Se gestiona desde la UI de OpenChamber (Integraciones)',
+    },
     steps: [{ label: 'bun update openchamber', cmd: 'bun add -g @openchamber/web@latest', user: 'user' }],
   },
   {
@@ -68,7 +94,12 @@ const PROGRAMS: ProgramDef[] = [
     npmPkg: '@google/gemini-cli',
     detect: [{ cmd: 'command -v gemini', user: 'user' }],
     version: { cmd: 'gemini --version 2>/dev/null | head -1', user: 'user' },
-    steps: [{ label: 'pnpm update gemini-cli', cmd: 'pnpm update -g @google/gemini-cli --latest', user: 'user' }],
+    auth: {
+      check: { cmd: 'e=$(python3 -c "import json;print(json.load(open(\'$HOME/.gemini/google_accounts.json\'))[\'accounts\'][0][\'email\'])" 2>/dev/null); if [ -n "$e" ]; then echo "$e"; elif [ -f $HOME/.gemini/oauth_creds.json ]; then echo "logueado"; else exit 1; fi', user: 'user' },
+      logout: [{ label: 'Borrar credenciales', cmd: 'rm -f $HOME/.gemini/oauth_creds.json $HOME/.gemini/google_accounts.json', user: 'user' }],
+      loginHint: 'Ejecutá `gemini` en una terminal y elegí login con Google',
+    },
+    steps: [{ label: 'pnpm update gemini-cli', cmd: 'pnpm add -g @google/gemini-cli@latest', user: 'user' }],
   },
   {
     id: 'vercel',
@@ -78,7 +109,12 @@ const PROGRAMS: ProgramDef[] = [
     npmPkg: 'vercel',
     detect: [{ cmd: 'command -v vercel', user: 'user' }],
     version: { cmd: 'vercel --version 2>/dev/null | head -1', user: 'user' },
-    steps: [{ label: 'pnpm update vercel', cmd: 'pnpm update -g vercel --latest', user: 'user' }],
+    auth: {
+      check: { cmd: 'vercel whoami 2>/dev/null | tail -1', user: 'user' },
+      logout: [{ label: 'vercel logout', cmd: 'vercel logout', user: 'user' }],
+      loginHint: 'Ejecutá `vercel login` en una terminal (te manda un mail o abre GitHub)',
+    },
+    steps: [{ label: 'pnpm update vercel', cmd: 'pnpm add -g vercel@latest', user: 'user' }],
   },
   {
     id: 'supabase',
@@ -88,7 +124,12 @@ const PROGRAMS: ProgramDef[] = [
     npmPkg: 'supabase',
     detect: [{ cmd: 'command -v supabase', user: 'user' }],
     version: { cmd: 'supabase --version 2>/dev/null | head -1', user: 'user' },
-    steps: [{ label: 'pnpm update supabase', cmd: 'pnpm update -g supabase --latest', user: 'user' }],
+    auth: {
+      check: { cmd: '[ -s $HOME/.supabase/access-token ] && echo "access token configurado"', user: 'user' },
+      logout: [{ label: 'supabase logout', cmd: 'supabase logout', user: 'user' }],
+      loginHint: 'Generá un token en supabase.com y ejecutá `supabase login`',
+    },
+    steps: [{ label: 'pnpm update supabase', cmd: 'pnpm add -g supabase@latest', user: 'user' }],
   },
   {
     id: 'shopify',
@@ -98,7 +139,11 @@ const PROGRAMS: ProgramDef[] = [
     npmPkg: '@shopify/cli',
     detect: [{ cmd: 'command -v shopify', user: 'user' }],
     version: { cmd: 'shopify version 2>/dev/null | head -1', user: 'user' },
-    steps: [{ label: 'pnpm update shopify', cmd: 'pnpm update -g @shopify/cli --latest', user: 'user' }],
+    auth: {
+      check: { cmd: 'find $HOME/.config/shopify -name "*.json" 2>/dev/null | grep -q . && echo "sesión guardada"', user: 'user' },
+      loginHint: 'Ejecutá `shopify app dev` o `shopify theme dev` dentro de un proyecto para autenticar',
+    },
+    steps: [{ label: 'pnpm update shopify', cmd: 'pnpm add -g @shopify/cli@latest', user: 'user' }],
   },
   {
     id: 'playwright',
@@ -108,7 +153,7 @@ const PROGRAMS: ProgramDef[] = [
     npmPkg: '@playwright/cli',
     detect: [{ cmd: 'command -v playwright-cli || command -v playwright', user: 'user' }],
     version: { cmd: 'playwright-cli --version 2>/dev/null | head -1 || playwright --version 2>/dev/null | head -1', user: 'user' },
-    steps: [{ label: 'pnpm update playwright', cmd: 'pnpm update -g @playwright/cli @playwright/mcp --latest', user: 'user' }],
+    steps: [{ label: 'pnpm update playwright', cmd: 'pnpm add -g @playwright/cli@latest @playwright/mcp@latest', user: 'user' }],
   },
   {
     id: 'gh',
@@ -117,6 +162,11 @@ const PROGRAMS: ProgramDef[] = [
     channel: 'apt',
     detect: [{ cmd: 'command -v gh', user: 'user' }],
     version: { cmd: 'gh --version 2>/dev/null | head -1', user: 'user' },
+    auth: {
+      check: { cmd: 'gh auth status 2>/dev/null | grep -oE "account [^ ]+" | head -1 | cut -d" " -f2', user: 'user' },
+      login: [{ label: 'gh auth login (device)', cmd: 'gh auth login --hostname github.com --web --git-protocol ssh', user: 'user' }],
+      logout: [{ label: 'gh auth logout', cmd: 'gh auth logout --hostname github.com --user "$(gh api user --jq .login 2>/dev/null)"', user: 'user' }],
+    },
     steps: [{ label: 'apt upgrade gh', cmd: 'apt-get update -qq 2>/dev/null; DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y gh', user: 'root' }],
   },
   // --- Desktop apps ---
@@ -270,6 +320,10 @@ const PROGRAMS: ProgramDef[] = [
     detect: [{ cmd: 'command -v pnpm', user: 'user' }],
     version: { cmd: 'pnpm --version', user: 'user' },
     updatesCheck: { cmd: "pnpm outdated -g --format json 2>/dev/null | grep -c '\"latest\"'", user: 'user' },
+    auth: {
+      check: { cmd: 'npm whoami 2>/dev/null', user: 'user' },
+      loginHint: 'Ejecutá `npm login` en una terminal',
+    },
     steps: [
       { label: 'Actualizar pnpm', cmd: 'pnpm self-update 2>/dev/null || pnpm add -g pnpm@latest', user: 'user' },
       { label: 'pnpm update -g', cmd: 'pnpm update -g --latest', user: 'user' },
@@ -355,6 +409,17 @@ export async function detectPrograms(): Promise<ProgramView[]> {
           const n = parseInt(u.stdout.trim(), 10);
           if (!Number.isNaN(n) && n > 0) view.pendingUpdates = String(n);
         }
+      }
+      // Account/session state for account-backed CLIs
+      if (installed && p.auth) {
+        const a = await hostExec(p.auth.check.cmd, { user: p.auth.check.user, timeoutMs: 15_000 });
+        view.auth = {
+          loggedIn: a.ok && a.stdout.trim().length > 0,
+          account: a.ok ? a.stdout.trim().split('\n')[0] || undefined : undefined,
+          canLogin: !!p.auth.login,
+          canLogout: !!p.auth.logout,
+          loginHint: p.auth.loginHint,
+        };
       }
       // npm-registry-backed tools: compare installed semver vs registry latest
       if (installed && p.npmPkg) {

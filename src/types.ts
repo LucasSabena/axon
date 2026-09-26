@@ -128,6 +128,14 @@ export interface ProgramStep {
   user: 'root' | 'user';
 }
 
+export interface ProgramAuth {
+  // exit 0 = logged in; stdout first line is the account label
+  check: { cmd: string; user: 'root' | 'user' };
+  login?: ProgramStep[];   // job-runnable flow (device code prints URL in the log)
+  logout?: ProgramStep[];
+  loginHint?: string;      // manual instructions when login can't be automated
+}
+
 export interface ProgramDef {
   id: string;
   name: string;
@@ -138,6 +146,7 @@ export interface ProgramDef {
   detect: { cmd: string; user: 'root' | 'user' }[];
   version?: { cmd: string; user: 'root' | 'user' };
   updatesCheck?: { cmd: string; user: 'root' | 'user' };
+  auth?: ProgramAuth;
   steps: ProgramStep[];
 }
 
@@ -152,6 +161,7 @@ export interface ProgramView {
   version?: string;
   latestVersion?: string;
   pendingUpdates?: string;
+  auth?: { loggedIn: boolean; account?: string; canLogin: boolean; canLogout: boolean; loginHint?: string };
   steps: { label: string; cmd: string; user: string }[];
 }
 

@@ -613,6 +613,14 @@ function renderPrograms(programs) {
     const versionBadge = p.latestVersion
       ? `<span class="badge badge-bun" title="Hay una versión nueva">${icon('arrow-up')} ${esc(p.version || '?')} → ${esc(p.latestVersion)}</span>`
       : p.pendingUpdates ? `<span class="badge badge-bun">${esc(p.pendingUpdates)} updates</span>` : '';
+    const authHtml = p.auth ? `
+      <div class="program-auth">
+        <span class="health-dot ${p.auth.loggedIn ? 'health-ok' : 'health-bad'}"></span>
+        <span class="${p.auth.loggedIn ? 'auth-account' : 'listener-note'}">${p.auth.loggedIn ? esc(p.auth.account || 'Sesión activa') : 'Sin sesión'}</span>
+        ${p.auth.loggedIn && p.auth.canLogout ? `<button class="auth-btn program-auth-act" data-id="${esc(p.id)}" data-act="logout" title="Cerrar sesión">${icon('log-out')} Salir</button>` : ''}
+        ${!p.auth.loggedIn && p.auth.canLogin ? `<button class="auth-btn program-auth-act" data-id="${esc(p.id)}" data-act="login" title="Inicia el flujo de login — la URL/código aparece en el log del job">${icon('log-in')} Entrar</button>` : ''}
+        ${!p.auth.loggedIn && !p.auth.canLogin && p.auth.loginHint ? `<span class="auth-hint" title="${esc(p.auth.loginHint)}">${icon('info')} cómo entrar</span>` : ''}
+      </div>` : '';
     card.innerHTML = `
       <div class="program-head">
         <span class="program-icon">${p.brandIcon
@@ -628,16 +636,31 @@ function renderPrograms(programs) {
         </div>
       </div>
       ${p.desc ? `<p class="program-desc">${esc(p.desc)}</p>` : ''}
+      ${authHtml}
       <details class="program-steps"><summary>Comandos</summary>${stepsInfo}</details>
-      <button class="${hasUpdate ? 'btn-primary' : 'btn-action'} program-update" data-id="${esc(p.id)}" ${p.installed ? '' : 'disabled'}>
-        ${p.installed ? `${icon('arrow-up-circle')} Actualizar` : 'No instalado'}
-      </button>`;
+      <div class="program-actions">
+        ${p.installed ? (hasUpdate
+          ? `<button class="btn-primary program-update" data-id="${esc(p.id)}">${icon('arrow-up-circle')} Actualizar</button>`
+          : `<span class="program-ok">${icon('check-circle-2')} Al día</span>`)
+          : '<button class="btn-action" disabled>No instalado</button>'}
+      </div>`;
     grid.appendChild(card);
   }
   refreshIcons();
 }
 
 $('#programs-grid').addEventListener('click', async (e) => {
+  const authBtn = e.target.closest('.program-auth-act');
+  if (authBtn) {
+    try {
+      const { job } = await api(`/api/programs/${authBtn.dataset.id}/${authBtn.dataset.act}`, { method: 'POST' });
+      openJobModal(job);
+      if (authBtn.dataset.act === 'login') {
+        toast('Seguí el log del job: ahí aparece la URL o código para autorizar', 'ok');
+      }
+    } catch (err) { errToast(err); }
+    return;
+  }
   const btn = e.target.closest('.program-update');
   if (!btn || btn.disabled) return;
   try {
