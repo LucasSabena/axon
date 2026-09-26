@@ -103,6 +103,12 @@ export interface DomainMapping {
   dnsRecordId?: string;
 }
 
+export interface DomainStatus {
+  state: 'up' | 'warn' | 'down';
+  httpStatus?: number;
+  reason?: string;
+}
+
 export interface Project {
   id: string;
   name: string;

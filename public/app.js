@@ -616,7 +616,7 @@ function renderPrograms(programs) {
     card.innerHTML = `
       <div class="program-head">
         <span class="program-icon">${p.brandIcon
-          ? `<img class="brand-svg" src="${esc(p.brandIcon)}" alt="" onerror="this.remove(); this.nextElementSibling.classList.remove('hidden')"><span class="hidden">${icon(lucideName(p.icon, 'package'))}</span>`
+          ? `<img class="brand-svg" src="${esc(p.brandIcon)}" alt="" onerror="this.nextElementSibling.classList.remove('hidden'); this.remove()"><span class="hidden">${icon(lucideName(p.icon, 'package'))}</span>`
           : icon(lucideName(p.icon, 'package'))}</span>
         <div>
           <strong>${esc(p.name)}</strong>
@@ -710,7 +710,7 @@ function renderInstalledFilter() {
   const desktopHtml = apps.map((a) => `
     <div class="app-chip" title="${esc(a.exec || '')}">
       ${a.icon
-        ? `<img src="/api/icons/${encodeURIComponent(a.icon)}" onerror="this.remove(); this.nextElementSibling.classList.remove('hidden')" alt=""><span class="hidden">${icon('monitor')}</span>`
+        ? `<img src="/api/icons/${encodeURIComponent(a.icon)}" onerror="this.nextElementSibling.classList.remove('hidden'); this.remove()" alt=""><span class="hidden">${icon('monitor')}</span>`
         : icon('monitor')}
       <span>${esc(a.name)}</span>
       <span class="chip-src">${esc(a.source)}</span>
@@ -1059,8 +1059,10 @@ async function loadDomains() {
     $('#domains-empty').classList.toggle('hidden', domains.length > 0);
     for (const d of domains) {
       const tr = document.createElement('tr');
+      tr.dataset.domainId = d.id;
       tr.innerHTML = `
         <td><a class="domain-link" href="https://${esc(d.fullDomain)}" target="_blank">${icon('globe')} ${esc(d.fullDomain)}</a></td>
+        <td class="domain-status"><span class="health-dot health-unknown"></span> <span class="listener-note">…</span></td>
         <td>${esc(d.projectName)} <span class="listener-note">${esc(d.processType)}</span></td>
         <td class="cmd-cell">${esc(d.target)}</td>
         <td>${new Date(d.createdAt).toLocaleDateString()}</td>
@@ -1071,7 +1073,23 @@ async function loadDomains() {
       tbody.appendChild(tr);
     }
     refreshIcons();
+    loadDomainStatuses();
   } catch (err) { errToast(err); }
+}
+
+async function loadDomainStatuses() {
+  try {
+    const { statuses } = await api('/api/domains/status');
+    for (const [id, s] of Object.entries(statuses || {})) {
+      const cell = document.querySelector(`tr[data-domain-id="${id}"] .domain-status`);
+      if (!cell) continue;
+      const label = s.state === 'up' ? 'Activo' : s.state === 'warn' ? `HTTP ${s.httpStatus}` : 'Caído';
+      const cls = s.state === 'up' ? 'health-ok' : s.state === 'warn' ? 'health-warn' : 'health-bad';
+      cell.innerHTML = `<span class="health-dot ${cls}"></span> <span class="listener-note">${label}</span>`;
+      cell.title = s.reason || (s.state === 'up' ? `Responde HTTP ${s.httpStatus}` : '');
+      cell.closest('tr').classList.toggle('domain-dead', s.state === 'down');
+    }
+  } catch { /* statuses are best-effort */ }
 }
 
 $('#domains-table').addEventListener('click', async (e) => {

@@ -483,8 +483,12 @@ td.num { white-space: nowrap; font-variant-numeric: tabular-nums; font-family: v
   width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex-shrink: 0;
 }
 .health-ok { background: var(--ok); box-shadow: 0 0 6px var(--ok-soft); }
+.health-warn { background: var(--warn); }
 .health-bad { background: var(--danger); }
 .health-unknown { background: var(--text-faint); opacity: 0.5; }
+.domain-status { white-space: nowrap; }
+.domain-status .health-dot { margin-right: 2px; }
+tr.domain-dead .domain-link { opacity: 0.55; text-decoration: line-through; }
 
 .listener-note { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-faint); }
 .domain-link {
