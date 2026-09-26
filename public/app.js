@@ -235,8 +235,10 @@ function healthDotFor(port, listeners) {
   if (!l || l.proto === 'udp' || l.healthy === null || l.healthy === undefined) {
     return '<span class="health-dot health-unknown" title="Sin verificar"></span>';
   }
+  const ms = l.latencyMs !== undefined ? `<span class="health-ms">${l.latencyMs}ms</span>` : '';
+  const slow = l.latencyMs !== undefined && l.latencyMs > 200;
   return l.healthy
-    ? '<span class="health-dot health-ok" title="Responde"></span>'
+    ? `<span class="health-dot ${slow ? 'health-warn' : 'health-ok'}" title="Responde en ${l.latencyMs ?? '?'}ms"></span>${ms}`
     : '<span class="health-dot health-bad" title="No responde"></span>';
 }
 
@@ -294,7 +296,7 @@ function processRow(p, isChild, groupRoot) {
   const folderCell = p.identity.projectRoot || p.cwd || '-';
   const actions = p.pid > 0
     ? `<button class="btn-action act-detail" data-pid="${p.pid}" title="Info">${icon('info')} Info</button>
-       <button class="btn-action act-copy" data-path="${esc(folderCell)}" title="Copiar ruta">${icon('copy')}</button>
+       <button class="btn-action act-menu" data-pid="${p.pid}" title="Más acciones">${icon('ellipsis-vertical')}</button>
        ${p.identity.protected
          ? `<button class="btn-danger" disabled title="${esc(p.identity.protectionReason || 'Protegido')}">${icon('lock')}</button>`
          : `<button class="btn-danger act-kill" data-pid="${p.pid}" title="Cerrar">${icon('power')}</button>`}`
@@ -414,6 +416,9 @@ $('#ports-table').addEventListener('click', async (e) => {
     openKillModal(parseInt(btn.dataset.pid, 10));
   } else if (btn.classList.contains('act-detail')) {
     openDetailModal(parseInt(btn.dataset.pid, 10));
+  } else if (btn.classList.contains('act-menu')) {
+    const p = portsData.find((x) => x.pid === parseInt(btn.dataset.pid, 10));
+    if (p) openProcMenu(p, btn);
   } else if (btn.classList.contains('act-copy')) {
     await navigator.clipboard.writeText(btn.dataset.path).catch(() => {});
     toast('Ruta copiada', 'ok', '', 2000);
@@ -860,6 +865,22 @@ function renderJob(job) {
     const title = s.hint ? ` title="${esc(s.hint)}"` : '';
     return `<span class="job-step job-step-${s.status}"${title}>${stepIcon} ${esc(s.label)}${s.exitCode !== undefined && s.status === 'failed' ? ` (exit ${s.exitCode})` : ''}${s.hint ? ` — ${esc(s.hint)}` : ''}</span>`;
   }).join('');
+  // Topgrade-style summary: one chip per group (program), aggregated status
+  if (job.status !== 'running') {
+    const groups = new Map();
+    for (const s of job.steps) {
+      const g = s.group || s.label;
+      const cur = groups.get(g) || 'ok';
+      if (s.status === 'failed') groups.set(g, 'failed');
+      else if (s.status === 'skipped' && cur === 'ok') groups.set(g, 'skipped');
+      else if (s.status !== 'skipped' && !groups.has(g)) groups.set(g, 'ok');
+    }
+    const CH = { ok: 'circle-check', failed: 'circle-x', skipped: 'circle-minus' };
+    $('#job-groups').innerHTML = Array.from(groups, ([g, st]) =>
+      `<span class="job-group job-group-${st}">${icon(CH[st] || 'circle')} ${esc(g)}</span>`).join('');
+  } else {
+    $('#job-groups').innerHTML = '';
+  }
   refreshIcons();
   const pre = $('#job-log');
   const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
@@ -1129,6 +1150,22 @@ async function loadDomains() {
   } catch (err) { errToast(err); }
 }
 
+// Uptime Kuma-style tick strip + 24h % per domain, from persisted heartbeats.
+async function loadUptimeStrips() {
+  const { heartbeats, uptime } = await api('/api/domains/heartbeats');
+  for (const [id, strip] of Object.entries(
+    Object.fromEntries($$('.uptime-strip[data-domain-id]').map((el) => [el.dataset.domainId, el]))
+  )) {
+    const ticks = (heartbeats[id] || []).slice(-48);
+    if (!ticks.length) { strip.innerHTML = '<span class="listener-note">Sin datos aún</span>'; continue; }
+    const bars = ticks.map((h) =>
+      `<span class="upt tick-${h.s}" title="${new Date(h.t).toLocaleString()} — ${h.s}${h.ms !== undefined ? ` · ${h.ms}ms` : ''}"></span>`
+    ).join('');
+    const pct = uptime[id];
+    strip.innerHTML = `${bars}<span class="uptime-pct">${pct === null || pct === undefined ? '' : pct + '%'}</span>`;
+  }
+}
+
 async function loadDomainStatuses() {
   try {
     const { statuses } = await api('/api/domains/status');
@@ -1137,10 +1174,12 @@ async function loadDomainStatuses() {
       if (!cell) continue;
       const label = s.state === 'up' ? 'Activo' : s.state === 'warn' ? `HTTP ${s.httpStatus}` : 'Caído';
       const cls = s.state === 'up' ? 'health-ok' : s.state === 'warn' ? 'health-warn' : 'health-bad';
-      cell.innerHTML = `<span class="health-dot ${cls}"></span> <span class="listener-note">${label}</span>`;
+      const ms = s.ms !== undefined ? ` <span class="health-ms">${s.ms}ms</span>` : '';
+      cell.innerHTML = `<span class="health-dot ${cls}"></span> <span class="listener-note">${label}</span>${ms}<div class="uptime-strip" data-domain-id="${id}"></div>`;
       cell.title = s.reason || (s.state === 'up' ? `Responde HTTP ${s.httpStatus}` : '');
       cell.closest('tr').classList.toggle('domain-dead', s.state === 'down');
     }
+    loadUptimeStrips().catch(() => {});
     // Nav badge turns red when any domain is down
     const down = Object.values(statuses || {}).filter((s) => s.state === 'down').length;
     const ncm = $('#nav-count-domains');
@@ -1180,9 +1219,9 @@ $('#domains-import-btn').addEventListener('click', async () => {
   } catch (err) { errToast(err); }
 });
 
-function openDomainModal({ port, processType, projectName, label }) {
+function openDomainModal({ port, processType, projectName, label, suggest }) {
   $('#domain-modal-info').textContent = `Asignar subdominio a ${label} (puerto ${port})`;
-  $('#domain-input').value = '';
+  $('#domain-input').value = suggest || '';
   $('#domain-port').value = port;
   $('#domain-type').value = processType;
   $('#domain-project').value = projectName;
@@ -1232,6 +1271,7 @@ $('#settings-btn').addEventListener('click', async () => {
     $('#settings-known-services').value = Object.entries(s.knownServices || {})
       .map(([port, svc]) => `${port}:${svc.name}:${svc.icon || ''}`)
       .join('\n');
+    $('#settings-notify-url').value = s.notifyUrl || '';
     $('#settings-error').textContent = '';
     $('#settings-modal').classList.remove('hidden');
   } catch (err) { errToast(err); }
@@ -1257,6 +1297,7 @@ $('#settings-form').addEventListener('submit', async (e) => {
         protectedPorts: numList($('#settings-protected-ports').value),
         ignoredPatterns: strList($('#settings-ignored-patterns').value),
         scanDirs: strList($('#settings-scan-dirs').value),
+        notifyUrl: $('#settings-notify-url').value.trim(),
         knownServices,
       },
     });
@@ -1417,3 +1458,205 @@ initAuth();
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || isLocalClient())) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
 }
+
+// ---------- Row context menu ----------
+
+const ctxMenu = $('#ctx-menu');
+let ctxOpen = false;
+
+function hideCtxMenu() {
+  ctxMenu.classList.add('hidden');
+  ctxMenu.innerHTML = '';
+  ctxOpen = false;
+}
+
+function showCtxMenu(items, x, y) {
+  ctxMenu.innerHTML = items
+    .filter(Boolean)
+    .map((it, i) => it.sep
+      ? '<div class="ctx-sep"></div>'
+      : `<button class="ctx-item${it.danger ? ' ctx-danger' : ''}" data-i="${i}">${icon(it.icon)} ${esc(it.label)}</button>`)
+    .join('');
+  ctxMenu.classList.remove('hidden');
+  const rect = ctxMenu.getBoundingClientRect();
+  ctxMenu.style.left = `${Math.min(x, innerWidth - rect.width - 8)}px`;
+  ctxMenu.style.top = `${Math.min(y, innerHeight - rect.height - 8)}px`;
+  refreshIcons();
+  ctxMenu.querySelectorAll('.ctx-item').forEach((el) => {
+    el.addEventListener('click', () => { const it = items[parseInt(el.dataset.i, 10)]; hideCtxMenu(); it.run(); });
+  });
+  ctxOpen = true;
+}
+
+document.addEventListener('click', (e) => { if (ctxOpen && !ctxMenu.contains(e.target)) hideCtxMenu(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && ctxOpen) hideCtxMenu(); });
+
+function procFirstUrl(p) {
+  const port = (p.ports || [])[0];
+  return port ? `/p/${port}/` : null;
+}
+
+function slugify(s) {
+  return String(s || '').toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+}
+
+function openProcMenu(p, anchor, coords) {
+  const port = (p.ports || [])[0];
+  const net = netHost();
+  const cwd = p.identity.projectRoot || p.cwd || '';
+  const items = [];
+  if (port) {
+    items.push(
+      { icon: 'external-link', label: `Abrir :${port} (proxy)`, run: () => window.open(`/p/${port}/`, '_blank', 'noopener') },
+      { icon: 'house', label: `Abrir localhost:${port}`, run: () => window.open(`http://localhost:${port}`, '_blank', 'noopener') },
+    );
+    if (net) items.push({ icon: 'network', label: `Abrir ${net}:${port}`, run: () => window.open(`http://${net}:${port}`, '_blank', 'noopener') });
+    items.push({ icon: 'link', label: 'Copiar URL', run: () => { navigator.clipboard.writeText(`${location.origin}/p/${port}/`).catch(() => {}); toast('URL copiada', 'ok', '', 2000); } });
+    items.push({ sep: true });
+  }
+  items.push({ icon: 'info', label: 'Info del proceso', run: () => openDetailModal(p.pid) });
+  if (cwd) items.push({ icon: 'terminal', label: 'Terminal en esta carpeta', run: () => openTerm(cwd) });
+  if (!p.domain && port) {
+    items.push({ icon: 'globe', label: 'Exponer dominio…', run: () => openDomainModal({ port, processType: 'process', projectName: p.identity.projectRoot?.split('/').pop() || p.identity.label, label: p.identity.label, suggest: slugify(p.identity.projectRoot?.split('/').pop() || p.identity.label) }) });
+  }
+  if (!p.identity.unit) {
+    items.push({ icon: 'shield-plus', label: 'Convertir en servicio…', run: () => openServiceModal(p.pid, slugify(p.identity.projectRoot?.split('/').pop() || p.name || 'app')) });
+  }
+  if (!p.identity.protected) {
+    items.push({ sep: true }, { icon: 'power', label: 'Cerrar proceso', danger: true, run: () => openKillModal(p.pid) });
+  }
+  const r = anchor ? anchor.getBoundingClientRect() : null;
+  showCtxMenu(items, coords ? coords.x : r.right + 4, coords ? coords.y : r.bottom + 4);
+}
+
+// Right-click on a process row opens the same menu
+$('#ports-table').addEventListener('contextmenu', (e) => {
+  const tr = e.target.closest('tr');
+  if (!tr || tr.classList.contains('folder-row')) return;
+  const killBtn = tr.querySelector('.act-kill, .act-menu, .act-detail');
+  const pid = killBtn ? parseInt(killBtn.dataset.pid || '0', 10) : 0;
+  const p = portsData.find((x) => x.pid === pid);
+  if (!p) return;
+  e.preventDefault();
+  openProcMenu(p, null, { x: e.clientX, y: e.clientY });
+});
+
+// ---------- Convert to systemd service ----------
+
+let servicePid = null;
+
+async function openServiceModal(pid, suggested) {
+  servicePid = pid;
+  $('#service-name').value = suggested || '';
+  $('#service-preview').textContent = 'Cargando…';
+  $('#service-error').textContent = '';
+  $('#service-modal').classList.remove('hidden');
+  try {
+    const res = await api('/api/systemd/preview-service', { method: 'POST', body: { pid, name: $('#service-name').value } });
+    $('#service-preview').textContent = res.unit;
+  } catch (err) {
+    $('#service-preview').textContent = '';
+    $('#service-error').textContent = err.message;
+  }
+}
+
+$('#service-name').addEventListener('input', async () => {
+  if (!servicePid) return;
+  try {
+    const res = await api('/api/systemd/preview-service', { method: 'POST', body: { pid: servicePid, name: $('#service-name').value } });
+    $('#service-preview').textContent = res.unit;
+  } catch { /* preview is best-effort */ }
+});
+
+$('#service-cancel').addEventListener('click', () => $('#service-modal').classList.add('hidden'));
+
+$('#service-create').addEventListener('click', async () => {
+  const btn = $('#service-create');
+  btn.disabled = true;
+  try {
+    const res = await api('/api/systemd/create-service', { method: 'POST', body: { pid: servicePid, name: $('#service-name').value } });
+    $('#service-modal').classList.add('hidden');
+    toast(`Servicio ${res.service} creado e iniciado — ahora se reinicia solo`, 'ok');
+    loadPorts();
+  } catch (err) {
+    $('#service-error').textContent = err.message + (err.detail ? ` — ${err.detail}` : '');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ---------- Embedded terminal ----------
+
+let term = null;
+let termWs = null;
+let termFit = null;
+let termCwd = '';
+
+function openTerm(cwd) {
+  termCwd = cwd || '';
+  $('#term-modal').classList.remove('hidden');
+  if (!term) {
+    term = new Terminal({ cursorBlink: true, fontSize: 13, fontFamily: 'JetBrains Mono, monospace', theme: { background: '#0b0e14' } });
+    termFit = new FitAddon.FitAddon();
+    term.loadAddon(termFit);
+    term.open($('#term-host'));
+    term.onData((d) => { if (termWs?.readyState === 1) termWs.send(JSON.stringify({ t: 'i', d })); });
+    term.onResize(({ cols, rows }) => { if (termWs?.readyState === 1) termWs.send(JSON.stringify({ t: 'r', c: cols, r: rows })); });
+  }
+  requestAnimationFrame(() => { termFit.fit(); term.focus(); connectTerm(); });
+}
+
+function connectTerm() {
+  if (termWs) { try { termWs.close(); } catch { /* gone */ } }
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  termWs = new WebSocket(`${proto}://${location.host}/ws/term?c=${term.cols}&r=${term.rows}`);
+  termWs.binaryType = 'arraybuffer';
+  termWs.onopen = () => {
+    if (termCwd) termWs.send(JSON.stringify({ t: 'i', d: `cd ${JSON.stringify(termCwd)}\n` }));
+    termCwd = '';
+  };
+  termWs.onmessage = (e) => term.write(new Uint8Array(e.data));
+  termWs.onclose = () => term.write('\r\n[conexión cerrada]\r\n');
+}
+
+$('#term-btn').addEventListener('click', () => openTerm());
+$('#term-close').addEventListener('click', () => { $('#term-modal').classList.add('hidden'); if (termWs) termWs.close(); });
+$('#term-new').addEventListener('click', () => { if (termWs?.readyState === 1) termWs.send(JSON.stringify({ t: 'i', d: 'tmux kill-session -t pm-term 2>/dev/null\n' })); setTimeout(() => connectTerm(), 700); });
+window.addEventListener('resize', () => { if (term && !$('#term-modal').classList.contains('hidden')) termFit.fit(); });
+
+// ---------- QR pairing ----------
+
+$('#pair-btn').addEventListener('click', async () => {
+  $('#pair-qr').innerHTML = '';
+  $('#pair-url').textContent = '';
+  $('#pair-modal').classList.remove('hidden');
+  try {
+    const res = await api('/api/pair/create', { method: 'POST' });
+    const qr = qrcode(0, 'M');
+    qr.addData(res.url);
+    qr.make();
+    $('#pair-qr').innerHTML = qr.createSvgTag(6, 8);
+    $('#pair-url').textContent = res.url;
+  } catch (err) {
+    $('#pair-qr').innerHTML = '';
+    $('#pair-url').textContent = `Error: ${err.message}`;
+  }
+});
+
+$('#pair-close').addEventListener('click', () => $('#pair-modal').classList.add('hidden'));
+
+// ---------- Remote power ----------
+
+async function powerAction(action, word) {
+  const typed = prompt(`El servidor se va a ${word === 'REINICIAR' ? 'reiniciar' : 'apagar'} y el dashboard se desconecta.\n\nEscribí ${word} para confirmar:`);
+  if (typed === null) return;
+  try {
+    await api('/api/system/power', { method: 'POST', body: { action, confirm: typed.trim().toUpperCase() } });
+    toast(`${word === 'REINICIAR' ? 'Reinicio' : 'Apagado'} programado en 3 segundos`, 'ok');
+  } catch (err) { errToast(err); }
+}
+
+$('#power-reboot').addEventListener('click', () => powerAction('reboot', 'REINICIAR'));
+$('#power-off').addEventListener('click', () => powerAction('poweroff', 'APAGAR'));

@@ -766,3 +766,61 @@ summary { cursor: pointer; color: var(--text-dim); font-size: 0.83rem; padding: 
   .detail-grid { grid-template-columns: 1fr; }
   .server-stats .stat canvas.spark { display: none; }
 }
+
+/* --- Batch: remote-ops features --- */
+
+.health-ms { font-size: 10px; color: var(--text-muted, #8b93a5); margin-left: 2px; font-variant-numeric: tabular-nums; }
+
+/* Context menu */
+.ctx-menu {
+  position: fixed; z-index: 1000; min-width: 200px;
+  background: var(--bg-raised, #161a23); border: 1px solid var(--border, #262c3a);
+  border-radius: var(--radius-md, 8px); padding: 4px; box-shadow: 0 12px 32px rgba(0,0,0,.45);
+}
+.ctx-item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 7px 10px; border: 0; border-radius: 5px; background: none;
+  color: var(--text-primary, #e6e9ef); font: inherit; font-size: 12.5px; text-align: left; cursor: pointer;
+}
+.ctx-item:hover { background: var(--bg-hover, #1f2430); }
+.ctx-item .lucide-icon { width: 14px; height: 14px; opacity: .7; }
+.ctx-danger { color: var(--danger, #f87171); }
+.ctx-sep { height: 1px; background: var(--border, #262c3a); margin: 4px 6px; }
+
+/* Uptime strip (Kuma-style) */
+.uptime-strip { display: flex; align-items: center; gap: 1.5px; margin-top: 5px; flex-wrap: nowrap; }
+.uptime-strip .upt { width: 4px; height: 12px; border-radius: 1px; flex-shrink: 0; }
+.tick-up { background: var(--ok, #34d399); }
+.tick-warn { background: var(--warn, #fbbf24); }
+.tick-down { background: var(--danger, #f87171); }
+.uptime-pct { font-size: 10px; color: var(--text-muted, #8b93a5); margin-left: 6px; font-variant-numeric: tabular-nums; }
+
+/* Job summary chips (Topgrade-style) */
+.job-groups { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.job-group { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; padding: 3px 8px; border-radius: 99px; border: 1px solid var(--border, #262c3a); }
+.job-group .lucide-icon { width: 12px; height: 12px; }
+.job-group-ok { color: var(--ok, #34d399); }
+.job-group-failed { color: var(--danger, #f87171); border-color: color-mix(in srgb, var(--danger, #f87171) 40%, transparent); }
+.job-group-skipped { color: var(--text-muted, #8b93a5); }
+
+/* Terminal modal */
+.term-modal-content { width: min(920px, 94vw); }
+#term-host { height: 440px; padding: 8px; background: #0b0e14; border-radius: 0 0 var(--radius-md, 8px) var(--radius-md, 8px); }
+#term-host .xterm { height: 100%; }
+
+/* QR pairing */
+.pair-modal-content { width: min(380px, 92vw); text-align: center; }
+#pair-qr { display: grid; place-items: center; margin: 14px 0; }
+#pair-qr svg { width: 220px; height: 220px; background: #fff; border-radius: 8px; padding: 6px; }
+.pair-url { font-family: var(--font-mono, monospace); font-size: 11px; color: var(--text-muted, #8b93a5); word-break: break-all; user-select: all; }
+
+/* Service preview */
+.service-preview {
+  font-family: var(--font-mono, monospace); font-size: 11.5px; line-height: 1.5;
+  background: var(--bg-canvas, #0b0e14); border: 1px solid var(--border, #262c3a);
+  border-radius: 6px; padding: 10px; margin: 10px 0; overflow-x: auto; white-space: pre; max-height: 280px;
+}
+
+/* Settings power row */
+.settings-power { display: flex; align-items: center; gap: 8px; margin: 12px 0 4px; padding-top: 12px; border-top: 1px solid var(--border, #262c3a); }
+.settings-power-label { font-size: 12px; color: var(--text-muted, #8b93a5); margin-right: auto; }

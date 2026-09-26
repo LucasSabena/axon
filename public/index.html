@@ -104,6 +104,8 @@
               <div class="stat" title="Disco"><span class="stat-label">DISK</span><span class="stat-value" id="stat-disk">-</span></div>
               <div class="stat" title="Load average"><span class="stat-label">LOAD</span><span class="stat-value" id="stat-load">-</span></div>
             </div>
+            <button id="term-btn" class="btn-secondary" title="Terminal del servidor"><i data-lucide="terminal" class="lucide-icon"></i></button>
+            <button id="pair-btn" class="btn-secondary" title="Vincular otro dispositivo (QR)"><i data-lucide="qr-code" class="lucide-icon"></i></button>
             <button id="settings-btn" class="btn-secondary" title="Configuración"><i data-lucide="settings" class="lucide-icon"></i></button>
             <button id="logout-btn" class="btn-secondary" title="Salir"><i data-lucide="log-out" class="lucide-icon"></i></button>
           </header>
@@ -353,6 +355,7 @@
           <h3 id="job-title">Ejecutando</h3>
           <span id="job-status" class="logs-status logs-status-connecting">Corriendo</span>
           <div id="job-steps" class="job-steps"></div>
+          <div id="job-groups" class="job-groups"></div>
         </div>
         <div class="logs-modal-actions">
           <button type="button" id="job-close" class="btn-secondary">Cerrar</button>
@@ -421,6 +424,14 @@
         <label>Servicios conocidos por puerto (formato: puerto:nombre:icono-lucide por línea)
           <textarea id="settings-known-services" rows="3" placeholder="4095:OpenChamber:brain"></textarea>
         </label>
+        <label>Webhook de notificaciones (ntfy / Gotify / Discord — vacío para desactivar)
+          <input type="url" id="settings-notify-url" placeholder="https://ntfy.sh/mi-topic o webhook de Discord">
+        </label>
+        <div class="settings-power">
+          <span class="settings-power-label">Energía del servidor</span>
+          <button type="button" id="power-reboot" class="btn-secondary" title="Reinicia el servidor — el dashboard se desconecta"><i data-lucide="rotate-cw" class="lucide-icon"></i> Reiniciar</button>
+          <button type="button" id="power-off" class="btn-danger" title="Apaga el servidor — el dashboard se desconecta"><i data-lucide="power" class="lucide-icon"></i> Apagar</button>
+        </div>
         <div id="settings-error" class="error"></div>
         <div class="modal-actions">
           <button type="button" id="settings-cancel" class="btn-secondary">Cancelar</button>
@@ -430,9 +441,60 @@
     </div>
   </div>
 
+  <!-- Terminal modal -->
+  <div id="term-modal" class="modal hidden">
+    <div class="modal-content term-modal-content">
+      <div class="logs-modal-header">
+        <h3><i data-lucide="terminal" class="lucide-icon"></i> Terminal del servidor</h3>
+        <div class="logs-modal-actions">
+          <button id="term-new" class="btn-secondary" title="Sesión nueva de tmux">Nueva sesión</button>
+          <button id="term-close" class="btn-secondary">Cerrar</button>
+        </div>
+      </div>
+      <div id="term-host"></div>
+    </div>
+  </div>
+
+  <!-- QR pairing modal -->
+  <div id="pair-modal" class="modal hidden">
+    <div class="modal-content pair-modal-content">
+      <h3>Vincular dispositivo</h3>
+      <p class="listener-note">Escaneá el QR con el teléfono u otra compu — inicia sesión sin tipear la contraseña. Vence en 5 minutos y sirve una sola vez.</p>
+      <div id="pair-qr"></div>
+      <div id="pair-url" class="pair-url"></div>
+      <div class="modal-actions">
+        <button id="pair-close" class="btn-secondary">Cerrar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Make-service modal -->
+  <div id="service-modal" class="modal hidden">
+    <div class="modal-content">
+      <h3>Convertir en servicio</h3>
+      <p class="listener-note">Genera una unidad systemd de usuario que reinicia el proceso automáticamente.</p>
+      <label>Nombre del servicio
+        <input type="text" id="service-name" placeholder="mi-app">
+      </label>
+      <pre id="service-preview" class="service-preview"></pre>
+      <div id="service-error" class="error"></div>
+      <div class="modal-actions">
+        <button id="service-cancel" class="btn-secondary">Cancelar</button>
+        <button id="service-create" class="btn-primary">Crear e iniciar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Row context menu -->
+  <div id="ctx-menu" class="ctx-menu hidden"></div>
+
   <div id="toast-container"></div>
 
+  <link rel="stylesheet" href="/vendor/xterm.css">
+  <script src="/vendor/xterm.js"></script>
+  <script src="/vendor/xterm-addon-fit.js"></script>
+  <script src="/vendor/qrcode.js"></script>
   <script src="/vendor/lucide.min.js?v=10"></script>
-  <script src="/app.js?v=10"></script>
+  <script src="/app.js?v=11"></script>
 </body>
 </html>
