@@ -1,0 +1,12 @@
+{
+  "name": "Ports Manager",
+  "short_name": "Ports",
+  "description": "Server operations dashboard — ports, processes, projects, updates",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0c",
+  "theme_color": "#0a0a0c",
+  "icons": [
+    { "src": "/icons/app.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

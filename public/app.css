@@ -478,6 +478,13 @@ td.num { white-space: nowrap; font-variant-numeric: tabular-nums; font-family: v
 .link-network:hover { background: var(--warn); color: #1a1400; }
 .link-network.link-dead { opacity: 0.4; cursor: not-allowed; text-decoration: line-through; }
 .link-network.link-dead:hover { background: var(--warn-soft); color: var(--warn); }
+.link-proxy {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-family: var(--font-mono); font-size: 0.72rem; color: var(--accent);
+  background: var(--accent-soft); padding: 2px 8px; border-radius: 99px;
+}
+.link-proxy:hover { background: var(--accent); color: var(--bg-canvas); }
+.link-proxy svg { width: 10px; height: 10px; }
 
 .health-dot {
   width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex-shrink: 0;
@@ -486,6 +493,7 @@ td.num { white-space: nowrap; font-variant-numeric: tabular-nums; font-family: v
 .health-warn { background: var(--warn); }
 .health-bad { background: var(--danger); }
 .health-unknown { background: var(--text-faint); opacity: 0.5; }
+.nav-count.nav-alert { color: var(--danger); background: var(--danger-soft, rgba(255,80,80,.12)); }
 .domain-status { white-space: nowrap; }
 .domain-status .health-dot { margin-right: 2px; }
 tr.domain-dead .domain-link { opacity: 0.55; text-decoration: line-through; }

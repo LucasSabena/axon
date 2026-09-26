@@ -9,6 +9,7 @@ import {
   setSessionCookie,
   clearSessionCookie,
   getSession,
+  verifySessionToken,
 } from './auth';
 import { loadConfig, saveConfig } from './config';
 import { getServerStats, getServerHosts } from './stats';
@@ -99,6 +100,7 @@ app.get('/api/me', async (c) => {
 });
 
 app.use('/api/*', requireAuth);
+app.use('/p/*', requireAuth);
 
 // ---------- Ports (core) ----------
 
@@ -640,6 +642,63 @@ app.get('/api/stats', async (c) => {
   return c.json({ ok: true, stats });
 });
 
+// ---------- Port proxy ----------
+// /p/:port/... → http://127.0.0.1:port/... — lets remote clients (LAN/Tailscale)
+// reach services even when they only bind the host's loopback interface.
+const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'transfer-encoding', 'te', 'trailer', 'upgrade', 'proxy-authorization', 'proxy-authenticate']);
+
+app.all('/p/:port/*', async (c) => {
+  const port = parseInt(c.req.param('port'), 10);
+  if (!port || port > 65535) return fail(c, 400, 'Puerto inválido');
+  const url = new URL(c.req.url);
+  const rest = c.req.path.slice(`/p/${port}`.length) || '/';
+  const target = `http://127.0.0.1:${port}${rest}${url.search}`;
+
+  const headers = new Headers();
+  for (const [k, v] of c.req.raw.headers.entries()) {
+    if (!HOP_BY_HOP.has(k.toLowerCase()) && k.toLowerCase() !== 'host') headers.set(k, v);
+  }
+  headers.set('host', `127.0.0.1:${port}`);
+  headers.set('x-forwarded-prefix', `/p/${port}`);
+
+  let upstream: Response;
+  try {
+    upstream = await fetch(target, {
+      method: c.req.method,
+      headers,
+      body: ['GET', 'HEAD'].includes(c.req.method) ? undefined : c.req.raw.body,
+      redirect: 'manual',
+      // @ts-expect-error bun streaming
+      duplex: 'half',
+    });
+  } catch {
+    return c.html(`<body style="background:#0a0a0c;color:#ccc;font-family:monospace;display:grid;place-items:center;height:100vh"><div>Nada responde en el puerto ${port}.<br>El proceso está detenido o el puerto es incorrecto.</div></body>`, 502);
+  }
+
+  const resHeaders = new Headers();
+  for (const [k, v] of upstream.headers.entries()) {
+    const kl = k.toLowerCase();
+    if (HOP_BY_HOP.has(kl) || kl === 'x-frame-options') continue;
+    // keep redirects inside the proxy prefix
+    if (kl === 'location' && v.startsWith('/')) { resHeaders.set(k, `/p/${port}${v}`); continue; }
+    if (kl === 'content-security-policy') {
+      resHeaders.set(k, v.replace(/frame-ancestors[^;]*(;|$)/g, ''));
+      continue;
+    }
+    resHeaders.set(k, v);
+  }
+
+  const type = upstream.headers.get('content-type') || '';
+  if (type.includes('text/html')) {
+    let html = await upstream.text();
+    // rewrite root-absolute URLs so assets route back through the proxy
+    html = html.replace(/((?:href|src|action|srcset)\s*=\s*["'])\/(?!\/|p\/)/g, `$1/p/${port}/`);
+    return new Response(html, { status: upstream.status, headers: resHeaders });
+  }
+  return new Response(upstream.body, { status: upstream.status, headers: resHeaders });
+});
+app.get('/p/:port', (c) => c.redirect(`/p/${c.req.param('port')}/`));
+
 // ---------- Static ----------
 
 // Static assets must not be served stale — index.html/app.js change on every deploy.
@@ -659,4 +718,36 @@ app.onError((err, c) => {
   return fail(c, 500, 'Error interno', { detail: String(err) });
 });
 
-export default { port: PORT, fetch: app.fetch };
+export default {
+  port: PORT,
+  async fetch(req: Request, server: Bun.Server) {
+    const url = new URL(req.url);
+    const wsMatch = url.pathname.match(/^\/p\/(\d+)(\/.*)?$/);
+    if (wsMatch && req.headers.get('upgrade')?.toLowerCase() === 'websocket') {
+      const token = req.headers.get('cookie')?.match(/ports_session=([^;]+)/)?.[1];
+      if (!token || !(await verifySessionToken(token))) return new Response('Unauthorized', { status: 401 });
+      const upstream = new WebSocket(`ws://127.0.0.1:${wsMatch[1]}${wsMatch[2] || '/'}${url.search}`);
+      upstream.binaryType = 'arraybuffer';
+      if (server.upgrade(req, { data: { upstream, pending: [] as unknown[] } })) return;
+      upstream.close();
+      return new Response('WS upgrade failed', { status: 500 });
+    }
+    return app.fetch(req, server);
+  },
+  websocket: {
+    open(ws: Bun.ServerWebSocket<{ upstream: WebSocket; pending: unknown[] }>) {
+      const up = ws.data.upstream;
+      up.onopen = () => { for (const m of ws.data.pending.splice(0)) up.send(m as never); };
+      up.onmessage = (e) => { try { ws.send(e.data as string | ArrayBuffer); } catch { /* closed */ } };
+      up.onclose = up.onerror = () => { try { ws.close(); } catch { /* closed */ } };
+    },
+    message(ws: Bun.ServerWebSocket<{ upstream: WebSocket; pending: unknown[] }>, msg: string | Buffer) {
+      const up = ws.data.upstream;
+      if (up.readyState === WebSocket.OPEN) up.send(msg as never);
+      else ws.data.pending.push(msg);
+    },
+    close(ws: Bun.ServerWebSocket<{ upstream: WebSocket; pending: unknown[] }>) {
+      try { ws.data.upstream.close(); } catch { /* already closed */ }
+    },
+  },
+};

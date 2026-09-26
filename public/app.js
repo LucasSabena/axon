@@ -250,9 +250,26 @@ function remoteReachable(port, listeners) {
   return ls.some((l) => !isLoopbackAddr(l.address));
 }
 
+function isLocalClient() {
+  return ['localhost', '127.0.0.1', '::1', '[::1]'].includes(location.hostname);
+}
+
 function portLinksHtml(port, listeners) {
   const dot = healthDotFor(port, listeners);
   const net = netHost();
+  const proxy = `<a class="link-proxy" href="/p/${port}/" target="_blank" rel="noopener" title="Abrir :${port} a través del proxy (funciona incluso si el proceso solo escucha en 127.0.0.1)">${icon('route')} :${port}</a>`;
+
+  // Remote client (laptop via Tailscale/domain): localhost links don't reach the
+  // server — route everything through the built-in proxy, or direct host:port
+  // when we browsed by raw IP and the service binds a public interface.
+  if (!isLocalClient()) {
+    const hostIsIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(location.hostname);
+    const direct = hostIsIp && remoteReachable(port, listeners)
+      ? `<a class="link-network" href="http://${location.hostname}:${port}" target="_blank" rel="noopener" title="Directo al servidor">${esc(location.hostname)}:${port}</a>`
+      : '';
+    return `<span class="port-links">${dot}${direct}${proxy}</span>`;
+  }
+
   const local = `${dot}<a class="link-local" href="http://localhost:${port}" target="_blank" rel="noopener" title="Abrir localhost:${port}">localhost:${port}</a>`;
   let remote = '';
   if (net) {
@@ -789,6 +806,11 @@ $('#jobs-history').addEventListener('click', async (e) => {
 $('#jobs-refresh').addEventListener('click', loadJobsHistory);
 
 function openJobModal(job) {
+  // Ask once for notification permission when the user first runs a job —
+  // job completion then alerts even with the tab unfocused (remote usage).
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission().catch(() => {});
+  }
   currentJobId = job.id;
   $('#job-modal').classList.remove('hidden');
   renderJob(job);
@@ -812,6 +834,13 @@ async function pollJob() {
         toast(`${job.title}: ${failed.length} paso(s) fallaron`, 'error', hints, 10000);
       } else {
         toast(`${job.title} completado`, 'ok');
+      }
+      // OS notification when the tab isn't focused — useful when managing remotely
+      if ((document.hidden || !document.hasFocus()) && 'Notification' in window && Notification.permission === 'granted') {
+        new Notification(job.title, {
+          body: failed.length ? `${failed.length} paso(s) fallaron` : 'Completado',
+          icon: '/icons/app.svg',
+        });
       }
       loadPrograms().catch(() => {});
       loadJobsHistory().catch(() => {});
@@ -1112,6 +1141,14 @@ async function loadDomainStatuses() {
       cell.title = s.reason || (s.state === 'up' ? `Responde HTTP ${s.httpStatus}` : '');
       cell.closest('tr').classList.toggle('domain-dead', s.state === 'down');
     }
+    // Nav badge turns red when any domain is down
+    const down = Object.values(statuses || {}).filter((s) => s.state === 'down').length;
+    const ncm = $('#nav-count-domains');
+    if (ncm) {
+      ncm.textContent = down ? `${Object.keys(statuses).length} · ${down} caídos` : Object.keys(statuses).length || '';
+      ncm.classList.toggle('nav-alert', down > 0);
+      ncm.title = down ? `${down} dominio(s) caídos` : '';
+    }
   } catch { /* statuses are best-effort */ }
 }
 
@@ -1302,8 +1339,11 @@ function cmdkCommands() {
   for (const p of portsData) {
     const label = p.identity.label;
     for (const port of p.ports.slice(0, 4)) {
-      cmds.push({ icon: 'external-link', label: `Abrir ${label} :${port} (local)`, hint: 'localhost', run: () => window.open(`http://localhost:${port}`, '_blank') });
-      if (net) cmds.push({ icon: 'external-link', label: `Abrir ${label} :${port} (red)`, hint: net, run: () => window.open(`http://${net}:${port}`, '_blank') });
+      if (isLocalClient()) {
+        cmds.push({ icon: 'external-link', label: `Abrir ${label} :${port} (local)`, hint: 'localhost', run: () => window.open(`http://localhost:${port}`, '_blank') });
+        if (net) cmds.push({ icon: 'external-link', label: `Abrir ${label} :${port} (red)`, hint: net, run: () => window.open(`http://${net}:${port}`, '_blank') });
+      }
+      cmds.push({ icon: 'route', label: `Abrir ${label} :${port} (proxy)`, hint: 'funciona remoto', run: () => window.open(`/p/${port}/`, '_blank') });
     }
     if (p.pid > 0 && !p.identity.protected) {
       cmds.push({ icon: 'power', label: `Cerrar ${label} (PID ${p.pid})`, hint: 'proceso', run: () => openKillModal(p.pid) });
@@ -1372,3 +1412,8 @@ document.addEventListener('keydown', (e) => {
 
 refreshIcons();
 initAuth();
+
+// PWA: installable from laptop/phone (secure context: https tunnel or localhost)
+if ('serviceWorker' in navigator && (location.protocol === 'https:' || isLocalClient())) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}

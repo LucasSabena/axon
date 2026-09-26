@@ -96,6 +96,11 @@ export async function createSession(username: string): Promise<string> {
   return sign({ username, exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 });
 }
 
+// For the raw WS upgrade path (outside Hono middleware).
+export async function verifySessionToken(token: string): Promise<SessionPayload | null> {
+  return verify(token);
+}
+
 export async function getSession(c: Context): Promise<SessionPayload | null> {
   const cookie = c.req.header('cookie') || '';
   const match = cookie.match(new RegExp(`${COOKIE_NAME}=([^;]+)`));
