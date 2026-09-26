@@ -1004,9 +1004,16 @@ export default {
     if (wsMatch && isWs) {
       const token = req.headers.get('cookie')?.match(/ports_session=([^;]+)/)?.[1];
       if (!token || !(await verifySessionToken(token))) return new Response('Unauthorized', { status: 401 });
-      const upstream = new WebSocket(`ws://127.0.0.1:${wsMatch[1]}${wsMatch[2] || '/'}${url.search}`);
+      // Forward the client's subprotocol list (noVNC requires 'binary') both
+      // to the upstream socket and back in the 101 response.
+      const protos = (req.headers.get('sec-websocket-protocol') || '')
+        .split(',').map(s => s.trim()).filter(Boolean);
+      const upstream = protos.length
+        ? new WebSocket(`ws://127.0.0.1:${wsMatch[1]}${wsMatch[2] || '/'}${url.search}`, protos)
+        : new WebSocket(`ws://127.0.0.1:${wsMatch[1]}${wsMatch[2] || '/'}${url.search}`);
       upstream.binaryType = 'arraybuffer';
-      if (server.upgrade(req, { data: { kind: 'proxy', upstream, pending: [] as unknown[] } satisfies WsData })) return;
+      const upgradeHeaders = protos.length ? { 'Sec-WebSocket-Protocol': protos[0] } : undefined;
+      if (server.upgrade(req, { headers: upgradeHeaders, data: { kind: 'proxy', upstream, pending: [] as unknown[] } satisfies WsData })) return;
       upstream.close();
       return new Response('WS upgrade failed', { status: 500 });
     }
