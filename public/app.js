@@ -587,9 +587,11 @@ async function loadPrograms() {
     programsData = programs || [];
     $('#programs-updated').textContent = `Actualizado ${new Date().toLocaleTimeString()}`;
     renderPrograms(programsData);
-    const pending = programsData.filter((p) => p.pendingUpdates).length;
+    const pending = programsData.filter((p) => p.pendingUpdates || p.latestVersion).length;
     const nc = $('#nav-count-programs');
     if (nc) { nc.textContent = pending || ''; nc.classList.toggle('nav-alert', pending > 0); }
+    // Cargar el inventario una sola vez al entrar a la sección
+    if (!installedData) loadInstalled().catch(() => {});
   } catch (err) {
     errToast(err);
   }
@@ -605,8 +607,12 @@ function renderPrograms(programs) {
 
   for (const p of [...installed, ...notInstalled]) {
     const card = document.createElement('div');
-    card.className = `program-card ${p.installed ? '' : 'program-off'}`;
+    const hasUpdate = !!(p.latestVersion || p.pendingUpdates);
+    card.className = `program-card ${p.installed ? '' : 'program-off'} ${hasUpdate ? 'has-update' : ''}`;
     const stepsInfo = p.steps.map((s) => `<code>${esc(s.cmd)}</code> <span class="listener-note">${esc(s.user)}</span>`).join('<br>');
+    const versionBadge = p.latestVersion
+      ? `<span class="badge badge-bun" title="Hay una versión nueva">${icon('arrow-up')} ${esc(p.version || '?')} → ${esc(p.latestVersion)}</span>`
+      : p.pendingUpdates ? `<span class="badge badge-bun">${esc(p.pendingUpdates)} updates</span>` : '';
     card.innerHTML = `
       <div class="program-head">
         <span class="program-icon">${icon(lucideName(p.icon, 'package'))}</span>
@@ -614,14 +620,14 @@ function renderPrograms(programs) {
           <strong>${esc(p.name)}</strong>
           <div class="program-meta">
             <span class="badge badge-${p.channel === 'apt' ? 'docker' : p.channel === 'pnpm' ? 'node' : 'other'}">${esc(p.channel)}</span>
-            ${p.version ? `<span class="listener-note">${esc(p.version)}</span>` : ''}
-            ${p.pendingUpdates ? `<span class="badge badge-bun">${esc(p.pendingUpdates)} updates</span>` : ''}
+            ${p.version && !p.latestVersion ? `<span class="listener-note">${esc(p.version)}</span>` : ''}
+            ${versionBadge}
           </div>
         </div>
       </div>
       ${p.desc ? `<p class="program-desc">${esc(p.desc)}</p>` : ''}
       <details class="program-steps"><summary>Comandos</summary>${stepsInfo}</details>
-      <button class="btn-action program-update" data-id="${esc(p.id)}" ${p.installed ? '' : 'disabled'}>
+      <button class="${hasUpdate ? 'btn-primary' : 'btn-action'} program-update" data-id="${esc(p.id)}" ${p.installed ? '' : 'disabled'}>
         ${p.installed ? `${icon('arrow-up-circle')} Actualizar` : 'No instalado'}
       </button>`;
     grid.appendChild(card);
@@ -674,6 +680,7 @@ function renderInstalled() {
     <span class="listener-note">${icon('package')} ${packages.apt.total} paquetes apt</span>
     <span class="listener-note">${icon('archive')} ${packages.snaps.length} snaps</span>
     <span class="listener-note">${icon('terminal')} ${packages.pnpmGlobals.length} globales pnpm</span>
+    <span class="listener-note">${icon('cookie')} ${(packages.bunGlobals || []).length} globales bun</span>
     <span class="listener-note">${icon('monitor')} ${desktopApps.length} apps desktop</span>`;
   renderInstalledFilter();
 }
@@ -682,13 +689,29 @@ function renderInstalledFilter() {
   if (!installedData) return;
   const q = ($('#installed-filter').value || '').toLowerCase();
   const grid = $('#installed-apps');
-  const apps = installedData.desktopApps.filter((a) => a.name.toLowerCase().includes(q));
-  grid.innerHTML = apps.slice(0, 200).map((a) => `
+  const { desktopApps, packages } = installedData;
+  const cliItems = [
+    ...(packages.pnpmGlobals || []).map((g) => ({ name: g.name, version: g.version, source: 'pnpm' })),
+    ...(packages.bunGlobals || []).map((g) => ({ name: g.name, version: g.version, source: 'bun' })),
+    ...(packages.snaps || []).map((s) => ({ name: s.name, version: s.version, source: 'snap' })),
+  ];
+  const cliHtml = cliItems
+    .filter((c) => c.name.toLowerCase().includes(q))
+    .map((c) => `
+      <div class="app-chip" title="${esc(c.name)}">
+        ${icon('terminal')}
+        <span class="mono">${esc(c.name)}</span>
+        ${c.version ? `<span class="listener-note">${esc(c.version)}</span>` : ''}
+        <span class="chip-src">${esc(c.source)}</span>
+      </div>`).join('');
+  const apps = desktopApps.filter((a) => a.name.toLowerCase().includes(q));
+  const desktopHtml = apps.map((a) => `
     <div class="app-chip" title="${esc(a.exec || '')}">
       ${a.icon ? `<img src="/api/icons/${encodeURIComponent(a.icon)}" onerror="this.remove()" alt="">` : icon('monitor')}
       <span>${esc(a.name)}</span>
-      <span class="listener-note">${esc(a.source)}</span>
+      <span class="chip-src">${esc(a.source)}</span>
     </div>`).join('');
+  grid.innerHTML = cliHtml + desktopHtml;
   refreshIcons();
 }
 

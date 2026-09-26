@@ -128,6 +128,7 @@ export interface ProgramDef {
   icon: string;
   desc?: string;
   channel: 'apt' | 'snap' | 'pnpm' | 'bun' | 'uv' | 'pipx' | 'cargo' | 'script';
+  npmPkg?: string; // npm package name — enables `npm view` latest-version check
   detect: { cmd: string; user: 'root' | 'user' }[];
   version?: { cmd: string; user: 'root' | 'user' };
   updatesCheck?: { cmd: string; user: 'root' | 'user' };
@@ -142,6 +143,7 @@ export interface ProgramView {
   channel: ProgramDef['channel'];
   installed: boolean;
   version?: string;
+  latestVersion?: string;
   pendingUpdates?: string;
   steps: { label: string; cmd: string; user: string }[];
 }
@@ -150,8 +152,9 @@ export interface DesktopApp {
   name: string;
   icon?: string;
   exec?: string;
-  source: 'desktop' | 'snap';
+  source: 'desktop' | 'snap' | 'pnpm' | 'bun';
   packageName?: string;
+  version?: string;
 }
 
 export interface JobStepState {
