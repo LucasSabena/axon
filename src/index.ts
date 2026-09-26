@@ -1,24 +1,53 @@
 import { Hono } from 'hono';
 import { serveStatic } from 'hono/bun';
-import { $ } from 'bun';
-import { readFile, writeFile, readdir } from 'fs/promises';
-import * as path from 'path';
+import { readFile } from 'fs/promises';
 import {
-  detectProcesses,
-  detectDockerContainers,
-  killProcess,
-  killDockerContainer,
-  getListeningPorts,
-  getProcessDetails,
-  getProcessEnv,
-  getProcessStats,
-  findLogSources,
-  getDockerContainerEnv,
-  getDockerContainerStats,
-  getDockerContainerStartTime,
-  getDockerContainerCreatedAt,
-  getDockerContainerLogs,
-} from './detector';
+  requireAuth,
+  verifyPassword,
+  createSession,
+  setSessionCookie,
+  clearSessionCookie,
+  getSession,
+} from './auth';
+import { loadConfig, saveConfig } from './config';
+import { getServerStats, getServerHosts } from './stats';
+import { setHostUser, hostExec } from './host';
+import {
+  configurePorts,
+  listPortProcesses,
+  killPlan,
+  killProcessTree,
+  getProcessDetail,
+} from './ports';
+import { getJob, listJobs, runJob } from './jobs';
+import {
+  detectPrograms,
+  installedPackagesSummary,
+  listDesktopApps,
+  programById,
+  resolveIcon,
+  searchAptPackages,
+} from './programs';
+import {
+  initProjects,
+  detectProjectsOnDisk,
+  refreshRunning,
+  getProjects,
+  getProjectById,
+  saveProjects,
+  startProject,
+  stopProject,
+  installDeps,
+  installCommand,
+  projectLogs,
+} from './projects';
+import {
+  listContainers,
+  containerDetail,
+  containerStats,
+  containerLogs,
+  stopContainer,
+} from './docker';
 import {
   createDnsRecord,
   deleteDnsRecord,
@@ -27,85 +56,40 @@ import {
   listAllDnsRecords,
   getRemoteTunnelConfig,
 } from './cloudflare';
-import {
-  requireAuth,
-  hashPassword,
-  verifyPassword,
-  createSession,
-  setSessionCookie,
-  clearSessionCookie,
-  getSession,
-} from './auth';
-import { getServerStats } from './stats';
-import {
-  initProjectManager,
-  bindProjectCommandToNetwork,
-  normalizeProjectCommand,
-  getProjects,
-  refreshProjects,
-  getProjectById,
-  inferCommandForProject,
-  loadProjects,
-  detectProjectsFromDisk,
-  saveProjects,
-  startProject,
-  stopProject,
-  deleteProject,
-  installProjectDependencies,
-  getProjectLogs,
-  subscribeToLogs,
-} from './projectManager';
-import type { AppConfig, DomainMapping, ProcessDetails, Project } from './types';
+import type { DomainMapping, Project } from './types';
 
-const CONFIG_PATH = process.env.CONFIG_PATH || '/app/data/config.json';
 const PORT = parseInt(process.env.PORT || '3457', 10);
 const BASE_DOMAIN = process.env.BASE_DOMAIN || 'example.com';
 
-async function loadConfig(): Promise<AppConfig> {
-  try {
-    const content = await readFile(CONFIG_PATH, 'utf-8');
-    return JSON.parse(content);
-  } catch {
-    return {
-      auth: { username: 'admin', passwordHash: await hashPassword('admin') },
-      domains: [],
-      settings: { scanIntervalMs: 5000, protectedPids: [1], protectedPorts: [22, 80, 443], ignoredPatterns: [] },
-    };
-  }
-}
+let config = await loadConfig();
+configurePorts(config.settings);
+setHostUser(config.settings.hostUser);
+initProjects(config, saveConfig);
 
-async function saveConfig(config: AppConfig): Promise<void> {
-  await writeFile(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf-8');
-}
+const app = new Hono();
 
-function generateId(): string {
-  return Math.random().toString(36).substring(2, 15);
+function fail(c: any, status: number, error: string, extra?: Record<string, unknown>) {
+  return c.json({ ok: false, error, ...extra }, status);
 }
 
 function escapeRegExp(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-const app = new Hono();
-let config = await loadConfig();
-initProjectManager(config, saveConfig);
-await loadProjects();
+// ---------- Auth ----------
 
-// Auth
 app.post('/api/login', async (c) => {
-  const { username, password } = await c.req.json<{ username: string; password: string }>();
+  const { username, password } = await c.req.json<{ username: string; password: string }>().catch(() => ({ username: '', password: '' }));
   const valid = username === config.auth.username && (await verifyPassword(password, config.auth.passwordHash));
-  if (!valid) {
-    return c.json({ error: 'Invalid credentials' }, 401);
-  }
+  if (!valid) return fail(c, 401, 'Credenciales inválidas');
   const token = await createSession(username);
   setSessionCookie(c, token);
-  return c.json({ success: true });
+  return c.json({ ok: true });
 });
 
 app.post('/api/logout', async (c) => {
   clearSessionCookie(c);
-  return c.json({ success: true });
+  return c.json({ ok: true });
 });
 
 app.get('/api/me', async (c) => {
@@ -113,438 +97,358 @@ app.get('/api/me', async (c) => {
   return c.json({ authenticated: !!session, username: session?.username || null });
 });
 
-
-
-// Protected API
 app.use('/api/*', requireAuth);
 
-app.get('/api/projects', async (c) => {
-  const projects = await refreshProjects();
-  const enriched = await Promise.all(
-    projects.map(async (p) => {
-      const inferred = p.autoDetect ? inferCommandForProject(p) || p.command : p.command;
-      const command = inferred ? bindProjectCommandToNetwork(p, inferred) : inferred;
-      let needsInstall = false;
-      if ((p.type === 'node' || p.type === 'bun') && !p.running) {
-        const nodeModulesPath = path.join(p.cwd, 'node_modules');
-        try {
-          const entries = await readdir(nodeModulesPath);
-          needsInstall = entries.length === 0;
-        } catch {
-          needsInstall = true;
-        }
-      } else if (p.type === 'python' && !p.running) {
-        try {
-          await readFile(path.join(p.cwd, 'requirements.txt'), 'utf-8');
-          needsInstall = true;
-        } catch {
-          needsInstall = false;
-        }
-      }
-      return { ...p, command, needsInstall };
-    })
+// ---------- Ports (core) ----------
+
+app.get('/api/ports', async (c) => {
+  try {
+    const [processes, hosts] = await Promise.all([
+      listPortProcesses(),
+      getServerHosts().catch(() => []),
+    ]);
+    for (const p of processes) {
+      const domain = config.domains.find(
+        (d) => d.processType === 'process' && p.ports.includes(d.port) && d.projectName === p.identity.label
+      );
+      (p as any).domain = domain;
+    }
+    // Best host to reach this server: prefer Tailscale, then LAN, then whatever's first.
+    const networkHost = (
+      hosts.find((h) => h.kind === 'tailscale') ||
+      hosts.find((h) => h.kind === 'lan') ||
+      hosts[0]
+    )?.host || '';
+    // First TCP port of the code-server process (if any is listening).
+    const codeProc = processes.find(
+      (p) => p.cmd.includes('code-server') || p.name.includes('code-server')
+    );
+    const codeServerPort = codeProc
+      ? (codeProc.listeners
+          .filter((l) => l.proto === 'tcp')
+          .map((l) => l.port)
+          .sort((a, b) => a - b)[0] ?? null)
+      : null;
+    const editorUrl = (config.settings as any).editorUrl || null;
+    return c.json({ ok: true, processes, networkHost, codeServerPort, editorUrl });
+  } catch (err) {
+    return fail(c, 500, 'No se pudo escanear los puertos', { detail: String(err) });
+  }
+});
+
+app.get('/api/ports/:pid/plan', async (c) => {
+  const pid = parseInt(c.req.param('pid'), 10);
+  const plan = await killPlan(pid);
+  if (!plan) return fail(c, 404, 'El proceso ya no existe');
+  return c.json({ ok: true, plan });
+});
+
+app.post('/api/ports/:pid/kill', async (c) => {
+  const pid = parseInt(c.req.param('pid'), 10);
+  const plan = await killPlan(pid);
+  if (!plan) return fail(c, 404, 'El proceso ya no existe');
+  if (plan.blocked) return fail(c, 403, `No se puede cerrar: ${plan.blocked}`);
+  const result = await killProcessTree(pid);
+  if (!result.ok) return fail(c, 500, 'No se pudo cerrar el proceso', { detail: result.error });
+  return c.json({ ok: true, killed: result.killed });
+});
+
+// Stop a systemd unit that supervises a process — the only way to really
+// kill a service with Restart=always. Optionally disable it so it doesn't
+// come back at next login/boot.
+app.post('/api/systemd/stop', async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const unit = String(body.unit || '');
+  const scope = body.scope === 'system' ? 'system' : 'user';
+  const disable = body.disable === true;
+  if (!/^[A-Za-z0-9_.@:-]+\.(service|socket|timer|scope)$/.test(unit)) {
+    return fail(c, 400, 'Nombre de unidad inválido');
+  }
+  const action = disable ? 'disable --now' : 'stop';
+  const cmd = scope === 'user'
+    ? `export XDG_RUNTIME_DIR=/run/user/$(id -u); systemctl --user ${action} ${unit}`
+    : `systemctl ${action} ${unit}`;
+  const res = await hostExec(cmd, { user: scope === 'user' ? 'user' : 'root', timeoutMs: 25_000 });
+  if (!res.ok) {
+    return fail(c, 500, `systemctl ${action} ${unit} falló`, {
+      detail: res.stderr || res.stdout || `exit ${res.code}`,
+    });
+  }
+  return c.json({ ok: true, unit, action });
+});
+
+app.get('/api/ports/:pid/detail', async (c) => {
+  const pid = parseInt(c.req.param('pid'), 10);
+  const detail = await getProcessDetail(pid);
+  if (!detail) return fail(c, 404, 'El proceso ya no existe');
+  return c.json({ ok: true, detail });
+});
+
+app.get('/api/ports/health', async (c) => {
+  const port = parseInt(c.req.query('port') || '', 10);
+  if (!port) return fail(c, 400, 'Falta port');
+  const proto = [443, 8443, 9443].includes(port) ? 'https' : 'http';
+  try {
+    const res = await fetch(`${proto}://127.0.0.1:${port}/`, {
+      signal: AbortSignal.timeout(2500),
+      redirect: 'manual',
+    });
+    return c.json({ ok: true, status: res.status, responds: true });
+  } catch (err: any) {
+    const code = err?.cause?.code || err?.code || '';
+    return c.json({ ok: true, responds: false, detail: code || String(err).slice(0, 200) });
+  }
+});
+
+// ---------- Programs / updater ----------
+
+app.get('/api/programs', async (c) => {
+  const programs = await detectPrograms();
+  return c.json({ ok: true, programs });
+});
+
+app.get('/api/programs/installed', async (c) => {
+  const [desktopApps, packages] = await Promise.all([
+    listDesktopApps().catch(() => []),
+    installedPackagesSummary().catch(() => ({ apt: { total: 0 }, snaps: [], pnpmGlobals: [] })),
+  ]);
+  return c.json({ ok: true, desktopApps, packages });
+});
+
+app.get('/api/programs/packages', async (c) => {
+  const q = c.req.query('q') || '';
+  const packages = await searchAptPackages(q);
+  return c.json({ ok: true, packages });
+});
+
+app.post('/api/programs/:id/update', async (c) => {
+  const def = programById(c.req.param('id'));
+  if (!def) return fail(c, 404, 'Programa desconocido');
+  const running = listJobs().find((j) => j.status === 'running' && j.title === def.name);
+  if (running) return c.json({ ok: true, job: running, already: true });
+  const job = runJob(def.name, def.steps.map((s) => ({ ...s, group: def.name })));
+  return c.json({ ok: true, job });
+});
+
+app.post('/api/programs/update-all', async (c) => {
+  const programs = await detectPrograms();
+  const steps = programs.filter((p) => p.installed).flatMap((p) =>
+    (programById(p.id)?.steps || []).map((s) => ({ ...s, label: `${p.name} — ${s.label}`, group: p.name }))
   );
-  return c.json({ projects: enriched });
+  if (!steps.length) return fail(c, 400, 'No hay programas detectados para actualizar');
+  const job = runJob('Actualización completa', steps);
+  return c.json({ ok: true, job });
+});
+
+app.get('/api/jobs', async (c) => c.json({ ok: true, jobs: listJobs() }));
+
+app.get('/api/jobs/:id', async (c) => {
+  const job = getJob(c.req.param('id'));
+  if (!job) return fail(c, 404, 'Job no encontrado');
+  return c.json({ ok: true, job });
+});
+
+// Icon resolver for .desktop Icon= values
+app.get('/api/icons/:name', async (c) => {
+  const name = c.req.param('name');
+  const file = await resolveIcon(name);
+  if (!file) return fail(c, 404, 'Icono no encontrado');
+  try {
+    const buf = await readFile(file);
+    const ext = file.endsWith('.svg') ? 'image/svg+xml' : file.endsWith('.xpm') ? 'image/x-xpixmap' : 'image/png';
+    return new Response(buf, { headers: { 'Content-Type': ext, 'Cache-Control': 'public, max-age=86400' } });
+  } catch {
+    return fail(c, 404, 'Icono no encontrado');
+  }
+});
+
+// ---------- Projects ----------
+
+app.get('/api/projects', async (c) => {
+  const projects = await refreshRunning();
+  const enriched = projects.map((p) => ({
+    ...p,
+    installCmd: installCommand(p),
+  }));
+  return c.json({ ok: true, projects: enriched });
 });
 
 app.post('/api/projects/detect', async (c) => {
-  const detected = await detectProjectsFromDisk();
-  const existing = await refreshProjects();
-  const byCwd = new Map(existing.map((p) => [p.cwd, p]));
-  for (const project of detected) {
-    if (!byCwd.has(project.cwd)) {
-      byCwd.set(project.cwd, project);
-    }
+  const detected = await detectProjectsOnDisk();
+  const byCwd = new Map(getProjects().map((p) => [p.cwd, p]));
+  for (const p of detected) {
+    if (!byCwd.has(p.cwd)) byCwd.set(p.cwd, p);
   }
   const merged = Array.from(byCwd.values()).sort((a, b) => a.name.localeCompare(b.name));
   await saveProjects(merged);
-  return c.json({ projects: await refreshProjects() });
+  return c.json({ ok: true, projects: await refreshRunning() });
 });
 
 app.post('/api/projects', async (c) => {
-  const body = await c.req.json<Partial<Project>>();
-  if (!body.name || !body.cwd || !body.type) {
-    return c.json({ error: 'Missing required fields: name, cwd, type' }, 400);
+  const body = await c.req.json<Partial<Project>>().catch(() => ({}));
+  if (!body.name || !body.cwd) {
+    return fail(c, 400, 'Faltan campos: name, cwd');
   }
-
-  await refreshProjects();
   const existing = body.id ? getProjectById(body.id) : undefined;
-  const id = existing ? existing.id : body.id || generateId();
-
   const project: Project = {
-    id,
+    id: existing?.id || body.id || Math.random().toString(36).slice(2, 12),
     name: body.name,
     cwd: body.cwd,
-    command: normalizeProjectCommand(body.command),
-    packageManager: body.packageManager === 'npm' ? 'pnpm' : body.packageManager,
-    type: body.type,
+    command: body.command,
+    packageManager: body.packageManager,
+    type: body.type || 'other',
+    framework: body.framework,
     port: body.port,
-    startUrl: body.startUrl,
-    autoDetect: existing ? existing.autoDetect : false,
+    autoDetect: existing?.autoDetect ?? false,
   };
-
-  const others = getProjects().filter((p) => p.id !== id);
+  const others = getProjects().filter((p) => p.id !== project.id);
   others.push(project);
   await saveProjects(others);
-  return c.json({ success: true, project });
+  return c.json({ ok: true, project });
 });
 
 app.delete('/api/projects/:id', async (c) => {
   const id = c.req.param('id');
-  await refreshProjects();
-  const result = await deleteProject(id);
-  if (!result.success) {
-    return c.json({ error: result.error }, 404);
-  }
-  return c.json({ success: true });
-});
-
-app.get('/api/projects/:id', async (c) => {
-  const id = c.req.param('id');
-  await refreshProjects();
-  const project = getProjectById(id);
-  if (!project) {
-    return c.json({ error: 'Project not found' }, 404);
-  }
-  return c.json(project);
+  const before = getProjects().length;
+  await saveProjects(getProjects().filter((p) => p.id !== id));
+  if (getProjects().length === before) return fail(c, 404, 'Proyecto no encontrado');
+  return c.json({ ok: true });
 });
 
 app.post('/api/projects/:id/start', async (c) => {
-  const id = c.req.param('id');
-  await refreshProjects();
-  const project = getProjectById(id);
-  if (!project) {
-    return c.json({ error: 'Project not found' }, 404);
+  const project = getProjectById(c.req.param('id'));
+  if (!project) return fail(c, 404, 'Proyecto no encontrado');
+  const result = await startProject(project);
+  if (!result.ok) {
+    return c.json({ ok: false, error: result.error, command: result.command, needsInstall: result.needsInstall }, 409);
   }
-  let command: string | undefined;
-  try {
-    const contentType = c.req.header('content-type') || '';
-    const hasBody = c.req.raw.headers.get('content-length') || c.req.raw.headers.get('transfer-encoding');
-    if (hasBody && contentType.includes('application/json')) {
-      const body = await c.req.json<{ command?: string }>();
-      command = body.command;
-    }
-  } catch { /* optional body */ }
-  const result = await startProject(project, command);
-  if (result.installCommand && !result.success) {
-    return c.json({ success: false, error: result.error, installCommand: result.installCommand }, 409);
-  }
-  return c.json(result);
+  return c.json({ ok: true, pid: result.pid, command: result.command });
 });
 
 app.post('/api/projects/:id/install', async (c) => {
-  const id = c.req.param('id');
-  await refreshProjects();
-  const project = getProjectById(id);
-  if (!project) {
-    return c.json({ error: 'Project not found' }, 404);
-  }
-  const result = await installProjectDependencies(project);
-  return c.json(result);
+  const project = getProjectById(c.req.param('id'));
+  if (!project) return fail(c, 404, 'Proyecto no encontrado');
+  const job = runJob(`install ${project.name}`, [{
+    label: installCommand(project),
+    cmd: `cd ${JSON.stringify(project.cwd)} && ${installCommand(project)}`,
+    user: 'user',
+  }]);
+  return c.json({ ok: true, job });
 });
 
 app.post('/api/projects/:id/stop', async (c) => {
-  const id = c.req.param('id');
-  await refreshProjects();
-  const project = getProjectById(id);
-  if (!project) {
-    return c.json({ error: 'Project not found' }, 404);
-  }
+  const project = getProjectById(c.req.param('id'));
+  if (!project) return fail(c, 404, 'Proyecto no encontrado');
   const result = await stopProject(project);
-  return c.json(result);
+  if (!result.ok) return fail(c, 500, result.error || 'No se pudo detener');
+  return c.json({ ok: true });
 });
 
 app.get('/api/projects/:id/logs', async (c) => {
-  const id = c.req.param('id');
-  await refreshProjects();
-  const project = getProjectById(id);
-  if (!project) {
-    return c.json({ error: 'Project not found' }, 404);
-  }
+  const project = getProjectById(c.req.param('id'));
+  if (!project) return fail(c, 404, 'Proyecto no encontrado');
   const tail = parseInt(c.req.query('tail') || '200', 10);
-  const lines = await getProjectLogs(project, tail);
-  return c.json({ lines });
+  return c.json({ ok: true, lines: await projectLogs(project, tail) });
 });
 
-
-app.put('/api/config', async (c) => {
-  const body = await c.req.json<Partial<AppConfig['settings']>>();
-  config.settings = {
-    ...config.settings,
-    ...body,
-    protectedPids: body.protectedPids ?? config.settings.protectedPids,
-    protectedPorts: body.protectedPorts ?? config.settings.protectedPorts,
-    ignoredPatterns: body.ignoredPatterns ?? config.settings.ignoredPatterns,
-    scanIntervalMs: body.scanIntervalMs ?? config.settings.scanIntervalMs,
-  };
-  await saveConfig(config);
-  return c.json({ success: true, settings: config.settings });
-});
-
-app.get('/api/processes', async (c) => {
-  const all = c.req.query('all') === '1';
-  let processes = await detectProcesses();
-
-  const ignored = config.settings.ignoredPatterns || [];
-  processes = processes.filter((p) => !ignored.some((pattern) => p.cmd.toLowerCase().includes(pattern.toLowerCase())));
-
-  if (!all) {
-    processes = processes.filter((p) => p.type === 'node' || p.type === 'bun' || p.type === 'python');
-  }
-
-  for (const p of processes) {
-    p.domain = config.domains.find((d) => d.projectName === p.projectName && p.ports.includes(d.port));
-  }
-
-  return c.json({ processes });
-});
-
-app.post('/api/processes/:pid/kill', async (c) => {
-  const pid = parseInt(c.req.param('pid'), 10);
-  if (config.settings.protectedPids.includes(pid)) {
-    return c.json({ error: 'Protected process' }, 403);
-  }
-  const protectedPorts = config.settings.protectedPorts || [];
-  const listeningPorts = (await getListeningPorts())
-    .filter((m) => m.pid === pid)
-    .map((m) => m.port);
-  const protectedPort = listeningPorts.find((port) => protectedPorts.includes(port));
-  if (protectedPort) {
-    return c.json({ error: `Protected port ${protectedPort}` }, 403);
-  }
-  const result = await killProcess(pid);
-  return c.json(result);
-});
-
-app.get('/api/processes/:pid/detail', async (c) => {
-  const pid = parseInt(c.req.param('pid'), 10);
-  const details = await getProcessDetails(pid);
-  if (!details) {
-    return c.json({ error: 'Process not found' }, 404);
-  }
-
-  const ports = (await getListeningPorts())
-    .filter((m) => m.pid === pid)
-    .map((m) => m.port);
-
-  const [env, stats, logSources] = await Promise.all([
-    getProcessEnv(pid),
-    getProcessStats(pid),
-    findLogSources(details.cwd || '?', details.projectName || 'unknown'),
-  ]);
-
-  const response: ProcessDetails = {
-    pid: details.pid ?? pid,
-    ppid: details.ppid ?? 0,
-    name: details.name ?? 'unknown',
-    cmd: details.cmd ?? '',
-    cwd: details.cwd ?? '?',
-    projectName: details.projectName ?? 'unknown',
-    type: details.type ?? 'other',
-    ports,
-    env,
-    stats,
-    startTime: details.startTime || '',
-    logSources,
-  };
-
-  return c.json(response);
-});
-
-app.get('/api/processes/:pid/stats', async (c) => {
-  const pid = parseInt(c.req.param('pid'), 10);
-  const stats = await getProcessStats(pid);
-  return c.json({ stats });
-});
-
-app.get('/api/processes/:pid/logs', async (c) => {
-  const pid = parseInt(c.req.param('pid'), 10);
-  const source = c.req.query('source') || '';
-  if (!source) {
-    return c.json({ error: 'Missing source' }, 400);
-  }
-
-  let lines: string[] = [];
-  try {
-    if (source.startsWith('journal:')) {
-      const unit = source.slice('journal:'.length);
-      const output = await $`journalctl --user -u ${unit} -n 200 --no-pager`.text();
-      lines = output.split('\n');
-    } else {
-      const output = await $`tail -n 200 ${source}`.text();
-      lines = output.split('\n');
-    }
-  } catch (error) {
-    return c.json({ error: String(error), lines: [] }, 500);
-  }
-
-  return c.json({ lines });
-});
+// ---------- Docker ----------
 
 app.get('/api/docker', async (c) => {
-  const containers = await detectDockerContainers();
+  const containers = await listContainers();
   for (const container of containers) {
     container.domain = config.domains.find(
-      (d) =>
-        d.processType === 'docker' &&
-        d.projectName === container.names.split(',')[0] &&
-        container.publicPorts?.includes(d.port)
+      (d) => d.processType === 'docker' && d.projectName === container.names.split(',')[0] && container.publicPorts.includes(d.port)
     );
   }
-  return c.json({ containers });
+  return c.json({ ok: true, containers });
 });
 
 app.post('/api/docker/:id/stop', async (c) => {
-  const id = c.req.param('id');
-  const result = await killDockerContainer(id);
-  return c.json(result);
+  const result = await stopContainer(c.req.param('id'));
+  if (!result.ok) return fail(c, 500, 'No se pudo detener el contenedor', { detail: result.error });
+  return c.json({ ok: true });
 });
 
 app.get('/api/docker/:id/detail', async (c) => {
   const id = c.req.param('id');
-  const containers = await detectDockerContainers();
-  const container = containers.find((d) => d.id === id);
-  if (!container) {
-    return c.json({ error: 'Container not found' }, 404);
-  }
-
-  const [env, stats, startTime, createdAt] = await Promise.all([
-    getDockerContainerEnv(id),
-    getDockerContainerStats(id),
-    getDockerContainerStartTime(id),
-    getDockerContainerCreatedAt(id),
+  const [containers, detail, stats] = await Promise.all([
+    listContainers(),
+    containerDetail(id),
+    containerStats(id),
   ]);
-
-  return c.json({
-    id: container.id,
-    name: container.names,
-    image: container.image,
-    status: container.status,
-    ports: container.ports,
-    publicPorts: container.publicPorts ?? [],
-    createdAt,
-    env,
-    logSources: [{ type: 'docker-logs', label: 'Docker logs', command: `docker logs ${id} --tail 200` }],
-    stats,
-    startTime,
-  });
-});
-
-app.get('/api/docker/:id/stats', async (c) => {
-  const id = c.req.param('id');
-  const stats = await getDockerContainerStats(id);
-  return c.json({ stats });
+  const container = containers.find((d) => d.id === id);
+  if (!container) return fail(c, 404, 'Contenedor no encontrado');
+  return c.json({ ok: true, container, detail, stats });
 });
 
 app.get('/api/docker/:id/logs', async (c) => {
-  const id = c.req.param('id');
-  const lines = await getDockerContainerLogs(id);
-  return c.json({ lines });
+  const lines = await containerLogs(c.req.param('id'));
+  return c.json({ ok: true, lines });
 });
 
-app.get('/api/domains', async (c) => {
-  return c.json({ domains: config.domains });
-});
+// ---------- Domains (unchanged Cloudflare logic) ----------
+
+app.get('/api/domains', async (c) => c.json({ ok: true, domains: config.domains }));
 
 app.post('/api/domains/import', async (c) => {
   const remote = await getRemoteTunnelConfig();
   if (!remote.success || !remote.config) {
-    return c.json({ error: remote.error || 'Failed to fetch tunnel config' }, 500);
+    return fail(c, 500, 'No se pudo obtener la config remota del túnel', { detail: remote.error });
   }
-
   const dnsRecords = await listAllDnsRecords('CNAME');
-  const containers = await detectDockerContainers();
+  const containers = await listContainers();
   const imported: DomainMapping[] = [];
   const skipped: string[] = [];
 
-  const ingress = remote.config.config.ingress || [];
-  for (const entry of ingress) {
-    if (!entry.hostname) continue;
-    if (entry.hostname === `ports.${BASE_DOMAIN}`) continue;
-
+  for (const entry of remote.config.config.ingress || []) {
+    if (!entry.hostname || entry.hostname === `ports.${BASE_DOMAIN}`) continue;
     const subdomain = entry.hostname.replace(new RegExp(`\\.${escapeRegExp(BASE_DOMAIN)}$`), '');
     const serviceMatch = entry.service.match(/:\/\/localhost:(\d+)/);
     const port = serviceMatch ? parseInt(serviceMatch[1], 10) : 0;
-    if (!port) {
+    if (!port || config.domains.some((d) => d.fullDomain === entry.hostname)) {
       skipped.push(entry.hostname);
       continue;
     }
-
-    if (config.domains.some((d) => d.fullDomain === entry.hostname)) {
-      skipped.push(entry.hostname);
-      continue;
-    }
-
-    const isHttps = entry.service.startsWith('https://');
-    const target = `${isHttps ? 'https' : 'http'}://localhost:${port}`;
-
-    // Determine if it's Docker by matching a container that exposes this public port
-    const matchingContainer = containers.find((container) =>
-      container.publicPorts?.includes(port)
-    );
-    const projectName = matchingContainer ? matchingContainer.names.split(',')[0] : subdomain;
-    const processType: 'process' | 'docker' = matchingContainer ? 'docker' : 'process';
-
-    const dnsRecord = dnsRecords.find((r) => r.name === entry.hostname);
-
+    const target = `${entry.service.startsWith('https://') ? 'https' : 'http'}://localhost:${port}`;
+    const matching = containers.find((ct) => ct.publicPorts.includes(port));
     const domain: DomainMapping = {
-      id: generateId(),
+      id: Math.random().toString(36).slice(2, 12),
       subdomain,
       fullDomain: entry.hostname,
       target,
       port,
-      projectName,
-      processType,
+      projectName: matching ? matching.names.split(',')[0] : subdomain,
+      processType: matching ? 'docker' : 'process',
       createdAt: new Date().toISOString(),
-      dnsRecordId: dnsRecord?.id,
+      dnsRecordId: dnsRecords.find((r) => r.name === entry.hostname)?.id,
     };
-
     config.domains.push(domain);
     imported.push(domain);
   }
-
   await saveConfig(config);
-  return c.json({ success: true, imported, skipped, count: imported.length });
+  return c.json({ ok: true, imported, skipped });
 });
 
 app.post('/api/domains', async (c) => {
   const { subdomain, port, processType, projectName } = await c.req.json<{
-    subdomain: string;
-    port: number;
-    processType: 'process' | 'docker';
-    projectName: string;
+    subdomain: string; port: number; processType: 'process' | 'docker'; projectName: string;
   }>();
-
-  const clean = subdomain.toLowerCase().replace(/[^a-z0-9-]/g, '');
-  if (!clean || clean.length < 1) {
-    return c.json({ error: 'Invalid subdomain' }, 400);
-  }
-
+  const clean = (subdomain || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
+  if (!clean) return fail(c, 400, 'Subdominio inválido');
   const fullDomain = `${clean}.${BASE_DOMAIN}`;
-
-  // Check if already exists
   if (config.domains.some((d) => d.fullDomain === fullDomain)) {
-    return c.json({ error: 'Domain already assigned' }, 409);
+    return fail(c, 409, 'Ese dominio ya está asignado');
   }
-
-  // Check DNS doesn't already exist from another source
-  const existing = await listDnsRecords(fullDomain);
-  if (existing.length > 0) {
-    return c.json({ error: 'DNS record already exists in Cloudflare' }, 409);
+  if ((await listDnsRecords(fullDomain)).length > 0) {
+    return fail(c, 409, 'El registro DNS ya existe en Cloudflare');
   }
-
-  // Determine target
-  const isHttps = port === 9443 || port === 9090 || port === 443;
+  const isHttps = [443, 8443, 9090, 9443].includes(port);
   const target = `${isHttps ? 'https' : 'http'}://localhost:${port}`;
-
-  // Create DNS record
   const dns = await createDnsRecord(fullDomain);
-  if (!dns.success) {
-    return c.json({ error: dns.error || 'Failed to create DNS record' }, 500);
-  }
+  if (!dns.success) return fail(c, 500, 'Falló crear el DNS en Cloudflare', { detail: dns.error });
 
   const domain: DomainMapping = {
-    id: generateId(),
+    id: Math.random().toString(36).slice(2, 12),
     subdomain: clean,
     fullDomain,
     target,
@@ -554,164 +458,119 @@ app.post('/api/domains', async (c) => {
     createdAt: new Date().toISOString(),
     dnsRecordId: dns.recordId,
   };
-
   config.domains.push(domain);
   await saveConfig(config);
 
   const sync = await syncCloudflaredRoutes(config.domains);
   if (!sync.success) {
-    // Rollback
     if (domain.dnsRecordId) await deleteDnsRecord(domain.dnsRecordId);
     config.domains = config.domains.filter((d) => d.id !== domain.id);
     await saveConfig(config);
-    return c.json({ error: sync.error || 'Failed to sync cloudflared' }, 500);
+    return fail(c, 500, 'Falló sincronizar el túnel', { detail: sync.error });
   }
-
-  return c.json({ success: true, domain });
+  return c.json({ ok: true, domain });
 });
 
 app.put('/api/domains/:id', async (c) => {
-  const id = c.req.param('id');
-  const domain = config.domains.find((d) => d.id === id);
-  if (!domain) {
-    return c.json({ error: 'Domain not found' }, 404);
-  }
-
+  const domain = config.domains.find((d) => d.id === c.req.param('id'));
+  if (!domain) return fail(c, 404, 'Dominio no encontrado');
   const { subdomain } = await c.req.json<{ subdomain: string }>();
-  const clean = subdomain.toLowerCase().replace(/[^a-z0-9-]/g, '');
-  if (!clean || clean.length < 1) {
-    return c.json({ error: 'Invalid subdomain' }, 400);
-  }
-
+  const clean = (subdomain || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
+  if (!clean) return fail(c, 400, 'Subdominio inválido');
   const newFullDomain = `${clean}.${BASE_DOMAIN}`;
-  if (newFullDomain === domain.fullDomain) {
-    return c.json({ success: true, domain });
+  if (newFullDomain === domain.fullDomain) return c.json({ ok: true, domain });
+  if (config.domains.some((d) => d.id !== domain.id && d.fullDomain === newFullDomain)) {
+    return fail(c, 409, 'Ese dominio ya está asignado');
+  }
+  if ((await listDnsRecords(newFullDomain)).length > 0) {
+    return fail(c, 409, 'El registro DNS ya existe en Cloudflare');
   }
 
-  if (config.domains.some((d) => d.id !== id && d.fullDomain === newFullDomain)) {
-    return c.json({ error: 'Domain already assigned' }, 409);
-  }
-
-  const existing = await listDnsRecords(newFullDomain);
-  if (existing.length > 0) {
-    return c.json({ error: 'DNS record already exists in Cloudflare' }, 409);
-  }
-
-  // Preserve original state for rollback
-  const oldDomainState = { ...domain };
-
+  const old = { ...domain };
   const created = await createDnsRecord(newFullDomain);
-  if (!created.success) {
-    return c.json({ error: created.error || 'Failed to create DNS record' }, 500);
-  }
-
-  const newRecordId = created.recordId;
-
-  if (oldDomainState.dnsRecordId) {
-    const deleted = await deleteDnsRecord(oldDomainState.dnsRecordId);
+  if (!created.success) return fail(c, 500, 'Falló crear el DNS', { detail: created.error });
+  if (old.dnsRecordId) {
+    const deleted = await deleteDnsRecord(old.dnsRecordId);
     if (!deleted.success) {
-      // Rollback new DNS record
-      if (newRecordId) await deleteDnsRecord(newRecordId);
-      return c.json({ error: deleted.error || 'Failed to delete old DNS record' }, 500);
+      if (created.recordId) await deleteDnsRecord(created.recordId);
+      return fail(c, 500, 'Falló borrar el DNS viejo', { detail: deleted.error });
     }
   }
-
-  // Apply updates
   domain.subdomain = clean;
   domain.fullDomain = newFullDomain;
-  domain.dnsRecordId = newRecordId;
+  domain.dnsRecordId = created.recordId;
   await saveConfig(config);
 
   const sync = await syncCloudflaredRoutes(config.domains);
   if (!sync.success) {
-    // Rollback config
-    domain.subdomain = oldDomainState.subdomain;
-    domain.fullDomain = oldDomainState.fullDomain;
-    domain.dnsRecordId = oldDomainState.dnsRecordId;
+    domain.subdomain = old.subdomain;
+    domain.fullDomain = old.fullDomain;
+    domain.dnsRecordId = old.dnsRecordId;
     await saveConfig(config);
-
-    // Rollback DNS: recreate old record, remove new record
-    if (oldDomainState.dnsRecordId) {
-      const recreated = await createDnsRecord(oldDomainState.fullDomain);
+    if (old.dnsRecordId) {
+      const recreated = await createDnsRecord(old.fullDomain);
       if (recreated.success && recreated.recordId) {
         domain.dnsRecordId = recreated.recordId;
         await saveConfig(config);
       }
     }
-    if (newRecordId) await deleteDnsRecord(newRecordId);
-
-    return c.json({ error: sync.error || 'Failed to sync cloudflared' }, 500);
+    if (created.recordId) await deleteDnsRecord(created.recordId);
+    return fail(c, 500, 'Falló sincronizar el túnel', { detail: sync.error });
   }
-
-  return c.json({ success: true, domain });
+  return c.json({ ok: true, domain });
 });
 
 app.delete('/api/domains/:id', async (c) => {
-  const id = c.req.param('id');
-  const domain = config.domains.find((d) => d.id === id);
-  if (!domain) {
-    return c.json({ error: 'Domain not found' }, 404);
-  }
-
+  const domain = config.domains.find((d) => d.id === c.req.param('id'));
+  if (!domain) return fail(c, 404, 'Dominio no encontrado');
   if (domain.dnsRecordId) {
-    await deleteDnsRecord(domain.dnsRecordId);
+    const del = await deleteDnsRecord(domain.dnsRecordId);
+    if (!del.success) return fail(c, 500, 'Falló borrar el DNS', { detail: del.error });
   }
-
-  config.domains = config.domains.filter((d) => d.id !== id);
+  config.domains = config.domains.filter((d) => d.id !== domain.id);
   await saveConfig(config);
-  await syncCloudflaredRoutes(config.domains);
-
-  return c.json({ success: true });
+  const sync = await syncCloudflaredRoutes(config.domains);
+  if (!sync.success) return fail(c, 500, 'Dominio borrado pero falló sync del túnel', { detail: sync.error });
+  return c.json({ ok: true });
 });
 
+// ---------- Config & stats ----------
+
 app.get('/api/config', async (c) => {
-  return c.json({
-    scanIntervalMs: config.settings.scanIntervalMs,
-    protectedPids: config.settings.protectedPids,
-    protectedPorts: config.settings.protectedPorts,
-    ignoredPatterns: config.settings.ignoredPatterns || [],
-    baseDomain: BASE_DOMAIN,
-  });
+  const { auth, ...rest } = config;
+  return c.json({ ok: true, config: { ...rest, auth: { username: auth.username } } });
+});
+
+app.put('/api/config', async (c) => {
+  const body = await c.req.json<Partial<AppConfig['settings']>>().catch(() => ({}));
+  config.settings = { ...config.settings, ...body };
+  await saveConfig(config);
+  configurePorts(config.settings);
+  return c.json({ ok: true, settings: config.settings });
 });
 
 app.get('/api/stats', async (c) => {
   const stats = await getServerStats();
-  return c.json({ stats });
+  return c.json({ ok: true, stats });
 });
 
-// Static files (must be after API routes)
-app.use(
-  '*',
-  serveStatic({
-    root: './public',
-    onFound: (_path, c) => {
-      c.header('Cache-Control', 'no-cache, no-store, must-revalidate');
-      c.header('Pragma', 'no-cache');
-      c.header('Expires', '0');
-    },
-  })
-);
-app.get(
-  '/',
-  serveStatic({
-    path: './public/index.html',
-    onFound: (_path, c) => {
-      c.header('Cache-Control', 'no-cache, no-store, must-revalidate');
-      c.header('Pragma', 'no-cache');
-      c.header('Expires', '0');
-    },
-  })
-);
+// ---------- Static ----------
 
-// Error handler
+// Static assets must not be served stale — index.html/app.js change on every deploy.
+app.use('/*', async (c, next) => {
+  await next();
+  const p = c.req.path;
+  if (p === '/' || p.endsWith('.html') || p.endsWith('/app.js') || p.endsWith('.css')) {
+    c.header('Cache-Control', 'no-cache');
+  } else if (p.includes('/vendor/')) {
+    c.header('Cache-Control', 'public, max-age=86400');
+  }
+});
+app.get('/*', serveStatic({ root: './public' }));
+
 app.onError((err, c) => {
-  console.error('Error:', err);
-  return c.json({ error: 'Internal server error' }, 500);
+  console.error('Unhandled error:', err);
+  return fail(c, 500, 'Error interno', { detail: String(err) });
 });
 
-console.log(`Starting ports-manager on port ${PORT}`);
-
-export default {
-  port: PORT,
-  fetch: app.fetch,
-};
+export default { port: PORT, fetch: app.fetch };

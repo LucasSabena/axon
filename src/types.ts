@@ -5,50 +5,55 @@ export interface ProcessStats {
   threads: number;
 }
 
-export interface ProcessStatsResponse {
-  stats: ProcessStats;
-}
-
-export interface DockerContainerStats {
-  cpuPercent?: string;
-  memoryUsage?: string;
-  memoryLimit?: string;
-  memoryPercent?: string;
-  networkIo?: string;
-  blockIo?: string;
-  pids?: string;
-}
-
-export interface LogSource {
-  type: 'file' | 'journal' | 'pm2' | 'docker-logs';
-  label: string;
-  path?: string;
-  command?: string;
-  unit?: string;
-}
-
-export interface PortListener {
-  protocol: 'tcp' | 'udp';
+export interface Listener {
+  proto: 'tcp' | 'udp';
   address: string;
   port: number;
-  pid: number;
-  processName?: string;
+  healthy?: boolean | null;
 }
 
-export interface DetectedProcess {
+export type IdentityCategory = 'project' | 'service' | 'docker' | 'system' | 'unknown';
+
+export interface Identity {
+  category: IdentityCategory;
+  label: string;
+  icon: string;
+  framework?: string;
+  projectRoot?: string;
+  packageName?: string;
+  serviceKey?: string;
+  unit?: string;
+  unitScope?: 'user' | 'system';
+  protected: boolean;
+  protectionReason?: string;
+}
+
+export interface PortProcess {
   pid: number;
   ppid: number;
+  user: string;
+  uid: number;
   name: string;
   cmd: string;
   cwd: string;
-  projectName: string;
+  listeners: Listener[];
   ports: number[];
-  listeners?: PortListener[];
-  type: 'node' | 'bun' | 'python' | 'docker' | 'other';
-  uptimeSeconds: number;
+  identity: Identity;
   memoryMb: number;
-  cpuPercent: number;
-  domain?: DomainMapping;
+  uptimeSeconds: number;
+  startedAt: string;
+}
+
+export interface KillPlan {
+  pid: number;
+  name: string;
+  cmd: string;
+  cwd: string;
+  identity: Identity;
+  portsFreed: number[];
+  tree: { pid: number; name: string; cmd: string }[];
+  warnings: string[];
+  blocked?: string;
 }
 
 export interface ProcessDetails {
@@ -57,13 +62,20 @@ export interface ProcessDetails {
   name: string;
   cmd: string;
   cwd: string;
-  projectName: string;
-  type: DetectedProcess['type'];
+  user: string;
   ports: number[];
+  identity: Identity;
   env: Record<string, string>;
   stats: ProcessStats;
-  startTime: string;
+  startedAt: string;
   logSources: LogSource[];
+}
+
+export interface LogSource {
+  type: 'file' | 'journal' | 'docker-logs' | 'job';
+  label: string;
+  path?: string;
+  unit?: string;
 }
 
 export interface DockerContainer {
@@ -71,10 +83,11 @@ export interface DockerContainer {
   names: string;
   image: string;
   status: string;
+  state: string;
   ports: string;
-  publicPorts?: number[];
+  publicPorts: number[];
   projectName: string;
-  type: 'docker';
+  composeProject?: string;
   domain?: DomainMapping;
 }
 
@@ -93,14 +106,75 @@ export interface DomainMapping {
 export interface Project {
   id: string;
   name: string;
-  cwd: string;
+  cwd: string; // host path
   command?: string;
   packageManager?: 'npm' | 'pnpm' | 'yarn' | 'bun';
-  type: 'node' | 'bun' | 'python' | 'docker' | 'other';
+  type: 'node' | 'bun' | 'python' | 'rust' | 'go' | 'static' | 'other';
+  framework?: string;
   port?: number;
-  startUrl?: string;
   autoDetect: boolean;
   running?: { pid: number; ports: number[]; startedAt: string };
+}
+
+export interface ProgramStep {
+  label: string;
+  cmd: string;
+  user: 'root' | 'user';
+}
+
+export interface ProgramDef {
+  id: string;
+  name: string;
+  icon: string;
+  desc?: string;
+  channel: 'apt' | 'snap' | 'pnpm' | 'bun' | 'uv' | 'pipx' | 'cargo' | 'script';
+  detect: { cmd: string; user: 'root' | 'user' }[];
+  version?: { cmd: string; user: 'root' | 'user' };
+  updatesCheck?: { cmd: string; user: 'root' | 'user' };
+  steps: ProgramStep[];
+}
+
+export interface ProgramView {
+  id: string;
+  name: string;
+  icon: string;
+  desc?: string;
+  channel: ProgramDef['channel'];
+  installed: boolean;
+  version?: string;
+  pendingUpdates?: string;
+  steps: { label: string; cmd: string; user: string }[];
+}
+
+export interface DesktopApp {
+  name: string;
+  icon?: string;
+  exec?: string;
+  source: 'desktop' | 'snap';
+  packageName?: string;
+}
+
+export interface JobStepState {
+  label: string;
+  status: 'pending' | 'running' | 'ok' | 'failed' | 'skipped';
+  exitCode?: number;
+  hint?: string;
+  group?: string;
+}
+
+export interface Job {
+  id: string;
+  title: string;
+  status: 'running' | 'ok' | 'failed';
+  steps: JobStepState[];
+  log: string;
+  startedAt: string;
+  endedAt?: string;
+}
+
+export interface KnownService {
+  name: string;
+  icon: string;
 }
 
 export interface AppConfig {
@@ -115,5 +189,16 @@ export interface AppConfig {
     protectedPids: number[];
     protectedPorts: number[];
     ignoredPatterns: string[];
+    scanDirs: string[];
+    hostUser: string;
+    knownServices: Record<string, KnownService>;
   };
+}
+
+export interface ApiError {
+  ok: false;
+  error: string;
+  detail?: string;
+  command?: string;
+  exitCode?: number;
 }

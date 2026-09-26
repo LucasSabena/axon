@@ -9,12 +9,14 @@
   },
   "dependencies": {
     "hono": "^4.4.8",
-    "js-yaml": "^4.1.0"
+    "js-yaml": "^4.1.0",
+    "lucide": "^1.48.0"
   },
   "devDependencies": {
-    "@types/js-yaml": "^4.0.9",
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@types/js-yaml": "^4.0.9"
   },
   "module": "src/index.ts",
-  "type": "module"
+  "type": "module",
+  "packageManager": "pnpm@12.5.1"
 }

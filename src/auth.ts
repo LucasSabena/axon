@@ -104,9 +104,10 @@ export async function getSession(c: Context): Promise<SessionPayload | null> {
 }
 
 export function setSessionCookie(c: Context, token: string): void {
+  const secure = c.req.url.startsWith('https://') ? '; Secure' : '';
   c.header(
     'set-cookie',
-    `${COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${60 * 60 * 24 * 7}`
+    `${COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${60 * 60 * 24 * 7}${secure}`
   );
 }
 
