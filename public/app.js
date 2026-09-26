@@ -118,12 +118,17 @@ const loaders = {
   domains: loadDomains,
 };
 
+let activeTabName = 'ports';
 $$('.tab-btn').forEach((btn) => {
   btn.addEventListener('click', () => {
     $$('.tab-btn').forEach((b) => b.classList.remove('active'));
     $$('.tab-content').forEach((t) => t.classList.remove('active'));
     btn.classList.add('active');
     $(`#tab-${btn.dataset.tab}`).classList.add('active');
+    // Leaving the browser tab tears the viewer down so it isn't streaming
+    // screencast frames in the background; the server Chrome keeps running.
+    if (activeTabName === 'navegador' && btn.dataset.tab !== 'navegador') unloadBrowser();
+    activeTabName = btn.dataset.tab;
     loaders[btn.dataset.tab]?.();
   });
 });
@@ -1790,12 +1795,20 @@ const BROWSER_PORT = 18230;
 const browserUrl = `/p/${BROWSER_PORT}/v1/sessions/debug`;
 let browserLoaded = false;
 
-loaders.navegador = () => {
+function loadBrowser() {
   if (!browserLoaded) {
     $('#browser-frame').src = browserUrl;
     browserLoaded = true;
   }
-};
+}
+function unloadBrowser() {
+  if (browserLoaded) {
+    $('#browser-frame').src = 'about:blank';
+    browserLoaded = false;
+  }
+}
+
+loaders.navegador = loadBrowser;
 $('#browser-open-ext').addEventListener('click', () => window.open(browserUrl, '_blank', 'noopener'));
 
 // ---------- QR pairing ----------

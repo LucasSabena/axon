@@ -803,8 +803,13 @@ summary { cursor: pointer; color: var(--text-dim); font-size: 0.83rem; padding: 
 .job-group-failed { color: var(--danger, #f87171); border-color: color-mix(in srgb, var(--danger, #f87171) 40%, transparent); }
 .job-group-skipped { color: var(--text-muted, #8b93a5); }
 
+/* Terminal + Navegador fill the whole viewport under the topbar:
+   kill .content padding/scroll only while one of them is active. */
+.content:has(> #tab-terminal.active),
+.content:has(> #tab-navegador.active) { padding: 0; overflow: hidden; }
+
 /* Terminal page */
-#tab-terminal.tab-content.active { display: flex; flex-direction: column; height: 100%; padding: 0; }
+#tab-terminal.tab-content.active { display: flex; flex-direction: column; height: calc(100vh - var(--header-h)); height: calc(100dvh - var(--header-h)); max-width: none; padding: 0; }
 .term-tabbar { display: flex; align-items: center; gap: 4px; padding: 8px 10px; border-bottom: 1px solid var(--border, #262c3a); background: var(--bg-surface, #10141d); }
 .term-tabs { display: flex; gap: 4px; flex: 1; overflow-x: auto; }
 .term-tab {
@@ -818,7 +823,7 @@ summary { cursor: pointer; color: var(--text-dim); font-size: 0.83rem; padding: 
 .term-tab .lucide-icon { width: 13px; height: 13px; }
 .term-tab-x { opacity: .5; font-size: 14px; line-height: 1; margin-left: 2px; padding: 0 2px; }
 .term-tab-x:hover { opacity: 1; color: var(--danger, #f87171); }
-#term-pages { flex: 1; min-height: 420px; background: #0b0e14; }
+#term-pages { flex: 1; min-height: 0; background: #0b0e14; }
 .term-page { display: none; height: 100%; padding: 8px; }
 .term-page.active { display: block; }
 .term-page .xterm { height: 100%; }
@@ -826,10 +831,13 @@ summary { cursor: pointer; color: var(--text-dim); font-size: 0.83rem; padding: 
 /* Embedded server browser */
 .browser-note { margin: 0 0 10px; }
 .browser-frame-wrap {
-  flex: 1; min-height: calc(100vh - 220px); border: 1px solid var(--border, #262c3a);
-  border-radius: var(--radius-md, 8px); overflow: hidden; background: #000;
+  flex: 1; min-height: 0; overflow: hidden; background: #000;
 }
-#tab-navegador.tab-content.active { display: flex; flex-direction: column; }
+#tab-navegador.tab-content.active {
+  display: flex; flex-direction: column;
+  height: calc(100vh - var(--header-h)); height: calc(100dvh - var(--header-h));
+  max-width: none; padding: 10px 12px; box-sizing: border-box;
+}
 #browser-frame { width: 100%; height: 100%; border: 0; display: block; }
 
 /* Domain bulk bar + selection */

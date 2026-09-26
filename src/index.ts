@@ -967,7 +967,7 @@ function startTermSocket(ws: Bun.ServerWebSocket<WsData>): void {
   const cols = t.cols || 120;
   const rows = t.rows || 40;
   const session = t.session || 'pm-term';
-  const cmd = `export TERM=xterm-256color; script -qfc "tmux new-session -A -s ${session} -x ${cols} -y ${rows}" /dev/null`;
+  const cmd = `export TERM=xterm-256color; script -qfc "stty cols ${cols} rows ${rows}; exec tmux new-session -A -s ${session}" /dev/null`;
   const proc = hostSpawnInteractive(cmd, { user: 'user' });
   t.proc = proc;
   const pump = async (stream: ReadableStream<Uint8Array> | undefined) => {
@@ -1033,7 +1033,8 @@ export default {
             const j = JSON.parse(msg);
             if (j.t === 'r' && Number.isFinite(j.c) && Number.isFinite(j.r)) {
               const sess = t.session || 'pm-term';
-              hostExec(`tmux resize-window -t ${sess} -x ${Math.min(j.c, 500)} -y ${Math.min(j.r, 200)}`, { user: 'user', timeoutMs: 4000 }).catch(() => {});
+              const c = Math.min(j.c, 500), r = Math.min(j.r, 200);
+              hostExec(`tmux resize-window -t ${sess} -x ${c} -y ${r} 2>/dev/null; tmux refresh-client -t ${sess} -C ${c},${r} 2>/dev/null; true`, { user: 'user', timeoutMs: 4000 }).catch(() => {});
               return;
             }
             if (j.t === 'i' && typeof j.d === 'string') {
