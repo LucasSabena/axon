@@ -729,9 +729,10 @@ export async function getProcessDetail(pid: number) {
       if (eq < 0) continue;
       const key = entry.slice(0, eq);
       let value = entry.slice(eq + 1);
-      if (/(token|secret|key|pass|password|credential|auth)/i.test(key) || /(token|secret|key)/i.test(value.slice(0, 32) && key.length < 40)) {
-        if (/(token|secret|key|pass|password|credential)/i.test(key)) value = '••••••';
-      }
+      // Mask anything whose name or value smells like a credential —
+      // DATABASE_URL=postgres://u:secret@… has a clean key name but leaks.
+      if (/(token|secret|key|pass|password|credential|auth)/i.test(key)
+        || /^[a-z0-9+\-.]+:\/\/[^/\s]*:[^@\s]+@/i.test(value)) value = '••••••';
       env[key] = value;
     }
   } catch { /* no perms */ }

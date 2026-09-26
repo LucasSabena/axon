@@ -40,6 +40,11 @@ async function api(path, opts = {}) {
   let data;
   try { data = await res.json(); } catch { data = {}; }
   if (!res.ok || data.ok === false) {
+    // Session expired — drop back to the login screen instead of spamming
+    // "Unauthorized" toasts from every background poll.
+    if (res.status === 401) {
+      $('#login-screen')?.classList.remove('hidden');
+    }
     const e = new Error(data.error || `HTTP ${res.status}`);
     e.detail = data.detail;
     e.command = data.command;
@@ -501,7 +506,7 @@ $('#kill-stop-service').addEventListener('click', async (e) => {
   if (!confirm(`Detener el servicio "${unit}"?\nSe detiene de verdad (systemd no lo reinicia). También se puede deshabilitar para que no arranque solo.`)) return;
   btn.disabled = true;
   try {
-    await api('/api/systemd/stop', { method: 'POST', body: JSON.stringify({ unit, scope }) });
+    await api('/api/systemd/stop', { method: 'POST', body: { unit, scope } });
     $('#kill-modal').classList.add('hidden');
     toast(`Servicio ${unit} detenido`, 'ok', 'Sigue habilitado al arranque — deshabilitalo con: systemctl --user disable ' + unit, 6000);
     loadPorts();
@@ -855,7 +860,12 @@ async function pollJob() {
       loadPrograms().catch(() => {});
       loadJobsHistory().catch(() => {});
     }
-  } catch { /* job gone */ }
+  } catch {
+    // Job deleted or endpoint unreachable — stop polling instead of
+    // hammering a 404 every second until the modal is closed.
+    clearInterval(jobPollTimer);
+    jobPollTimer = null;
+  }
 }
 
 function renderJob(job) {
@@ -1255,7 +1265,7 @@ $('#domains-del-sel').addEventListener('click', async () => {
   if (!ok) return;
   try {
     const res = await api('/api/domains/bulk-delete', { method: 'POST', body: { ids } });
-    removeDomainRows(ids);
+    removeDomainRows(ids.filter((id) => !(res.failedIds || []).includes(id)));
     toast(`${res.removed} eliminado${res.removed === 1 ? '' : 's'}${res.failed ? `, ${res.failed} fallaron` : ''}`, res.failed ? 'warn' : 'ok');
     if (!res.syncOk) toast('El sync del túnel falló — revisá cloudflared', 'err');
     loadDomains();
@@ -1714,19 +1724,25 @@ function openTermTab(name, cwd) {
 }
 
 function connectTermTab(sess) {
-  if (sess.ws) { try { sess.ws.close(); } catch { /* gone */ } }
+  const old = sess.ws;
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${proto}://${location.host}/ws/term?s=${encodeURIComponent(sess.name)}&c=${sess.term.cols}&r=${sess.term.rows}`);
+  // Swap the reference BEFORE closing the old socket so its onclose can't
+  // mark the new connection as offline.
+  sess.ws = ws;
+  if (old) { try { old.close(); } catch { /* gone */ } }
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => {
+    sess.tabBtn.classList.remove('term-tab-offline');
     if (sess.pendingCwd) { ws.send(JSON.stringify({ t: 'i', d: `cd ${JSON.stringify(sess.pendingCwd)}\n` })); sess.pendingCwd = ''; }
   };
   ws.onmessage = (e) => sess.term.write(new Uint8Array(e.data));
   ws.onclose = () => {
+    // A stale socket closing must not mark the replacement as offline.
+    if (sess.ws !== ws) return;
     sess.term.write('\r\n\x1b[33m[desconectado — click para reconectar]\x1b[0m\r\n');
     sess.tabBtn.classList.add('term-tab-offline');
   };
-  sess.ws = ws;
 }
 
 function activateTermTab(name) {
@@ -1751,6 +1767,7 @@ function closeTermTab(name) {
   if (activeTerm === name) {
     const next = termSessions.keys().next().value;
     if (next) activateTermTab(next);
+    else activeTerm = null;
   }
 }
 
