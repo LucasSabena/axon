@@ -508,6 +508,7 @@ td.num { white-space: nowrap; font-variant-numeric: tabular-nums; font-family: v
 .program-head { display: flex; align-items: center; gap: 9px; }
 .program-icon { color: var(--text-dim); display: inline-flex; }
 .program-icon svg { width: 17px; height: 17px; }
+.program-icon .brand-svg { width: 18px; height: 18px; flex: none; }
 .program-head strong { font-size: 0.92rem; font-weight: 600; }
 .program-head .badge { margin-left: auto; }
 .program-desc { color: var(--text-dim); font-size: 0.8rem; }

@@ -139,6 +139,7 @@ export interface ProgramView {
   id: string;
   name: string;
   icon: string;
+  brandIcon?: string;
   desc?: string;
   channel: ProgramDef['channel'];
   installed: boolean;

@@ -615,7 +615,9 @@ function renderPrograms(programs) {
       : p.pendingUpdates ? `<span class="badge badge-bun">${esc(p.pendingUpdates)} updates</span>` : '';
     card.innerHTML = `
       <div class="program-head">
-        <span class="program-icon">${icon(lucideName(p.icon, 'package'))}</span>
+        <span class="program-icon">${p.brandIcon
+          ? `<img class="brand-svg" src="${esc(p.brandIcon)}" alt="" onerror="this.remove(); this.nextElementSibling.classList.remove('hidden')"><span class="hidden">${icon(lucideName(p.icon, 'package'))}</span>`
+          : icon(lucideName(p.icon, 'package'))}</span>
         <div>
           <strong>${esc(p.name)}</strong>
           <div class="program-meta">
@@ -707,7 +709,9 @@ function renderInstalledFilter() {
   const apps = desktopApps.filter((a) => a.name.toLowerCase().includes(q));
   const desktopHtml = apps.map((a) => `
     <div class="app-chip" title="${esc(a.exec || '')}">
-      ${a.icon ? `<img src="/api/icons/${encodeURIComponent(a.icon)}" onerror="this.remove()" alt="">` : icon('monitor')}
+      ${a.icon
+        ? `<img src="/api/icons/${encodeURIComponent(a.icon)}" onerror="this.remove(); this.nextElementSibling.classList.remove('hidden')" alt=""><span class="hidden">${icon('monitor')}</span>`
+        : icon('monitor')}
       <span>${esc(a.name)}</span>
       <span class="chip-src">${esc(a.source)}</span>
     </div>`).join('');

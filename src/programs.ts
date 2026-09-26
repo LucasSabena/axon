@@ -281,6 +281,37 @@ export function programById(id: string): ProgramDef | undefined {
   return PROGRAMS.find((p) => p.id === id);
 }
 
+// Program id → icon path. Prefer real product icons: vendored Simple Icons
+// SVGs (CC0) under /icons/, or the app's own desktop icon via /api/icons/.
+// Programs without either fall back to their Lucide `icon`.
+const BRAND_ICONS: Record<string, string> = {
+  codex: '/icons/openai.svg',
+  'claude-code': '/icons/claudecode.svg',
+  opencode: '/api/icons/ai.opencode.desktop',
+  devin: '/api/icons/devin-desktop',
+  gemini: '/icons/googlegemini.svg',
+  vercel: '/icons/vercel.svg',
+  supabase: '/icons/supabase.svg',
+  shopify: '/icons/shopify.svg',
+  playwright: '/icons/playwright.svg',
+  gh: '/icons/github.svg',
+  chatgpt: '/api/icons/chatgpt',
+  chrome: '/icons/googlechrome.svg',
+  vscode: '/api/icons/vscode',
+  'code-server': '/icons/coder.svg',
+  cloudflared: '/icons/cloudflare.svg',
+  node: '/icons/nodedotjs.svg',
+  bun: '/icons/bun.svg',
+  uv: '/icons/uv.svg',
+  pipx: '/icons/pipx.svg',
+  rustup: '/icons/rust.svg',
+  'cargo-tools': '/icons/rust.svg',
+  apt: '/icons/ubuntu.svg',
+  snap: '/icons/snapcraft.svg',
+  docker: '/icons/docker.svg',
+  'pnpm-globals': '/icons/pnpm.svg',
+};
+
 function semverOf(s: string): string | null {
   return s.match(/\d+\.\d+\.\d+(?:[-+][0-9a-zA-Z.-]*)?/)?.[0] ?? null;
 }
@@ -308,6 +339,7 @@ export async function detectPrograms(): Promise<ProgramView[]> {
         id: p.id,
         name: p.name,
         icon: p.icon,
+        brandIcon: BRAND_ICONS[p.id],
         desc: p.desc,
         channel: p.channel,
         installed,
