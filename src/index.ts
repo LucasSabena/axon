@@ -799,8 +799,12 @@ app.all('/p/:port/*', async (c) => {
   if (type.includes('text/html')) {
     let html = await upstream.text();
     const reqUrl = new URL(c.req.url);
-    const proto = reqUrl.protocol === 'https:' ? 'wss:' : 'ws:';
-    const httpOrigin = reqUrl.origin;
+    // Behind the Cloudflare tunnel every request arrives as http:// even
+    // though the browser sees https:// — honor X-Forwarded-Proto so rewrites
+    // emit wss:// (mixed content would block ws:// on an https page).
+    const outerProto = (c.req.header('x-forwarded-proto') || reqUrl.protocol.replace(':', '')).split(',')[0].trim();
+    const proto = outerProto === 'https' ? 'wss:' : 'ws:';
+    const httpOrigin = `${outerProto}://${reqUrl.host}`;
     // Apps that hardcode their own ws(s)/http origin (e.g. Steel's session
     // viewer emits ws://0.0.0.0:PORT/v1/...) get routed back through the proxy.
     // Single pass so inserted URLs are never re-processed. 0.0.0.0:P inside a
