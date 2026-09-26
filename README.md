@@ -1,6 +1,8 @@
 # Ports Manager
 
-> Panel visual para gestionar proyectos de desarrollo, contenedores Docker y subdominios personalizados desde una sola interfaz web. Funciona con cualquier dominio que administres en Cloudflare.
+> Panel visual para gestionar **puertos activos**, **programas instalados** (con actualización en un click), proyectos de desarrollo, contenedores Docker y subdominios de Cloudflare — todo desde una interfaz web.
+>
+> **Arquitectura:** la app corre en un contenedor Docker pero ejecuta todos los comandos del sistema **en el host** vía `nsenter` (nombrespaces mount+pid+net de PID 1) y lee el filesystem del host montado en `/hostfs` (read-only). Esto hace que vea y controle el sistema real: pnpm/npm/node del usuario, apt/snap del sistema, procesos y rutas reales.
 
 [![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 [![Bun](https://img.shields.io/badge/Bun-000?logo=bun&logoColor=white)](https://bun.sh/)
@@ -13,16 +15,23 @@
 ## 📸 Vista previa
 
 ```text
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ Ports Manager                                                               │
-│ CPU 2%   RAM 21%   DISK 17%   LOAD 1.51                          binary ▾   │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ Desarrollo | Sistema | Docker | Dominios                                    │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ Proyecto              Tipo   PID    Puerto(s)   Comando           Acciones │
-│ portfolio-lucassabena node   112489 3005 🌐     next-server...     [Editar] │
-│ app                   bun    210625 3457         bun run src/...   [Dominio]│
-└─────────────────────────────────────────────────────────────────────────────┘
+┌──────────────┬──────────────────────────────────────────────────────────────┐
+│ Ports Manager│  ⌘K Buscar…        CPU▁▂▅ RAM▃▅ DISK 69%  LOAD 0.9   ⚙  ⏻  │
+│              │                                                              │
+│ MONITOR      │  Puertos abiertos              [Todos][Proyectos][Servicios] │
+│ ▸ Puertos 52 │                                                              │
+│   Proyectos  │  ▾ web-sofi                      ASTRO      /home/u/Proyectos│
+│   Docker  31 │     ⚡ :4322 ●  localhost:4322   100.x.x.x:4322   [Info][⏻] │
+│   Dominios 22│                                                              │
+│              │  🔒 sshd          SYSTEMD  localhost:22   100.x.x.x:22       │
+│ SISTEMA      │  ⚙  DNS           SYSTEMD  localhost:53   ̶1̶0̶0̶.̶x̶.̶x̶.̶x̶:̶5̶3̶      │
+│   Programas  │                                                              │
+│   Config     │  (links de red tachados = el servicio solo bindea 127.0.0.1) │
+│              │                                                              │
+│ TEMA         │                                                              │
+│ Linear/Net./ │                                                              │
+│ Warp   admin │                                                              │
+└──────────────┴──────────────────────────────────────────────────────────────┘
 ```
 
 > **Click en cualquier fila** abre un modal con Info, Stats en tiempo real, Logs y variables de entorno.
@@ -33,7 +42,14 @@
 
 ## ✨ Características
 
-- 🔍 **Descubrimiento automático** de procesos Node.js, Bun, Python y contenedores Docker con puertos abiertos.
+- 🎨 **3 temas visuales** conmutables en runtime (Linear, Netdata, Warp) — completamente tokenizados con CSS custom properties: colores, tipografías, densidad y radios por tema.
+- 🗂️ **Sidebar colapsable** con contadores vivos por sección y selector de tema.
+- ⌨️ **Command palette** (`Ctrl/⌘+K`): navegar secciones, abrir puertos en localhost o IP de red, cerrar procesos, lanzar updates, cambiar de tema.
+- 📈 **Sparklines** de CPU/RAM en vivo en la topbar.
+- 🧩 **Detección de systemd**: procesos supervisados se etiquetan y el cierre ofrece "Detener servicio" en vez de un kill que respawnea.
+- 🔌 **Puertos (core)**: todos los listeners TCP/UDP del host, clasificados en Proyecto / Servicio / Sistema. Cada puerto se tracea al **root del repo git** (no solo el cwd), con detección de framework (Next.js, Astro, Vite, React, Django, FastAPI, Go, Rust…), ruta real, usuario, RAM y uptime. Cierre con **preview** (árbol de procesos + puertos a liberar + advertencias), SIGTERM→SIGKILL, y protección de daemons del sistema (sshd, systemd, dockerd, BBDD…).
+- 📦 **Programas**: registro de programas actualizables (apt, snap, pnpm globals, bun, uv, pipx, rustup, apps .deb como ChatGPT/Chrome/VS Code…). Cada botón ejecuta los comandos reales por pasos con **log en vivo** y errores explícitos (comando + exit code + stderr). Botón "Actualizar todo". Inventario completo: apps desktop (.desktop + íconos), snaps, paquetes apt.
+- 🔍 **Descubrimiento automático** de proyectos en disco (monorepo-aware) con arranque/parada/logs ejecutándose en el host con el usuario real.
 - 🌐 **Asignación de subdominios** personalizados en un clic, integrado con Cloudflare DNS y Cloudflare Tunnel.
 - 📊 **Estadísticas del servidor** en vivo: CPU, RAM, disco y load average.
 - 📦 **Docker** con dominios asignados, logs, stats y env vars.
@@ -153,11 +169,14 @@ services:
       CLOUDFLARE_ZONE_ID: ${CLOUDFLARE_ZONE_ID}
       CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID}
       CLOUDFLARE_TUNNEL_ID: ${CLOUDFLARE_TUNNEL_ID}
+      HOST_USER: tu-usuario-del-host        # usuario para comandos a nivel de usuario (pnpm, bun, systemctl --user)
+      PROJECT_SCAN_DIRS: /home/tu-usuario/Proyectos
     volumes:
       - ./ports-manager/data:/app/data
       - ./ports-manager/public:/app/public:ro
       - ./cloudflared/config.yml:/app/cloudflared-config.yml
       - /var/run/docker.sock:/var/run/docker.sock
+      - /:/hostfs:ro                        # filesystem del host (read-only) para rutas reales
 ```
 
 ```bash
@@ -201,7 +220,9 @@ Tus dominios y configuración se guardan en `data/config.json`, que persiste fue
     "scanIntervalMs": 5000,
     "protectedPids": [1, 2],
     "protectedPorts": [22, 80, 443, 9090, 9443],
-    "ignoredPatterns": ["code-server", "openchamber"]
+    "ignoredPatterns": [],
+    "scanDirs": ["/home/tu-usuario/Proyectos"],
+    "hostUser": "tu-usuario-del-host"
   }
 }
 ```

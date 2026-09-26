@@ -1,186 +1,278 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="es" data-theme="linear">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-  <meta http-equiv="Pragma" content="no-cache">
-  <meta http-equiv="Expires" content="0">
   <title>Ports Manager</title>
-  <link rel="stylesheet" href="/style.v2.css">
+  <link rel="stylesheet" href="/app.css?v=6">
 </head>
 <body>
   <div id="app">
-    <div id="login-screen" class="screen">
+    <div id="login-screen" class="login-screen hidden">
       <div class="login-box">
-        <h1>Ports Manager</h1>
-        <p>Gestión de proyectos de desarrollo y subdominios</p>
+        <div class="brand"><span class="brand-mark"><i data-lucide="network" class="lucide-icon"></i></span> Ports Manager</div>
         <form id="login-form">
           <input type="text" id="username" placeholder="Usuario" autocomplete="username" required>
           <input type="password" id="password" placeholder="Contraseña" autocomplete="current-password" required>
-          <button type="submit">Ingresar</button>
+          <button type="submit" class="btn-primary">Ingresar</button>
           <div id="login-error" class="error"></div>
         </form>
       </div>
     </div>
 
-    <div id="main-screen" class="screen hidden">
-      <header>
-        <h1>Ports Manager</h1>
-        <div id="server-stats" class="server-stats">
-          <div class="stat" title="CPU">
-            <span class="stat-label">CPU</span>
-            <span class="stat-value" id="stat-cpu">-</span>
+    <div id="main-screen" class="hidden">
+      <div class="app-shell">
+        <aside class="sidebar">
+          <div class="sidebar-brand">
+            <span class="brand-mark"><i data-lucide="network" class="lucide-icon"></i></span>
+            <span class="brand-text">Ports Manager</span>
           </div>
-          <div class="stat" title="RAM">
-            <span class="stat-label">RAM</span>
-            <span class="stat-value" id="stat-ram">-</span>
-          </div>
-          <div class="stat" title="Disco">
-            <span class="stat-label">DISK</span>
-            <span class="stat-value" id="stat-disk">-</span>
-          </div>
-          <div class="stat" title="Load average">
-            <span class="stat-label">LOAD</span>
-            <span class="stat-value" id="stat-load">-</span>
-          </div>
-        </div>
-        <div class="header-actions">
-          <span id="user-name"></span>
-          <button id="settings-btn" class="btn-secondary">⚙️ Config</button>
-          <button id="logout-btn" class="btn-secondary">Salir</button>
-        </div>
-      </header>
 
-      <nav class="tabs">
-        <button class="tab-btn active" data-tab="processes">Desarrollo</button>
-        <button class="tab-btn" data-tab="system">Sistema</button>
-        <button class="tab-btn" data-tab="docker">Docker</button>
-        <button class="tab-btn" data-tab="projects">Proyectos</button>
-        <button class="tab-btn" data-tab="domains">Dominios</button>
-      </nav>
+          <nav class="sidebar-nav">
+            <div class="nav-section-label"><span>Monitor</span></div>
+            <button class="nav-item tab-btn active" data-tab="ports">
+              <i data-lucide="plug" class="lucide-icon"></i>
+              <span class="nav-label">Puertos</span>
+              <span class="nav-count" id="nav-count-ports"></span>
+            </button>
+            <button class="nav-item tab-btn" data-tab="projects">
+              <i data-lucide="folder-git-2" class="lucide-icon"></i>
+              <span class="nav-label">Proyectos</span>
+              <span class="nav-count" id="nav-count-projects"></span>
+            </button>
+            <button class="nav-item tab-btn" data-tab="docker">
+              <i data-lucide="container" class="lucide-icon"></i>
+              <span class="nav-label">Docker</span>
+              <span class="nav-count" id="nav-count-docker"></span>
+            </button>
+            <button class="nav-item tab-btn" data-tab="domains">
+              <i data-lucide="globe" class="lucide-icon"></i>
+              <span class="nav-label">Dominios</span>
+              <span class="nav-count" id="nav-count-domains"></span>
+            </button>
 
-      <main>
-        <section id="tab-processes" class="tab-content active">
-          <div class="section-header">
-            <h2>Proyectos de desarrollo</h2>
-            <span class="last-updated" id="processes-updated"></span>
-          </div>
-          <div class="table-wrapper">
-            <table id="processes-table">
-              <thead>
-                <tr>
-                  <th>Proyecto</th>
-                  <th>Tipo</th>
-                  <th>PID</th>
-                  <th>Puerto(s)</th>
-                  <th>Comando</th>
-                  <th>Acciones</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          </div>
-          <div id="processes-empty" class="empty-state hidden">No hay proyectos de desarrollo corriendo</div>
-        </section>
+            <div class="nav-section-label"><span>Sistema</span></div>
+            <button class="nav-item tab-btn" data-tab="programs">
+              <i data-lucide="package" class="lucide-icon"></i>
+              <span class="nav-label">Programas</span>
+              <span class="nav-count nav-alert" id="nav-count-programs"></span>
+            </button>
+            <button class="nav-item" id="sidebar-settings">
+              <i data-lucide="settings" class="lucide-icon"></i>
+              <span class="nav-label">Config</span>
+            </button>
+          </nav>
 
-        <section id="tab-system" class="tab-content">
-          <div class="section-header">
-            <h2>Todos los procesos con puerto abierto</h2>
-            <span class="last-updated" id="system-updated"></span>
-          </div>
-          <div class="table-wrapper">
-            <table id="system-table">
-              <thead>
-                <tr>
-                  <th>Nombre</th>
-                  <th>Tipo</th>
-                  <th>PID</th>
-                  <th>Puerto(s)</th>
-                  <th>Comando</th>
-                  <th>Acciones</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          </div>
-          <div id="system-empty" class="empty-state hidden">No hay procesos con puertos abiertos</div>
-        </section>
-
-        <section id="tab-docker" class="tab-content">
-          <div class="section-header">
-            <h2>Contenedores Docker</h2>
-            <span class="last-updated" id="docker-updated"></span>
-          </div>
-          <div class="table-wrapper">
-            <table id="docker-table">
-              <thead>
-                <tr>
-                  <th>Nombre</th>
-                  <th>Tipo</th>
-                  <th>ID</th>
-                  <th>Puertos</th>
-                  <th>Imagen / Estado</th>
-                  <th>Acciones</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          </div>
-          <div id="docker-empty" class="empty-state hidden">No hay contenedores Docker corriendo</div>
-        </section>
-
-        <section id="tab-projects" class="tab-content">
-          <div class="section-header">
-            <h2>Proyectos</h2>
-            <div class="section-actions">
-              <button id="projects-detect-btn" class="btn-action">Detectar</button>
-              <button id="projects-add-btn" class="btn-primary">+ Agregar</button>
-              <span class="last-updated" id="projects-updated"></span>
+          <div class="sidebar-footer">
+            <div class="nav-section-label"><span>Tema</span></div>
+            <div class="theme-picker">
+              <button class="theme-option active" data-theme="linear">
+                <span class="theme-swatch linear"></span><span class="nav-label">Linear</span>
+              </button>
+              <button class="theme-option" data-theme="netdata">
+                <span class="theme-swatch netdata"></span><span class="nav-label">Netdata</span>
+              </button>
+              <button class="theme-option" data-theme="warp">
+                <span class="theme-swatch warp"></span><span class="nav-label">Warp</span>
+              </button>
+            </div>
+            <div class="sidebar-toggle-row">
+              <span class="nav-label" id="user-name"></span>
+              <button class="sidebar-toggle" id="sidebar-collapse" title="Colapsar">
+                <i data-lucide="panel-left-close" class="lucide-icon"></i>
+              </button>
             </div>
           </div>
-          <div class="table-wrapper">
-            <table id="projects-table">
-              <thead>
-                <tr>
-                  <th>Nombre</th>
-                  <th>Tipo</th>
-                  <th>Estado</th>
-                  <th>Puerto(s)</th>
-                  <th>Links</th>
-                  <th>Acciones</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          </div>
-          <div id="projects-empty" class="empty-state hidden">No hay proyectos registrados</div>
-        </section>
+        </aside>
 
-        <section id="tab-domains" class="tab-content">
-          <div class="section-header">
-            <h2>Dominios asignados</h2>
-          </div>
-          <div class="table-wrapper">
-            <table id="domains-table">
-              <thead>
-                <tr>
-                  <th>Dominio</th>
-                  <th>Proyecto</th>
-                  <th>Target</th>
-                  <th>Creado</th>
-                  <th>Acciones</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          </div>
-          <div id="domains-empty" class="empty-state hidden">No hay dominios asignados</div>
-        </section>
-      </main>
+        <div class="main-area">
+          <header class="topbar">
+            <button class="cmdk-trigger" id="cmdk-open">
+              <i data-lucide="search" class="lucide-icon"></i> Buscar o ejecutar…
+              <kbd>⌘K</kbd>
+            </button>
+            <div id="server-stats" class="server-stats">
+              <div class="stat" title="CPU"><span class="stat-label">CPU</span><canvas class="spark" id="spark-cpu" width="56" height="16"></canvas><span class="stat-value" id="stat-cpu">-</span></div>
+              <div class="stat" title="RAM"><span class="stat-label">RAM</span><canvas class="spark" id="spark-ram" width="56" height="16"></canvas><span class="stat-value" id="stat-ram">-</span></div>
+              <div class="stat" title="Disco"><span class="stat-label">DISK</span><span class="stat-value" id="stat-disk">-</span></div>
+              <div class="stat" title="Load average"><span class="stat-label">LOAD</span><span class="stat-value" id="stat-load">-</span></div>
+            </div>
+            <button id="settings-btn" class="btn-secondary" title="Configuración"><i data-lucide="settings" class="lucide-icon"></i></button>
+            <button id="logout-btn" class="btn-secondary" title="Salir"><i data-lucide="log-out" class="lucide-icon"></i></button>
+          </header>
+
+          <main class="content">
+            <!-- PORTS -->
+            <section id="tab-ports" class="tab-content active">
+              <div class="section-header">
+                <h2>Puertos abiertos</h2>
+                <div class="section-actions">
+                  <div class="filter-chips" id="ports-filters">
+                    <button class="chip active" data-filter="all">Todos</button>
+                    <button class="chip" data-filter="project">Proyectos</button>
+                    <button class="chip" data-filter="service">Servicios</button>
+                    <button class="chip" data-filter="system">Sistema</button>
+                  </div>
+                  <button id="ports-refresh" class="btn-secondary" title="Recargar"><i data-lucide="refresh-cw" class="lucide-icon"></i></button>
+                  <span class="last-updated" id="ports-updated"></span>
+                </div>
+              </div>
+              <div class="table-wrapper">
+                <table id="ports-table">
+                  <thead>
+                    <tr>
+                      <th></th>
+                      <th>Programa / Proyecto</th>
+                      <th>Puerto(s)</th>
+                      <th>Carpeta</th>
+                      <th>PID</th>
+                      <th>RAM</th>
+                      <th>Uptime</th>
+                      <th>Acciones</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <div id="ports-empty" class="empty-state hidden">No hay puertos abiertos</div>
+            </section>
+
+            <!-- PROGRAMS -->
+            <section id="tab-programs" class="tab-content">
+              <div class="section-header">
+                <h2>Actualizar programas</h2>
+                <div class="section-actions">
+                  <button id="update-all-btn" class="btn-primary btn-inline"><i data-lucide="arrow-up-circle" class="lucide-icon"></i> Actualizar todo</button>
+                  <button id="programs-refresh" class="btn-secondary" title="Recargar"><i data-lucide="refresh-cw" class="lucide-icon"></i></button>
+                  <span class="last-updated" id="programs-updated"></span>
+                </div>
+              </div>
+              <div id="programs-grid" class="programs-grid"></div>
+              <div id="programs-empty" class="empty-state hidden">No se detectaron programas actualizables</div>
+
+              <div class="section-header" style="margin-top:2rem">
+                <h2>Historial</h2>
+                <div class="section-actions">
+                  <button id="jobs-refresh" class="btn-secondary" title="Recargar"><i data-lucide="refresh-cw" class="lucide-icon"></i></button>
+                </div>
+              </div>
+              <div id="jobs-history" class="jobs-history"></div>
+              <div id="jobs-empty" class="empty-state hidden">Sin trabajos recientes</div>
+
+              <div class="section-header" style="margin-top:2rem">
+                <h2>Programas instalados</h2>
+                <div class="section-actions">
+                  <input type="text" id="installed-filter" placeholder="Filtrar apps…" class="filter-input">
+                  <button id="installed-load" class="btn-secondary"><i data-lucide="list" class="lucide-icon"></i> Cargar lista</button>
+                </div>
+              </div>
+              <div id="installed-summary" class="installed-summary hidden"></div>
+              <div id="installed-apps" class="apps-grid"></div>
+            </section>
+
+            <!-- PROJECTS -->
+            <section id="tab-projects" class="tab-content">
+              <div class="section-header">
+                <h2>Proyectos</h2>
+                <div class="section-actions">
+                  <button id="projects-detect-btn" class="btn-action"><i data-lucide="radar" class="lucide-icon"></i> Detectar</button>
+                  <button id="projects-add-btn" class="btn-primary btn-inline"><i data-lucide="plus" class="lucide-icon"></i> Agregar</button>
+                  <span class="last-updated" id="projects-updated"></span>
+                </div>
+              </div>
+              <div class="table-wrapper">
+                <table id="projects-table">
+                  <thead>
+                    <tr>
+                      <th>Nombre</th>
+                      <th>Tipo</th>
+                      <th>Estado</th>
+                      <th>Puerto(s)</th>
+                      <th>Ruta</th>
+                      <th>Acciones</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <div id="projects-empty" class="empty-state hidden">No hay proyectos registrados</div>
+            </section>
+
+            <!-- DOCKER -->
+            <section id="tab-docker" class="tab-content">
+              <div class="section-header">
+                <h2>Contenedores Docker</h2>
+                <span class="last-updated" id="docker-updated"></span>
+              </div>
+              <div class="table-wrapper">
+                <table id="docker-table">
+                  <thead>
+                    <tr>
+                      <th>Nombre</th>
+                      <th>Imagen</th>
+                      <th>Estado</th>
+                      <th>Puertos</th>
+                      <th>Acciones</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <div id="docker-empty" class="empty-state hidden">No hay contenedores Docker corriendo</div>
+            </section>
+
+            <!-- DOMAINS -->
+            <section id="tab-domains" class="tab-content">
+              <div class="section-header">
+                <h2>Dominios asignados</h2>
+                <button id="domains-import-btn" class="btn-action"><i data-lucide="download-cloud" class="lucide-icon"></i> Importar desde Cloudflare</button>
+              </div>
+              <div class="table-wrapper">
+                <table id="domains-table">
+                  <thead>
+                    <tr>
+                      <th>Dominio</th>
+                      <th>Proyecto</th>
+                      <th>Target</th>
+                      <th>Creado</th>
+                      <th>Acciones</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <div id="domains-empty" class="empty-state hidden">No hay dominios asignados</div>
+            </section>
+          </main>
+        </div>
+      </div>
     </div>
   </div>
 
+  <!-- Command palette -->
+  <div id="cmdk-overlay" class="cmdk-overlay hidden">
+    <div class="cmdk">
+      <input type="text" id="cmdk-input" class="cmdk-input" placeholder="Buscar proceso, puerto, acción…" autocomplete="off" spellcheck="false">
+      <div id="cmdk-list" class="cmdk-list"></div>
+    </div>
+  </div>
+
+  <!-- Kill confirmation -->
+  <div id="kill-modal" class="modal hidden">
+    <div class="modal-content">
+      <h3>Cerrar proceso</h3>
+      <div id="kill-plan-body"></div>
+      <div id="kill-error" class="error"></div>
+      <div class="modal-actions">
+        <button type="button" id="kill-cancel" class="btn-secondary">Cancelar</button>
+        <button type="button" id="kill-stop-service" class="btn-action hidden"><i data-lucide="octagon-x" class="lucide-icon"></i> Detener servicio</button>
+        <button type="button" id="kill-confirm" class="btn-danger"><i data-lucide="power" class="lucide-icon"></i> Cerrar proceso</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Domain modal -->
   <div id="domain-modal" class="modal hidden">
     <div class="modal-content">
       <h3>Asignar subdominio</h3>
@@ -189,7 +281,7 @@
         <label>
           Subdominio
           <input type="text" id="domain-input" placeholder="miproyecto" required>
-          <span class="domain-suffix">.          <span id="domain-suffix-text">example.com</span></span>
+          <span class="domain-suffix">.<span id="domain-suffix-text"></span></span>
         </label>
         <input type="hidden" id="domain-port">
         <input type="hidden" id="domain-type">
@@ -204,82 +296,41 @@
     </div>
   </div>
 
-  <div id="kill-modal" class="modal hidden">
-    <div class="modal-content">
-      <h3>Confirmar kill</h3>
-      <p id="kill-modal-info"></p>
-      <div id="kill-error" class="error"></div>
-      <div class="modal-actions">
-        <button type="button" id="kill-cancel" class="btn-secondary">Cancelar</button>
-        <button type="button" id="kill-confirm" class="btn-danger">Matar proceso</button>
-      </div>
-    </div>
-  </div>
-
+  <!-- Detail modal -->
   <div id="detail-modal" class="modal hidden">
     <div class="modal-content detail-modal-content">
       <div class="detail-header">
         <div>
-          <h3 id="detail-title">Proyecto</h3>
+          <h3 id="detail-title">Proceso</h3>
           <div id="detail-meta" class="detail-meta"></div>
         </div>
         <div class="detail-actions">
-          <button id="detail-domain-btn" class="btn-action">Dominio</button>
-          <button id="detail-kill-btn" class="btn-danger">Kill</button>
-          <button id="detail-close" class="btn-secondary">Cerrar</button>
+          <button id="detail-domain-btn" class="btn-action"><i data-lucide="globe" class="lucide-icon"></i> Dominio</button>
+          <button id="detail-kill-btn" class="btn-danger"><i data-lucide="power" class="lucide-icon"></i> Cerrar</button>
+          <button id="detail-close" class="btn-secondary"><i data-lucide="x-circle" class="lucide-icon"></i> Salir</button>
         </div>
       </div>
-
       <div class="detail-tabs">
         <button class="detail-tab-btn active" data-detail-tab="info">Info</button>
-        <button class="detail-tab-btn" data-detail-tab="stats">Stats</button>
-        <button class="detail-tab-btn" data-detail-tab="logs">Logs</button>
         <button class="detail-tab-btn" data-detail-tab="env">Env</button>
       </div>
-
       <div id="detail-tab-info" class="detail-tab-content active">
         <dl class="detail-grid">
-          <div><dt id="detail-label-cwd">CWD</dt><dd id="detail-cwd">-</dd></div>
-          <div><dt id="detail-label-working-dir">Directorio de trabajo</dt><dd id="detail-working-dir">-</dd></div>
-          <div><dt id="detail-label-ppid">PPID</dt><dd id="detail-ppid">-</dd></div>
-          <div><dt id="detail-label-start">Inicio</dt><dd id="detail-start">-</dd></div>
-          <div><dt id="detail-label-runtime">Tipo de runtime</dt><dd id="detail-runtime">-</dd></div>
+          <div><dt>Directorio</dt><dd id="detail-cwd">-</dd></div>
+          <div><dt>PID / PPID</dt><dd id="detail-pid">-</dd></div>
+          <div><dt>Usuario</dt><dd id="detail-user">-</dd></div>
+          <div><dt>Inicio</dt><dd id="detail-start">-</dd></div>
         </dl>
         <div class="detail-full">
-          <dt id="detail-label-cmd">Comando completo</dt>
+          <dt>Comando completo</dt>
           <dd id="detail-cmd" class="cmd-box">-</dd>
         </div>
-        <div class="detail-full detail-links">
-          <dt>Links rapidos</dt>
-          <dd id="detail-links">-</dd>
-        </div>
       </div>
-
-        <div id="detail-tab-stats" class="detail-tab-content">
-        <div class="stats-grid">
-          <div class="stat-card"><span class="stat-label" id="detail-stats-label-cpu">CPU</span><span class="stat-value" id="detail-stats-cpu">-</span></div>
-          <div class="stat-card"><span class="stat-label" id="detail-stats-label-memory">Memoria</span><span class="stat-value" id="detail-stats-memory">-</span></div>
-          <div class="stat-card"><span class="stat-label" id="detail-stats-label-uptime">Uptime</span><span class="stat-value" id="detail-stats-uptime">-</span></div>
-          <div class="stat-card"><span class="stat-label" id="detail-stats-label-threads">Threads</span><span class="stat-value" id="detail-stats-threads">-</span></div>
-        </div>
-      </div>
-
-      <div id="detail-tab-logs" class="detail-tab-content">
-        <div class="logs-toolbar">
-          <select id="detail-logs-source" class="hidden"></select>
-          <button id="detail-logs-reload" class="btn-secondary">Recargar</button>
-        </div>
-        <div id="detail-logs-empty" class="empty-state hidden">No se detectaron fuentes de logs.</div>
-        <pre id="detail-logs-pre" class="log-box">Selecciona una fuente y presiona Recargar.</pre>
-      </div>
-
       <div id="detail-tab-env" class="detail-tab-content">
-        <input type="text" id="detail-env-filter" placeholder="Filtrar variables...">
+        <input type="text" id="detail-env-filter" class="filter-input" placeholder="Filtrar variables...">
         <div class="table-wrapper">
           <table id="detail-env-table">
-            <thead>
-              <tr><th>Variable</th><th>Valor</th></tr>
-            </thead>
+            <thead><tr><th>Variable</th><th>Valor</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -287,15 +338,32 @@
     </div>
   </div>
 
+  <!-- Job log modal (updates, installs) -->
+  <div id="job-modal" class="modal hidden">
+    <div class="modal-content logs-modal-content">
+      <div class="logs-modal-header">
+        <div>
+          <h3 id="job-title">Ejecutando</h3>
+          <span id="job-status" class="logs-status logs-status-connecting">Corriendo</span>
+          <div id="job-steps" class="job-steps"></div>
+        </div>
+        <div class="logs-modal-actions">
+          <button type="button" id="job-close" class="btn-secondary">Cerrar</button>
+        </div>
+      </div>
+      <pre id="job-log" class="logs-pre"></pre>
+    </div>
+  </div>
+
+  <!-- Project logs modal -->
   <div id="logs-modal" class="modal hidden">
     <div class="modal-content logs-modal-content">
       <div class="logs-modal-header">
         <div>
           <h3 id="logs-modal-title">Logs</h3>
-          <span id="logs-status" class="logs-status">Desconectado</span>
         </div>
         <div class="logs-modal-actions">
-          <button type="button" id="logs-clear" class="btn-secondary">Limpiar</button>
+          <button type="button" id="logs-reload" class="btn-secondary"><i data-lucide="refresh-cw" class="lucide-icon"></i> Recargar</button>
           <button type="button" id="logs-close" class="btn-secondary">Cerrar</button>
         </div>
       </div>
@@ -303,51 +371,15 @@
     </div>
   </div>
 
-  <div id="start-modal" class="modal hidden">
-    <div class="modal-content logs-modal-content">
-      <div class="logs-modal-header">
-        <div>
-          <h3 id="start-modal-title">Iniciando</h3>
-          <span id="start-status" class="logs-status logs-status-connecting">Preparando</span>
-        </div>
-        <div class="logs-modal-actions">
-          <button type="button" id="start-install" class="btn-warning hidden">Instalar deps</button>
-          <button type="button" id="start-close" class="btn-secondary">Cerrar</button>
-        </div>
-      </div>
-      <pre id="start-pre" class="logs-pre"></pre>
-    </div>
-  </div>
-
+  <!-- Project edit modal -->
   <div id="project-edit-modal" class="modal hidden">
     <div class="modal-content">
       <h3 id="project-edit-title">Editar proyecto</h3>
       <form id="project-edit-form">
-        <label>
-          Nombre
-          <input type="text" id="project-edit-name" required>
-        </label>
-        <label>
-          Tipo
-          <select id="project-edit-type" required>
-            <option value="node">Node</option>
-            <option value="bun">Bun</option>
-            <option value="python">Python</option>
-            <option value="other">Otro</option>
-          </select>
-        </label>
-        <label>
-          Comando
-          <input type="text" id="project-edit-command" required>
-        </label>
-        <label>
-          Directorio de trabajo
-          <input type="text" id="project-edit-cwd" required>
-        </label>
-        <label>
-          Puerto esperado
-          <input type="number" id="project-edit-port" min="1" max="65535">
-        </label>
+        <label>Nombre <input type="text" id="project-edit-name" required></label>
+        <label>Comando <input type="text" id="project-edit-command" placeholder="pnpm run dev"></label>
+        <label>Directorio <input type="text" id="project-edit-cwd" required></label>
+        <label>Puerto esperado <input type="number" id="project-edit-port" min="1" max="65535"></label>
         <input type="hidden" id="project-edit-id">
         <div id="project-edit-error" class="error"></div>
         <div class="modal-actions">
@@ -359,25 +391,28 @@
     </div>
   </div>
 
+  <!-- Settings modal -->
   <div id="settings-modal" class="modal hidden">
     <div class="modal-content">
-      <h3>Configuracion</h3>
+      <h3>Configuración</h3>
       <form id="settings-form">
-        <label>
-          Intervalo de escaneo (ms)
+        <label>Intervalo de escaneo (ms)
           <input type="number" id="settings-scan-interval" min="1000" step="1000" required>
         </label>
-        <label>
-          PIDs protegidos (separados por coma)
+        <label>PIDs protegidos (separados por coma)
           <textarea id="settings-protected-pids" rows="2" placeholder="1, 2, 3"></textarea>
         </label>
-        <label>
-          Puertos protegidos (separados por coma)
+        <label>Puertos protegidos (separados por coma)
           <textarea id="settings-protected-ports" rows="2" placeholder="22, 80, 443"></textarea>
         </label>
-        <label>
-          Patrones ignorados (separados por coma o una por linea)
-          <textarea id="settings-ignored-patterns" rows="4" placeholder="node_modules, .git"></textarea>
+        <label>Patrones ignorados
+          <textarea id="settings-ignored-patterns" rows="3" placeholder="playwright-mcp, soffice"></textarea>
+        </label>
+        <label>Carpetas a escanear para proyectos (una por línea)
+          <textarea id="settings-scan-dirs" rows="3" placeholder="/home/user/Proyectos"></textarea>
+        </label>
+        <label>Servicios conocidos por puerto (formato: puerto:nombre:icono-lucide por línea)
+          <textarea id="settings-known-services" rows="3" placeholder="4095:OpenChamber:brain"></textarea>
         </label>
         <div id="settings-error" class="error"></div>
         <div class="modal-actions">
@@ -388,6 +423,9 @@
     </div>
   </div>
 
-  <script src="/app.v2.js"></script>
+  <div id="toast-container"></div>
+
+  <script src="/vendor/lucide.min.js?v=6"></script>
+  <script src="/app.js?v=6"></script>
 </body>
 </html>

@@ -1,10 +1,10 @@
 node_modules
-data/config.json
-data/config*.bak*
-data/logs
+data/
+!data/config.example.json
 .env
 *.log
 dist
 .DS_Store
 .vscode
 .idea
+.playwright-cli/

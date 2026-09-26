@@ -1,4 +1,5 @@
 import { $ } from 'bun';
+import { HOST_FS } from './host';
 
 export interface ServerStats {
   cpuPercent: number;
@@ -30,8 +31,8 @@ export async function getServerStats(): Promise<ServerStats> {
     const [meminfo, stat, df, uptime, sensors] = await Promise.all([
       $`cat /proc/meminfo`.text().catch(() => ''),
       $`cat /proc/stat`.text().catch(() => ''),
-      $`df -B1 /`.text().catch(() => ''),
-      $`uptime`.text().catch(() => ''),
+      $`df -B1 ${HOST_FS || '/'}`.text().catch(() => ''),
+      $`cat /proc/loadavg`.text().catch(() => ''),
       $`sensors -j 2>/dev/null || echo '{}'`.text().catch(() => '{}'),
     ]);
 
@@ -42,7 +43,15 @@ export async function getServerStats(): Promise<ServerStats> {
     const memoryUsedMb = Math.round(memoryUsedKb / 1024);
     const memoryPercent = memoryTotalKb ? Math.round((memoryUsedKb / memoryTotalKb) * 100) : 0;
 
-    const cpuPercent = calculateCpuPercent(stat);
+    // First call after boot has no baseline — prime it, wait, and re-sample
+    // so the response already carries a real percentage instead of 0.
+    let cpuStat = stat;
+    if (!lastCpuStats) {
+      calculateCpuPercent(stat);
+      await new Promise((r) => setTimeout(r, 350));
+      cpuStat = await $`cat /proc/stat`.text().catch(() => stat);
+    }
+    const cpuPercent = calculateCpuPercent(cpuStat);
 
     const diskLines = df.split('\n').filter(Boolean);
     const diskLine = diskLines[1] || '';
@@ -53,12 +62,11 @@ export async function getServerStats(): Promise<ServerStats> {
     const diskUsedGb = Math.round(diskUsedBytes / (1024 * 1024 * 1024));
     const diskPercent = diskTotalBytes ? Math.round((diskUsedBytes / diskTotalBytes) * 100) : 0;
 
-    const loadMatch = uptime.match(/load average[s]?:\s+([\d.,]+)\s*,?\s*([\d.,]+)?\s*,?\s*([\d.,]+)?/);
-    const loadAverage = loadMatch
-      ? [loadMatch[1], loadMatch[2], loadMatch[3]]
-          .filter(Boolean)
-          .map((v) => parseFloat(v.replace(',', '.')))
-      : [];
+    const loadAverage = uptime
+      .split(/\s+/)
+      .slice(0, 3)
+      .map((v) => parseFloat(v))
+      .filter((v) => !Number.isNaN(v));
 
     const temperatures = parseSensors(sensors);
 
@@ -109,7 +117,7 @@ function labelForHost(ip: string, kind: ServerHost['kind'], iface?: string): str
   return iface ? `Host ${iface}` : 'Host';
 }
 
-async function getServerHosts(): Promise<ServerHost[]> {
+export async function getServerHosts(): Promise<ServerHost[]> {
   const hosts = new Map<string, ServerHost>();
 
   const add = (ip: string, kind?: ServerHost['kind'], iface?: string) => {
@@ -156,10 +164,10 @@ async function getServerHosts(): Promise<ServerHost[]> {
 let lastCpuStats: { user: number; nice: number; system: number; idle: number; iowait: number; irq: number; softirq: number; steal: number; total: number; time: number } | null = null;
 
 function calculateCpuPercent(statContent: string): number {
-  const match = statContent.match(/^cpu\\s+(\\d+)\\s+(\\d+)\\s+(\\d+)\\s+(\\d+)\\s+(\\d+)\\s+(\\d+)\\s+(\\d+)\\s+(\\d+)/m);
+  const match = statContent.match(/^cpu\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/m);
   if (!match) return 0;
 
-  const [, user, nice, system, idle, iowait, irq, softirq, steal] = match.slice(1).map((v) => parseInt(v, 10));
+  const [user, nice, system, idle, iowait, irq, softirq, steal] = match.slice(1).map((v) => parseInt(v, 10));
   const total = user + nice + system + idle + iowait + irq + softirq + steal;
   const now = Date.now();
 
