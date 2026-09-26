@@ -1791,8 +1791,10 @@ loaders.terminal = () => {
 
 // ---------- Server-side browser (Steel session viewer) ----------
 
-const BROWSER_PORT = 18230;
-const browserUrl = `/p/${BROWSER_PORT}/v1/sessions/debug`;
+// Chromium real (jlesage/chromium + noVNC) — full browser running on the
+// server with a persistent profile (accounts/cookies stay logged in).
+const BROWSER_PORT = 5800;
+const browserUrl = `/p/${BROWSER_PORT}/?autoconnect=true&resize=scale&path=p/${BROWSER_PORT}/websockify`;
 let browserLoaded = false;
 
 function loadBrowser() {
