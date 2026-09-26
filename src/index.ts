@@ -13,7 +13,7 @@ import {
 } from './auth';
 import { loadConfig, saveConfig } from './config';
 import { getServerStats, getServerHosts } from './stats';
-import { setHostUser, hostExec, hostToContainer } from './host';
+import { setHostUser, hostExec, hostToContainer, hostSpawnInteractive } from './host';
 import {
   configurePorts,
   listPortProcesses,
@@ -59,6 +59,8 @@ import {
   getRemoteTunnelConfig,
 } from './cloudflare';
 import type { DomainMapping, DomainStatus, Project } from './types';
+import { notify, setNotifyUrl } from './notify';
+import { loadHeartbeats, recordHeartbeat, lastState, allHeartbeats, uptimePct } from './heartbeats';
 
 const PORT = parseInt(process.env.PORT || '3457', 10);
 const BASE_DOMAIN = process.env.BASE_DOMAIN || 'example.com';
@@ -67,6 +69,43 @@ let config = await loadConfig();
 configurePorts(config.settings);
 setHostUser(config.settings.hostUser);
 initProjects(config, saveConfig);
+await loadHeartbeats();
+setNotifyUrl(config.settings.notifyUrl);
+
+// ---------- Heartbeat monitor ----------
+// Lightweight public probe per domain every 90s; records history and fires a
+// webhook when a domain transitions up → down.
+const HB_INTERVAL_MS = 90_000;
+
+async function hbProbe(fullDomain: string): Promise<{ s: 'up' | 'warn' | 'down'; ms?: number }> {
+  const t0 = performance.now();
+  try {
+    const res = await fetch(`https://${fullDomain}/`, { signal: AbortSignal.timeout(10_000), redirect: 'manual' });
+    const ms = Math.round(performance.now() - t0);
+    if (res.status >= 200 && res.status < 400) return { s: 'up', ms };
+    if (res.status === 401 || res.status === 403 || res.status === 404) return { s: 'warn', ms };
+    return { s: 'down', ms };
+  } catch {
+    return { s: 'down' };
+  }
+}
+
+async function heartbeatTick(): Promise<void> {
+  const domains = config.domains || [];
+  await Promise.allSettled(
+    domains.map(async (d) => {
+      const r = await hbProbe(d.fullDomain);
+      const prev = lastState(d.id);
+      recordHeartbeat(d.id, r.s, r.ms);
+      if (prev === 'up' && r.s === 'down') {
+        notify(`Dominio caído — ${d.fullDomain}`, `Dejó de responder tras ${d.port ? `puerto ${d.port}` : 'su target'}`, 4).catch(() => {});
+      }
+    })
+  );
+}
+
+setInterval(() => { heartbeatTick().catch(() => {}); }, HB_INTERVAL_MS).unref();
+heartbeatTick().catch(() => {});
 
 const app = new Hono();
 
@@ -101,6 +140,28 @@ app.get('/api/me', async (c) => {
 
 app.use('/api/*', requireAuth);
 app.use('/p/*', requireAuth);
+
+// ---------- Device pairing (QR login) ----------
+// Short-lived one-time tokens issued by an authed session; scanning the QR
+// lands on /pair?t=... which mints a real session and drops the token.
+const pairTokens = new Map<string, number>(); // token → expiresAt (ms)
+const PAIR_TTL_MS = 5 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [t, exp] of pairTokens) if (now > exp) pairTokens.delete(t);
+}, 60_000).unref();
+
+app.get('/pair', async (c) => {
+  const t = c.req.query('t') || '';
+  const exp = pairTokens.get(t);
+  const html = (msg: string) =>
+    c.html(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><body style="background:#0b0e14;color:#e6e9ef;font-family:system-ui;display:grid;place-items:center;height:100vh;margin:0"><div style="text-align:center"><h2>${msg}</h2><p style="opacity:.6">Volvé al dashboard y generá uno nuevo.</p></div>`, 410);
+  if (!t || !exp || Date.now() > exp) return html('Este link de vinculación venció o no es válido.');
+  pairTokens.delete(t);
+  const token = await createSession('paired-device');
+  setSessionCookie(c, token);
+  return c.redirect('/');
+});
 
 // ---------- Ports (core) ----------
 
@@ -434,19 +495,21 @@ async function probeDomain(
   projects: Project[]
 ): Promise<DomainStatus> {
   let httpStatus: number | undefined;
+  const t0 = performance.now();
   try {
     const res = await fetch(`https://${d.fullDomain}/`, {
       redirect: 'manual',
       signal: AbortSignal.timeout(7000),
     });
+    const ms = Math.round(performance.now() - t0);
     httpStatus = res.status;
     res.body?.cancel().catch(() => {});
-    if (res.status < 400) return { state: 'up', httpStatus };
+    if (res.status < 400) return { state: 'up', httpStatus, ms };
     if (res.status === 401 || res.status === 403) {
-      return { state: 'warn', httpStatus, reason: `La app responde pero pide autenticación (HTTP ${res.status})` };
+      return { state: 'warn', httpStatus, ms, reason: `La app responde pero pide autenticación (HTTP ${res.status})` };
     }
     if (res.status < 500) {
-      return { state: 'warn', httpStatus, reason: `La app está viva pero la ruta responde HTTP ${res.status}` };
+      return { state: 'warn', httpStatus, ms, reason: `La app está viva pero la ruta responde HTTP ${res.status}` };
     }
   } catch { /* timeout / DNS / TLS → diagnose below */ }
 
@@ -634,6 +697,7 @@ app.put('/api/config', async (c) => {
   config.settings = { ...config.settings, ...body };
   await saveConfig(config);
   configurePorts(config.settings);
+  setNotifyUrl(config.settings.notifyUrl);
   return c.json({ ok: true, settings: config.settings });
 });
 
@@ -711,6 +775,122 @@ app.use('/*', async (c, next) => {
     c.header('Cache-Control', 'public, max-age=86400');
   }
 });
+
+// ---------- QR pairing (issue token) ----------
+
+app.post('/api/pair/create', async (c) => {
+  const token = crypto.randomUUID();
+  pairTokens.set(token, Date.now() + PAIR_TTL_MS);
+  const origin = `${c.req.header('x-forwarded-proto') || new URL(c.req.url).protocol.replace(':', '')}://${c.req.header('host')}`;
+  return c.json({ ok: true, token, url: `${origin}/pair?t=${token}`, expiresInMs: PAIR_TTL_MS });
+});
+
+// ---------- Heartbeat history ----------
+
+app.get('/api/domains/heartbeats', async (c) => {
+  const beats = allHeartbeats();
+  const uptime: Record<string, number | null> = {};
+  for (const id of Object.keys(beats)) uptime[id] = uptimePct(id);
+  return c.json({ ok: true, heartbeats: beats, uptime });
+});
+
+// ---------- Remote power ----------
+
+app.post('/api/system/power', async (c) => {
+  const body = await c.req.json<{ action?: string; confirm?: string }>().catch(() => ({}));
+  const action = body.action;
+  if (action !== 'reboot' && action !== 'poweroff') return fail(c, 400, 'Acción inválida');
+  const want = action === 'reboot' ? 'REINICIAR' : 'APAGAR';
+  if (body.confirm !== want) return fail(c, 400, `Escribí ${want} para confirmar`);
+  // Schedule a few seconds out so the HTTP response reaches the client.
+  const cmd = action === 'reboot' ? 'reboot' : 'poweroff';
+  await hostExec(`nohup bash -c 'sleep 3; systemctl ${cmd}' >/dev/null 2>&1 &`, { user: 'root', timeoutMs: 5000 });
+  notify('Ports Manager — Servidor', `Se programó ${action === 'reboot' ? 'un reinicio' : 'un apagado'} en 3 segundos`, 5).catch(() => {});
+  return c.json({ ok: true });
+});
+
+// ---------- Convert process to systemd user service ----------
+
+app.post('/api/systemd/create-service', async (c) => {
+  const body = await c.req.json<{ pid?: number; name?: string }>().catch(() => ({}));
+  const pid = Number(body.pid);
+  if (!pid || pid <= 1) return fail(c, 400, 'PID inválido');
+  const name = String(body.name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 48);
+  if (!name) return fail(c, 400, 'Nombre de servicio inválido');
+
+  // Read the live process: cmdline + cwd (container sees host pids via pid: host).
+  const [cmdlineRaw, cwdRes] = await Promise.all([
+    readFile(`/proc/${pid}/cmdline`, 'utf-8').catch(() => null),
+    hostExec(`readlink /proc/${pid}/cwd`, { user: 'root', timeoutMs: 5000 }),
+  ]);
+  if (!cmdlineRaw) return fail(c, 404, `No pude leer el proceso ${pid} — ¿siguió corriendo?`);
+  const cwd = cwdRes.ok ? cwdRes.stdout.trim() : '';
+  const argv = cmdlineRaw.split('\0').filter(Boolean);
+  if (!argv.length || !cwd) return fail(c, 500, 'No pude determinar el comando o el directorio del proceso');
+
+  const unit = `[Unit]
+Description=pm-${name} (creado desde Ports Manager)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=${cwd}
+ExecStart=${argv.join(' ')}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+`;
+
+  const b64 = Buffer.from(unit, 'utf-8').toString('base64');
+  const dir = 'mkdir -p ~/.config/systemd/user';
+  const write = `${dir} && echo '${b64}' | base64 -d > ~/.config/systemd/user/pm-${name}.service`;
+  const enable = `systemctl --user daemon-reload && systemctl --user enable --now pm-${name}.service`;
+  const res = await hostExec(`${write} && ${enable}`, { user: 'user', timeoutMs: 30_000 });
+  if (!res.ok) {
+    return fail(c, 500, 'Falló crear/habilitar el servicio', { detail: (res.stderr || res.stdout).slice(0, 2000), unit });
+  }
+  return c.json({ ok: true, service: `pm-${name}.service`, unit, cwd, command: argv.join(' ') });
+});
+
+// Preview of the unit that would be generated — no writes.
+app.post('/api/systemd/preview-service', async (c) => {
+  const body = await c.req.json<{ pid?: number; name?: string }>().catch(() => ({}));
+  const pid = Number(body.pid);
+  if (!pid || pid <= 1) return fail(c, 400, 'PID inválido');
+  const [cmdlineRaw, cwdRes] = await Promise.all([
+    readFile(`/proc/${pid}/cmdline`, 'utf-8').catch(() => null),
+    hostExec(`readlink /proc/${pid}/cwd`, { user: 'root', timeoutMs: 5000 }),
+  ]);
+  if (!cmdlineRaw) return fail(c, 404, `Proceso ${pid} no encontrado`);
+  const argv = cmdlineRaw.split('\0').filter(Boolean);
+  const cwd = cwdRes.ok ? cwdRes.stdout.trim() : '';
+  const name = String(body.name || '').toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 48);
+  const unit = `[Unit]
+Description=pm-${name || 'servicio'} (creado desde Ports Manager)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=${cwd || '?'}
+ExecStart=${argv.join(' ')}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+`;
+  return c.json({ ok: true, unit, cwd, command: argv.join(' '), suggested: `pm-${name || 'servicio'}.service` });
+});
+
 app.get('/*', serveStatic({ root: './public' }));
 
 app.onError((err, c) => {
@@ -718,35 +898,105 @@ app.onError((err, c) => {
   return fail(c, 500, 'Error interno', { detail: String(err) });
 });
 
+// ---------- Embedded terminal ----------
+// /ws/term — authenticated WebSocket that bridges to a host tmux session via
+// `script` (provides the PTY). The tmux session 'pm-term' persists across
+// browser refreshes and reconnects.
+interface WsProxyData { kind: 'proxy'; upstream: WebSocket; pending: unknown[] }
+interface WsTermData { kind: 'term'; proc: ReturnType<typeof Bun.spawn>; pumpDone?: boolean }
+type WsData = WsProxyData | WsTermData;
+
+function startTermSocket(ws: Bun.ServerWebSocket<WsData>): void {
+  const t = ws.data as WsTermData;
+  const cols = Number((t as unknown as { cols?: number }).cols) || 120;
+  const rows = Number((t as unknown as { rows?: number }).rows) || 40;
+  const cmd = `export TERM=xterm-256color; script -qfc "tmux new-session -A -s pm-term -x ${cols} -y ${rows}" /dev/null`;
+  const proc = hostSpawnInteractive(cmd, { user: 'user' });
+  t.proc = proc;
+  const pump = async (stream: ReadableStream<Uint8Array> | undefined) => {
+    if (!stream) return;
+    const r = stream.getReader();
+    try {
+      while (true) {
+        const { done, value } = await r.read();
+        if (done) break;
+        try {
+          ws.send(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength) as ArrayBuffer);
+        } catch { break; }
+      }
+    } catch { /* closed */ }
+  };
+  pump(proc.stdout as ReadableStream<Uint8Array>);
+  pump(proc.stderr as ReadableStream<Uint8Array>);
+  proc.exited.then(() => { try { ws.close(); } catch { /* closed */ } });
+}
+
 export default {
   port: PORT,
   async fetch(req: Request, server: Bun.Server) {
     const url = new URL(req.url);
+    const isWs = req.headers.get('upgrade')?.toLowerCase() === 'websocket';
     const wsMatch = url.pathname.match(/^\/p\/(\d+)(\/.*)?$/);
-    if (wsMatch && req.headers.get('upgrade')?.toLowerCase() === 'websocket') {
+    if (wsMatch && isWs) {
       const token = req.headers.get('cookie')?.match(/ports_session=([^;]+)/)?.[1];
       if (!token || !(await verifySessionToken(token))) return new Response('Unauthorized', { status: 401 });
       const upstream = new WebSocket(`ws://127.0.0.1:${wsMatch[1]}${wsMatch[2] || '/'}${url.search}`);
       upstream.binaryType = 'arraybuffer';
-      if (server.upgrade(req, { data: { upstream, pending: [] as unknown[] } })) return;
+      if (server.upgrade(req, { data: { kind: 'proxy', upstream, pending: [] as unknown[] } satisfies WsData })) return;
       upstream.close();
+      return new Response('WS upgrade failed', { status: 500 });
+    }
+    if (isWs && url.pathname === '/ws/term') {
+      const token = req.headers.get('cookie')?.match(/ports_session=([^;]+)/)?.[1];
+      if (!token || !(await verifySessionToken(token))) return new Response('Unauthorized', { status: 401 });
+      const data = {
+        kind: 'term',
+        cols: parseInt(url.searchParams.get('c') || '120', 10),
+        rows: parseInt(url.searchParams.get('r') || '40', 10),
+      } as unknown as WsData;
+      if (server.upgrade(req, { data })) return;
       return new Response('WS upgrade failed', { status: 500 });
     }
     return app.fetch(req, server);
   },
   websocket: {
-    open(ws: Bun.ServerWebSocket<{ upstream: WebSocket; pending: unknown[] }>) {
+    open(ws: Bun.ServerWebSocket<WsData>) {
+      if (ws.data.kind === 'term') { startTermSocket(ws); return; }
       const up = ws.data.upstream;
       up.onopen = () => { for (const m of ws.data.pending.splice(0)) up.send(m as never); };
       up.onmessage = (e) => { try { ws.send(e.data as string | ArrayBuffer); } catch { /* closed */ } };
       up.onclose = up.onerror = () => { try { ws.close(); } catch { /* closed */ } };
     },
-    message(ws: Bun.ServerWebSocket<{ upstream: WebSocket; pending: unknown[] }>, msg: string | Buffer) {
+    message(ws: Bun.ServerWebSocket<WsData>, msg: string | Buffer) {
+      if (ws.data.kind === 'term') {
+        const t = ws.data;
+        if (typeof msg === 'string' && msg[0] === '{') {
+          try {
+            const j = JSON.parse(msg);
+            if (j.t === 'r' && Number.isFinite(j.c) && Number.isFinite(j.r)) {
+              hostExec(`tmux resize-window -t pm-term -x ${Math.min(j.c, 500)} -y ${Math.min(j.r, 200)}`, { user: 'user', timeoutMs: 4000 }).catch(() => {});
+              return;
+            }
+            if (j.t === 'i' && typeof j.d === 'string') {
+              const stdin = t.proc?.stdin as { write(d: string): void; flush(): void } | undefined;
+              if (stdin) { stdin.write(j.d); stdin.flush(); }
+            }
+          } catch { /* not json — fall through to raw */ }
+          return;
+        }
+        const stdin = t.proc?.stdin as { write(d: string | Buffer): void; flush(): void } | undefined;
+        if (stdin) { stdin.write(msg); stdin.flush(); }
+        return;
+      }
       const up = ws.data.upstream;
       if (up.readyState === WebSocket.OPEN) up.send(msg as never);
       else ws.data.pending.push(msg);
     },
-    close(ws: Bun.ServerWebSocket<{ upstream: WebSocket; pending: unknown[] }>) {
+    close(ws: Bun.ServerWebSocket<WsData>) {
+      if (ws.data.kind === 'term') {
+        try { (ws.data.proc as { kill(s?: string): void } | undefined)?.kill('SIGKILL'); } catch { /* gone */ }
+        return;
+      }
       try { ws.data.upstream.close(); } catch { /* already closed */ }
     },
   },

@@ -10,6 +10,7 @@ export interface Listener {
   address: string;
   port: number;
   healthy?: boolean | null;
+  latencyMs?: number;
 }
 
 export type IdentityCategory = 'project' | 'service' | 'docker' | 'system' | 'unknown';
@@ -106,6 +107,7 @@ export interface DomainMapping {
 export interface DomainStatus {
   state: 'up' | 'warn' | 'down';
   httpStatus?: number;
+  ms?: number;
   reason?: string;
 }
 
@@ -211,6 +213,7 @@ export interface AppConfig {
     ignoredPatterns: string[];
     scanDirs: string[];
     hostUser: string;
+    notifyUrl?: string;
     knownServices: Record<string, KnownService>;
   };
 }

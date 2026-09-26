@@ -478,16 +478,17 @@ function systemdUnit(cgroup: string): { unit: string; scope: 'user' | 'system' }
 
 // Any resolved response (even 4xx/5xx/redirect) means something is answering.
 // Connection refused / timeout → unhealthy. UDP listeners are never probed.
-async function probePortHealth(port: number): Promise<boolean> {
+async function probePortHealth(port: number): Promise<{ ok: boolean; ms?: number }> {
+  const t0 = performance.now();
   try {
     await fetch(`http://127.0.0.1:${port}/`, {
       method: 'HEAD',
       signal: AbortSignal.timeout(400),
       redirect: 'manual',
     });
-    return true;
+    return { ok: true, ms: Math.round(performance.now() - t0) };
   } catch {
-    return false;
+    return { ok: false };
   }
 }
 
@@ -590,7 +591,7 @@ export async function listPortProcesses(): Promise<PortProcess[]> {
       else tcpPorts.add(l.port);
     }
   }
-  const health = new Map<number, boolean>();
+  const health = new Map<number, { ok: boolean; ms?: number }>();
   await Promise.all(
     Array.from(tcpPorts).map(async (port) => {
       health.set(port, await probePortHealth(port));
@@ -598,7 +599,11 @@ export async function listPortProcesses(): Promise<PortProcess[]> {
   );
   for (const p of out) {
     for (const l of p.listeners) {
-      if (l.proto !== 'udp') l.healthy = health.get(l.port) ?? null;
+      if (l.proto !== 'udp') {
+        const h = health.get(l.port);
+        l.healthy = h ? h.ok : null;
+        l.latencyMs = h?.ms;
+      }
     }
   }
 

@@ -85,6 +85,19 @@ export function hostSpawn(
   });
 }
 
+// Spawn an interactive host command with piped stdin — used for the embedded
+// terminal (stdin 'pipe' + bidirectional piping over the WebSocket).
+export function hostSpawnInteractive(
+  command: string,
+  opts: { user?: ExecUser } = {}
+): ReturnType<typeof Bun.spawn> {
+  return Bun.spawn(buildArgv(command, opts.user ?? 'user'), {
+    stdin: 'pipe',
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+}
+
 // Spawn a detached host process that survives this container restarting.
 // Returns the host PID it got.
 export async function hostSpawnDetached(
