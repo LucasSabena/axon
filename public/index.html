@@ -11,7 +11,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Ports Manager</title>
-  <link rel="stylesheet" href="/app.css?v=10">
+  <link rel="stylesheet" href="/app.css?v=12">
 </head>
 <body>
   <div id="app">
@@ -56,6 +56,14 @@
               <i data-lucide="globe" class="lucide-icon"></i>
               <span class="nav-label">Dominios</span>
               <span class="nav-count" id="nav-count-domains"></span>
+            </button>
+            <button class="nav-item tab-btn" data-tab="terminal">
+              <i data-lucide="terminal" class="lucide-icon"></i>
+              <span class="nav-label">Terminal</span>
+            </button>
+            <button class="nav-item tab-btn" data-tab="navegador">
+              <i data-lucide="globe" class="lucide-icon"></i>
+              <span class="nav-label">Navegador</span>
             </button>
 
             <div class="nav-section-label"><span>Sistema</span></div>
@@ -237,9 +245,14 @@
                 <button id="domains-import-btn" class="btn-action"><i data-lucide="download-cloud" class="lucide-icon"></i> Importar desde Cloudflare</button>
               </div>
               <div class="table-wrapper">
+                <div id="domains-bulkbar" class="bulkbar hidden">
+                  <span id="domains-sel-count"></span>
+                  <button id="domains-del-sel" class="btn-danger"><i data-lucide="trash-2" class="lucide-icon"></i> Eliminar seleccionados</button>
+                </div>
                 <table id="domains-table">
                   <thead>
                     <tr>
+                      <th class="sel-col"><input type="checkbox" id="domains-sel-all"></th>
                       <th>Dominio</th>
                       <th>Estado</th>
                       <th>Proyecto</th>
@@ -252,6 +265,29 @@
                 </table>
               </div>
               <div id="domains-empty" class="empty-state hidden">No hay dominios asignados</div>
+            </section>
+
+            <!-- TERMINAL -->
+            <section id="tab-terminal" class="tab-content">
+              <div class="term-tabbar">
+                <div id="term-tabs" class="term-tabs"></div>
+                <button id="term-new-tab" class="btn-secondary" title="Nueva sesión"><i data-lucide="plus" class="lucide-icon"></i></button>
+              </div>
+              <div id="term-pages"></div>
+            </section>
+
+            <!-- NAVEGADOR -->
+            <section id="tab-navegador" class="tab-content">
+              <div class="section-header">
+                <h2>Navegador del servidor</h2>
+                <div class="section-actions">
+                  <button id="browser-open-ext" class="btn-secondary"><i data-lucide="external-link" class="lucide-icon"></i> Abrir aparte</button>
+                </div>
+              </div>
+              <p class="listener-note browser-note">Chrome real corriendo en el servidor — los localhost, las cookies y las sesiones son del servidor. Todo lo que veas acá ocurre allá.</p>
+              <div class="browser-frame-wrap">
+                <iframe id="browser-frame" title="Navegador del servidor" allow="clipboard-read; clipboard-write"></iframe>
+              </div>
             </section>
           </main>
         </div>
@@ -441,17 +477,15 @@
     </div>
   </div>
 
-  <!-- Terminal modal -->
-  <div id="term-modal" class="modal hidden">
-    <div class="modal-content term-modal-content">
-      <div class="logs-modal-header">
-        <h3><i data-lucide="terminal" class="lucide-icon"></i> Terminal del servidor</h3>
-        <div class="logs-modal-actions">
-          <button id="term-new" class="btn-secondary" title="Sesión nueva de tmux">Nueva sesión</button>
-          <button id="term-close" class="btn-secondary">Cerrar</button>
-        </div>
+  <!-- Generic confirm modal -->
+  <div id="confirm-modal" class="modal hidden">
+    <div class="modal-content">
+      <h3 id="confirm-title">Confirmar</h3>
+      <p id="confirm-body" class="listener-note"></p>
+      <div class="modal-actions">
+        <button id="confirm-cancel" class="btn-secondary">Cancelar</button>
+        <button id="confirm-ok" class="btn-danger">Eliminar</button>
       </div>
-      <div id="term-host"></div>
     </div>
   </div>
 
@@ -494,7 +528,7 @@
   <script src="/vendor/xterm.js"></script>
   <script src="/vendor/xterm-addon-fit.js"></script>
   <script src="/vendor/qrcode.js"></script>
-  <script src="/vendor/lucide.min.js?v=10"></script>
-  <script src="/app.js?v=11"></script>
+  <script src="/vendor/lucide.min.js?v=12"></script>
+  <script src="/app.js?v=12"></script>
 </body>
 </html>

@@ -550,6 +550,7 @@ app.post('/api/domains/import', async (c) => {
   const containers = await listContainers();
   const imported: DomainMapping[] = [];
   const skipped: string[] = [];
+  const blocked: string[] = [];
 
   for (const entry of remote.config.config.ingress || []) {
     if (!entry.hostname || entry.hostname === `ports.${BASE_DOMAIN}`) continue;
@@ -558,6 +559,10 @@ app.post('/api/domains/import', async (c) => {
     const port = serviceMatch ? parseInt(serviceMatch[1], 10) : 0;
     if (!port || config.domains.some((d) => d.fullDomain === entry.hostname)) {
       skipped.push(entry.hostname);
+      continue;
+    }
+    if ((config.deletedDomains || []).includes(entry.hostname)) {
+      blocked.push(entry.hostname);
       continue;
     }
     const target = `${entry.service.startsWith('https://') ? 'https' : 'http'}://localhost:${port}`;
@@ -577,7 +582,7 @@ app.post('/api/domains/import', async (c) => {
     imported.push(domain);
   }
   await saveConfig(config);
-  return c.json({ ok: true, imported, skipped });
+  return c.json({ ok: true, imported, skipped, blocked });
 });
 
 app.post('/api/domains', async (c) => {
@@ -610,6 +615,8 @@ app.post('/api/domains', async (c) => {
     dnsRecordId: dns.recordId,
   };
   config.domains.push(domain);
+  // Manually re-creating a domain lifts the import block
+  config.deletedDomains = (config.deletedDomains || []).filter((d) => d !== fullDomain);
   await saveConfig(config);
 
   const sync = await syncCloudflaredRoutes(config.domains);
@@ -679,10 +686,43 @@ app.delete('/api/domains/:id', async (c) => {
     if (!del.success) return fail(c, 500, 'Falló borrar el DNS', { detail: del.error });
   }
   config.domains = config.domains.filter((d) => d.id !== domain.id);
+  config.deletedDomains = [...new Set([...(config.deletedDomains || []), domain.fullDomain])];
   await saveConfig(config);
   const sync = await syncCloudflaredRoutes(config.domains);
   if (!sync.success) return fail(c, 500, 'Dominio borrado pero falló sync del túnel', { detail: sync.error });
   return c.json({ ok: true });
+});
+
+// Bulk delete: one tunnel sync for N domains instead of N syncs.
+app.post('/api/domains/bulk-delete', async (c) => {
+  const body = await c.req.json<{ ids?: string[] }>().catch(() => ({}));
+  const ids = new Set(body.ids || []);
+  if (!ids.size) return fail(c, 400, 'Sin dominios seleccionados');
+  const targets = config.domains.filter((d) => ids.has(d.id));
+  if (!targets.length) return fail(c, 404, 'Ningún dominio coincide');
+
+  const results = await Promise.all(
+    targets.map(async (d) => {
+      if (!d.dnsRecordId) return { id: d.id, ok: true };
+      const del = await deleteDnsRecord(d.dnsRecordId);
+      return { id: d.id, ok: del.success, error: del.error };
+    })
+  );
+  const failed = results.filter((r) => !r.ok).map((r) => r.id);
+  const removed = targets.filter((d) => !failed.includes(d.id));
+  config.domains = config.domains.filter((d) => failed.includes(d.id) || !ids.has(d.id));
+  config.deletedDomains = [
+    ...new Set([...(config.deletedDomains || []), ...removed.map((d) => d.fullDomain)]),
+  ];
+  await saveConfig(config);
+  const sync = await syncCloudflaredRoutes(config.domains);
+  return c.json({
+    ok: true,
+    removed: removed.length,
+    failed: failed.length,
+    syncOk: sync.success,
+    syncError: sync.error,
+  });
 });
 
 // ---------- Config & stats ----------
@@ -755,6 +795,22 @@ app.all('/p/:port/*', async (c) => {
   const type = upstream.headers.get('content-type') || '';
   if (type.includes('text/html')) {
     let html = await upstream.text();
+    const reqUrl = new URL(c.req.url);
+    const proto = reqUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+    const httpOrigin = reqUrl.origin;
+    // Apps that hardcode their own ws(s)/http origin (e.g. Steel's session
+    // viewer emits ws://0.0.0.0:PORT/v1/...) get routed back through the proxy.
+    // Single pass so inserted URLs are never re-processed. 0.0.0.0:P inside a
+    // proxied page means "the service itself" (its internal listen port may
+    // differ from the published one) → same /p/:port. 127.0.0.1/localhost:P
+    // points at a *different* service → /p/P.
+    html = html.replace(
+      /(wss?|https?):\/\/(0\.0\.0\.0|127\.0\.0\.1|localhost):(\d+)/g,
+      (m, scheme: string, host: string, p: string) => {
+        const target = host === '0.0.0.0' ? String(port) : p;
+        return scheme.startsWith('ws') ? `${proto}//${reqUrl.host}/p/${target}` : `${httpOrigin}/p/${target}`;
+      }
+    );
     // rewrite root-absolute URLs so assets route back through the proxy
     html = html.replace(/((?:href|src|action|srcset)\s*=\s*["'])\/(?!\/|p\/)/g, `$1/p/${port}/`);
     return new Response(html, { status: upstream.status, headers: resHeaders });
@@ -903,14 +959,15 @@ app.onError((err, c) => {
 // `script` (provides the PTY). The tmux session 'pm-term' persists across
 // browser refreshes and reconnects.
 interface WsProxyData { kind: 'proxy'; upstream: WebSocket; pending: unknown[] }
-interface WsTermData { kind: 'term'; proc: ReturnType<typeof Bun.spawn>; pumpDone?: boolean }
+interface WsTermData { kind: 'term'; proc?: ReturnType<typeof Bun.spawn>; session?: string; cols?: number; rows?: number }
 type WsData = WsProxyData | WsTermData;
 
 function startTermSocket(ws: Bun.ServerWebSocket<WsData>): void {
   const t = ws.data as WsTermData;
-  const cols = Number((t as unknown as { cols?: number }).cols) || 120;
-  const rows = Number((t as unknown as { rows?: number }).rows) || 40;
-  const cmd = `export TERM=xterm-256color; script -qfc "tmux new-session -A -s pm-term -x ${cols} -y ${rows}" /dev/null`;
+  const cols = t.cols || 120;
+  const rows = t.rows || 40;
+  const session = t.session || 'pm-term';
+  const cmd = `export TERM=xterm-256color; script -qfc "tmux new-session -A -s ${session} -x ${cols} -y ${rows}" /dev/null`;
   const proc = hostSpawnInteractive(cmd, { user: 'user' });
   t.proc = proc;
   const pump = async (stream: ReadableStream<Uint8Array> | undefined) => {
@@ -949,11 +1006,12 @@ export default {
     if (isWs && url.pathname === '/ws/term') {
       const token = req.headers.get('cookie')?.match(/ports_session=([^;]+)/)?.[1];
       if (!token || !(await verifySessionToken(token))) return new Response('Unauthorized', { status: 401 });
-      const data = {
+      const data: WsData = {
         kind: 'term',
+        session: (url.searchParams.get('s') || 'pm-term').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32) || 'pm-term',
         cols: parseInt(url.searchParams.get('c') || '120', 10),
         rows: parseInt(url.searchParams.get('r') || '40', 10),
-      } as unknown as WsData;
+      };
       if (server.upgrade(req, { data })) return;
       return new Response('WS upgrade failed', { status: 500 });
     }
@@ -974,7 +1032,8 @@ export default {
           try {
             const j = JSON.parse(msg);
             if (j.t === 'r' && Number.isFinite(j.c) && Number.isFinite(j.r)) {
-              hostExec(`tmux resize-window -t pm-term -x ${Math.min(j.c, 500)} -y ${Math.min(j.r, 200)}`, { user: 'user', timeoutMs: 4000 }).catch(() => {});
+              const sess = t.session || 'pm-term';
+              hostExec(`tmux resize-window -t ${sess} -x ${Math.min(j.c, 500)} -y ${Math.min(j.r, 200)}`, { user: 'user', timeoutMs: 4000 }).catch(() => {});
               return;
             }
             if (j.t === 'i' && typeof j.d === 'string') {

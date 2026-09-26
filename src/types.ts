@@ -205,6 +205,8 @@ export interface AppConfig {
     passwordHash: string;
   };
   domains: DomainMapping[];
+  // Domains the user deliberately deleted — import never brings them back.
+  deletedDomains?: string[];
   projects?: Project[];
   settings: {
     scanIntervalMs: number;

@@ -1134,6 +1134,7 @@ async function loadDomains() {
       const tr = document.createElement('tr');
       tr.dataset.domainId = d.id;
       tr.innerHTML = `
+        <td class="sel-col"><input type="checkbox" class="dm-sel" data-id="${d.id}"${domainSel.has(d.id) ? ' checked' : ''}></td>
         <td><a class="domain-link" href="https://${esc(d.fullDomain)}" target="_blank">${icon('globe')} ${esc(d.fullDomain)}</a></td>
         <td class="domain-status"><span class="health-dot health-unknown"></span> <span class="listener-note">…</span></td>
         <td>${esc(d.projectName)} <span class="listener-note">${esc(d.processType)}</span></td>
@@ -1191,14 +1192,87 @@ async function loadDomainStatuses() {
   } catch { /* statuses are best-effort */ }
 }
 
+// Domain selection + bulk delete
+const domainSel = new Set();
+
+function updateDomainBulkbar() {
+  const n = domainSel.size;
+  $('#domains-bulkbar').classList.toggle('hidden', n === 0);
+  $('#domains-sel-count').textContent = `${n} seleccionado${n === 1 ? '' : 's'}`;
+  $('#domains-sel-all').checked = n > 0 && n === document.querySelectorAll('.dm-sel').length;
+}
+
+function confirmDialog(title, body, okLabel = 'Eliminar') {
+  return new Promise((resolve) => {
+    $('#confirm-title').textContent = title;
+    $('#confirm-body').textContent = body;
+    $('#confirm-ok').textContent = okLabel;
+    $('#confirm-modal').classList.remove('hidden');
+    const done = (v) => {
+      $('#confirm-modal').classList.add('hidden');
+      $('#confirm-ok').onclick = $('#confirm-cancel').onclick = null;
+      resolve(v);
+    };
+    $('#confirm-ok').onclick = () => done(true);
+    $('#confirm-cancel').onclick = () => done(false);
+  });
+}
+
+function removeDomainRows(ids) {
+  for (const id of ids) {
+    domainSel.delete(id);
+    document.querySelector(`tr[data-domain-id="${id}"]`)?.remove();
+  }
+  updateDomainBulkbar();
+  const tbody = $('#domains-table tbody');
+  const remaining = tbody.querySelectorAll('tr').length;
+  $('#domains-empty').classList.toggle('hidden', remaining > 0);
+  const nc = $('#nav-count-domains');
+  if (nc) nc.textContent = remaining || '';
+}
+
+$('#domains-sel-all').addEventListener('change', (e) => {
+  const on = e.target.checked;
+  document.querySelectorAll('.dm-sel').forEach((cb) => {
+    cb.checked = on;
+    on ? domainSel.add(cb.dataset.id) : domainSel.delete(cb.dataset.id);
+  });
+  updateDomainBulkbar();
+});
+
+$('#domains-del-sel').addEventListener('click', async () => {
+  const ids = [...domainSel];
+  if (!ids.length) return;
+  const ok = await confirmDialog(
+    `Eliminar ${ids.length} dominio${ids.length === 1 ? '' : 's'}`,
+    'Se borran los registros DNS de Cloudflare y las rutas del túnel de todos los seleccionados.'
+  );
+  if (!ok) return;
+  try {
+    const res = await api('/api/domains/bulk-delete', { method: 'POST', body: { ids } });
+    removeDomainRows(ids);
+    toast(`${res.removed} eliminado${res.removed === 1 ? '' : 's'}${res.failed ? `, ${res.failed} fallaron` : ''}`, res.failed ? 'warn' : 'ok');
+    if (!res.syncOk) toast('El sync del túnel falló — revisá cloudflared', 'err');
+    loadDomains();
+  } catch (err) { errToast(err); }
+});
+
 $('#domains-table').addEventListener('click', async (e) => {
+  const cb = e.target.closest('.dm-sel');
+  if (cb) {
+    cb.checked ? domainSel.add(cb.dataset.id) : domainSel.delete(cb.dataset.id);
+    updateDomainBulkbar();
+    return;
+  }
   const btn = e.target.closest('button');
   if (!btn) return;
   const id = btn.dataset.id;
   if (btn.classList.contains('dm-del')) {
-    if (!confirm('¿Eliminar el dominio? Borra el DNS de Cloudflare y la ruta del túnel.')) return;
+    const ok = await confirmDialog('Eliminar dominio', 'Se borra el DNS de Cloudflare y la ruta del túnel.');
+    if (!ok) return;
     try {
       await api(`/api/domains/${id}`, { method: 'DELETE' });
+      removeDomainRows([id]);
       toast('Dominio eliminado', 'ok');
       loadDomains();
     } catch (err) { errToast(err); }
@@ -1214,7 +1288,7 @@ $('#domains-table').addEventListener('click', async (e) => {
 $('#domains-import-btn').addEventListener('click', async () => {
   try {
     const res = await api('/api/domains/import', { method: 'POST' });
-    toast(`Importados ${res.imported.length} dominios (${res.skipped.length} omitidos)`, 'ok');
+    toast(`Importados ${res.imported.length} dominios — ${res.skipped.length} omitidos${res.blocked?.length ? `, ${res.blocked.length} bloqueados (los habías eliminado)` : ''}`, 'ok');
     loadDomains();
   } catch (err) { errToast(err); }
 });
@@ -1587,44 +1661,142 @@ $('#service-create').addEventListener('click', async () => {
   }
 });
 
-// ---------- Embedded terminal ----------
+// ---------- Terminal page (multi-session tmux tabs) ----------
 
-let term = null;
-let termWs = null;
-let termFit = null;
-let termCwd = '';
+const termSessions = new Map(); // name → {term, fit, ws, page, tabBtn}
+let termCounter = 0;
+let activeTerm = null;
+const TERM_SESSIONS_KEY = 'pm.termSessions';
+
+function savedTermSessions() {
+  try { return JSON.parse(localStorage.getItem(TERM_SESSIONS_KEY) || '[]'); } catch { return []; }
+}
+function saveTermSessions() {
+  localStorage.setItem(TERM_SESSIONS_KEY, JSON.stringify([...termSessions.keys()]));
+}
+
+function openTermTab(name, cwd) {
+  if (termSessions.has(name)) { activateTermTab(name); return termSessions.get(name); }
+  const page = document.createElement('div');
+  page.className = 'term-page';
+  $('#term-pages').appendChild(page);
+
+  const t = new Terminal({ cursorBlink: true, fontSize: 14, fontFamily: 'JetBrains Mono, monospace', theme: { background: '#0b0e14' } });
+  const fit = new FitAddon.FitAddon();
+  t.loadAddon(fit);
+  t.open(page);
+
+  const tabBtn = document.createElement('button');
+  tabBtn.className = 'term-tab';
+  tabBtn.innerHTML = `${icon('terminal')} <span>${esc(name)}</span> <span class="term-tab-x" data-x="1">×</span>`;
+  tabBtn.addEventListener('click', (e) => {
+    if (e.target.dataset.x) { closeTermTab(name); return; }
+    activateTermTab(name);
+  });
+  $('#term-tabs').appendChild(tabBtn);
+
+  const sess = { term: t, fit, ws: null, page, tabBtn, name, pendingCwd: cwd || '' };
+  termSessions.set(name, sess);
+  saveTermSessions();
+
+  t.onData((d) => { if (sess.ws?.readyState === 1) sess.ws.send(JSON.stringify({ t: 'i', d })); });
+  t.onResize(({ cols, rows }) => { if (sess.ws?.readyState === 1) sess.ws.send(JSON.stringify({ t: 'r', c: cols, r: rows })); });
+
+  connectTermTab(sess);
+  activateTermTab(name);
+  refreshIcons();
+  return sess;
+}
+
+function connectTermTab(sess) {
+  if (sess.ws) { try { sess.ws.close(); } catch { /* gone */ } }
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/ws/term?s=${encodeURIComponent(sess.name)}&c=${sess.term.cols}&r=${sess.term.rows}`);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => {
+    if (sess.pendingCwd) { ws.send(JSON.stringify({ t: 'i', d: `cd ${JSON.stringify(sess.pendingCwd)}\n` })); sess.pendingCwd = ''; }
+  };
+  ws.onmessage = (e) => sess.term.write(new Uint8Array(e.data));
+  ws.onclose = () => {
+    sess.term.write('\r\n\x1b[33m[desconectado — click para reconectar]\x1b[0m\r\n');
+    sess.tabBtn.classList.add('term-tab-offline');
+  };
+  sess.ws = ws;
+}
+
+function activateTermTab(name) {
+  activeTerm = name;
+  for (const [n, s] of termSessions) {
+    s.page.classList.toggle('active', n === name);
+    s.tabBtn.classList.toggle('active', n === name);
+  }
+  const s = termSessions.get(name);
+  if (s) requestAnimationFrame(() => { s.fit.fit(); s.term.focus(); });
+}
+
+function closeTermTab(name) {
+  const s = termSessions.get(name);
+  if (!s) return;
+  try { s.ws?.close(); } catch { /* gone */ }
+  s.term.dispose();
+  s.page.remove();
+  s.tabBtn.remove();
+  termSessions.delete(name);
+  saveTermSessions();
+  if (activeTerm === name) {
+    const next = termSessions.keys().next().value;
+    if (next) activateTermTab(next);
+  }
+}
 
 function openTerm(cwd) {
-  termCwd = cwd || '';
-  $('#term-modal').classList.remove('hidden');
-  if (!term) {
-    term = new Terminal({ cursorBlink: true, fontSize: 13, fontFamily: 'JetBrains Mono, monospace', theme: { background: '#0b0e14' } });
-    termFit = new FitAddon.FitAddon();
-    term.loadAddon(termFit);
-    term.open($('#term-host'));
-    term.onData((d) => { if (termWs?.readyState === 1) termWs.send(JSON.stringify({ t: 'i', d })); });
-    term.onResize(({ cols, rows }) => { if (termWs?.readyState === 1) termWs.send(JSON.stringify({ t: 'r', c: cols, r: rows })); });
+  document.querySelector('.tab-btn[data-tab="terminal"]')?.click();
+  if (cwd) {
+    termCounter++;
+    openTermTab(`pm-term-${termCounter}`, cwd);
+  } else if (!termSessions.size) {
+    termCounter++;
+    openTermTab('pm-term');
   }
-  requestAnimationFrame(() => { termFit.fit(); term.focus(); connectTerm(); });
 }
 
-function connectTerm() {
-  if (termWs) { try { termWs.close(); } catch { /* gone */ } }
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  termWs = new WebSocket(`${proto}://${location.host}/ws/term?c=${term.cols}&r=${term.rows}`);
-  termWs.binaryType = 'arraybuffer';
-  termWs.onopen = () => {
-    if (termCwd) termWs.send(JSON.stringify({ t: 'i', d: `cd ${JSON.stringify(termCwd)}\n` }));
-    termCwd = '';
-  };
-  termWs.onmessage = (e) => term.write(new Uint8Array(e.data));
-  termWs.onclose = () => term.write('\r\n[conexión cerrada]\r\n');
-}
+// Reconnect on click when offline
+$('#term-pages').addEventListener('click', () => {
+  const s = termSessions.get(activeTerm);
+  if (s && s.ws?.readyState !== 1) connectTermTab(s);
+});
 
 $('#term-btn').addEventListener('click', () => openTerm());
-$('#term-close').addEventListener('click', () => { $('#term-modal').classList.add('hidden'); if (termWs) termWs.close(); });
-$('#term-new').addEventListener('click', () => { if (termWs?.readyState === 1) termWs.send(JSON.stringify({ t: 'i', d: 'tmux kill-session -t pm-term 2>/dev/null\n' })); setTimeout(() => connectTerm(), 700); });
-window.addEventListener('resize', () => { if (term && !$('#term-modal').classList.contains('hidden')) termFit.fit(); });
+$('#term-new-tab').addEventListener('click', () => {
+  termCounter++;
+  openTermTab(`pm-term-${termCounter}`);
+});
+window.addEventListener('resize', () => { if (activeTerm) termSessions.get(activeTerm)?.fit.fit(); });
+
+loaders.terminal = () => {
+  if (!termSessions.size) {
+    const saved = savedTermSessions();
+    termCounter = saved.length;
+    for (const name of saved) openTermTab(name);
+    if (!termSessions.size) openTermTab('pm-term');
+  } else if (activeTerm) {
+    termSessions.get(activeTerm)?.fit.fit();
+  }
+};
+
+// ---------- Server-side browser (Steel session viewer) ----------
+
+const BROWSER_PORT = 18230;
+const browserUrl = `/p/${BROWSER_PORT}/v1/sessions/debug`;
+let browserLoaded = false;
+
+loaders.navegador = () => {
+  if (!browserLoaded) {
+    $('#browser-frame').src = browserUrl;
+    browserLoaded = true;
+  }
+};
+$('#browser-open-ext').addEventListener('click', () => window.open(browserUrl, '_blank', 'noopener'));
 
 // ---------- QR pairing ----------
 
