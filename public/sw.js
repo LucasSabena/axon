@@ -5,7 +5,9 @@ self.addEventListener('activate', (e) =>
 );
 self.addEventListener('fetch', (e) => {
   const u = new URL(e.request.url);
-  if (e.request.method !== 'GET' || u.pathname.startsWith('/api/') || u.pathname.startsWith('/p/')) return;
+  // Ignore non-http schemes (chrome-extension:// etc.) and non-GETs.
+  if (!u.protocol.startsWith('http') || e.request.method !== 'GET') return;
+  if (u.pathname.startsWith('/api/') || u.pathname.startsWith('/p/')) return;
   // Immutable-ish statics: cache-first.
   if (u.pathname.startsWith('/vendor/') || u.pathname.startsWith('/icons/') || u.pathname.startsWith('/fonts/')) {
     e.respondWith(
