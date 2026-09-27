@@ -98,17 +98,37 @@ export function hostSpawnInteractive(
   });
 }
 
+const shq = (s: string) => `'${s.replace(/'/g, `'"'"'`)}'`;
+
 // Spawn a detached host process that survives this container restarting.
-// Returns the host PID it got.
+// Uses a transient user systemd unit: runuser's PAM session dies with the
+// command and takes every child cgroup with it (setsid is not enough).
+// Returns the host PID (unit MainPID).
 export async function hostSpawnDetached(
   command: string,
   cwd: string,
   logFile: string,
   user: ExecUser = 'user'
 ): Promise<{ ok: boolean; pid?: number; error?: string }> {
-  // Single-quote escaping: JSON.stringify would still expand $()/backticks.
-  const shq = (s: string) => `'${s.replace(/'/g, `'"'"'`)}'`;
-  const inner = `cd ${shq(cwd)} && setsid bash -lc ${shq(USER_PATH_EXPORT + command + ` >> ${shq(logFile)} 2>&1`)} < /dev/null & echo $!`;
+  const cmd = USER_PATH_EXPORT + `cd ${shq(cwd)} && ${command} >> ${shq(logFile)} 2>&1`;
+  if (user !== 'root') {
+    const unit = `pm-detach-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const env = 'export XDG_RUNTIME_DIR=/run/user/$(id -u); export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus; ';
+    const spawn = await hostExec(
+      `${env}systemd-run --user --collect --quiet --unit=${shq(unit)} -- bash -lc ${shq(cmd)}`,
+      { user, timeoutMs: 15_000 }
+    );
+    if (spawn.ok) {
+      for (let i = 0; i < 10; i++) {
+        const res = await hostExec(`${env}systemctl --user show -p MainPID --value ${shq(unit)}`, { user, timeoutMs: 10_000 });
+        const pid = parseInt(res.stdout.trim(), 10);
+        if (pid > 0) return { ok: true, pid };
+        await Bun.sleep(200);
+      }
+    }
+    // Fall back to setsid if the user manager is unavailable.
+  }
+  const inner = `cd ${shq(cwd)} && setsid bash -lc ${shq(cmd)} < /dev/null & echo $!`;
   const res = await hostExec(inner, { user, timeoutMs: 15_000 });
   const pid = parseInt(res.stdout.trim().split('\n').pop() || '', 10);
   if (!res.ok || !pid) {

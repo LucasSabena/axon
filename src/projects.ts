@@ -1,8 +1,9 @@
-import { mkdir, readFile, writeFile, readdir } from 'fs/promises';
+import { readFile, writeFile, readdir } from 'fs/promises';
 import * as path from 'path';
 import {
   hostDirEntries,
   hostExists,
+  hostToContainer,
   readHostJson,
   hostSpawnDetached,
   hostExec,
@@ -14,7 +15,12 @@ import type { AppConfig, Project } from './types';
 // would still expand $()/backticks inside a shell double-quoted string.
 const shq = (s: string) => `'${s.replace(/'/g, `'"'"'`)}'`;
 
-const LOG_DIR = process.env.LOG_DIR || '/app/data/logs';
+// HOST-side dir where detached project processes write their logs (the
+// redirect runs on the host, so container paths like /app/data don't exist
+// there). Read back through the /hostfs mount via hostToContainer().
+const HOST_LOG_DIR = process.env.HOST_LOG_DIR || '/tmp/pm-logs';
+// Legacy container-side dir (pre-fix logs may still live there).
+const LEGACY_LOG_DIR = process.env.LOG_DIR || '/app/data/logs';
 
 let configRef: AppConfig | null = null;
 let saveConfigFn: ((c: AppConfig) => Promise<void>) | null = null;
@@ -91,7 +97,6 @@ async function scanDir(dir: string, found: Project[], depth: number) {
 async function isHostDir(hostPath: string): Promise<boolean> {
   try {
     const { stat } = await import('fs/promises');
-    const { hostToContainer } = await import('./host');
     return (await stat(hostToContainer(hostPath))).isDirectory();
   } catch {
     return false;
@@ -223,8 +228,8 @@ export async function startProject(project: Project): Promise<{ ok: boolean; err
     }
   }
 
-  await mkdir(LOG_DIR, { recursive: true });
-  const logFile = path.join(LOG_DIR, `${project.name.replace(/[^\w.-]+/g, '-')}-${Date.now()}.log`);
+  await hostExec(`mkdir -p ${shq(HOST_LOG_DIR)}`, { user: 'user', timeoutMs: 10_000 });
+  const logFile = path.join(HOST_LOG_DIR, `${project.name.replace(/[^\w.-]+/g, '-')}-${Date.now()}.log`);
   const res = await hostSpawnDetached(command, project.cwd, logFile, 'user');
   if (!res.ok) {
     return { ok: false, error: `No se pudo lanzar el proceso en el host: ${res.error}`, command };
@@ -280,13 +285,20 @@ export async function installDeps(project: Project): Promise<{ ok: boolean; outp
 
 export async function projectLogs(project: Project, tail = 200): Promise<string[]> {
   try {
-    const files = (await readdir(LOG_DIR))
-      .filter((f) => f.startsWith(project.name.replace(/[^\w.-]+/g, '-')))
-      .sort();
+    const prefix = project.name.replace(/[^\w.-]+/g, '-');
+    const dirs = [hostToContainer(HOST_LOG_DIR), LEGACY_LOG_DIR];
+    const files: string[] = [];
+    for (const d of dirs) {
+      for (const f of await readdir(d).catch(() => [] as string[])) {
+        if (f.startsWith(prefix)) files.push(path.join(d, f));
+      }
+    }
+    files.sort();
     const latest = files[files.length - 1];
     if (!latest) return [];
-    const res = await hostExec(`tail -n ${tail} ${shq(path.join(LOG_DIR, latest))}`, { timeoutMs: 10_000 });
-    return res.stdout.split('\n');
+    // Read through the /hostfs mount directly — the log lives on the host.
+    const content = await readFile(latest, 'utf-8');
+    return content.split('\n').slice(-tail);
   } catch {
     return [];
   }
