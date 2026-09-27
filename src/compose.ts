@@ -146,6 +146,9 @@ interface ComposeService {
   container: string;
   status: string;
   statusText?: string;
+  // Live memory from `docker stats` — absent for stopped/disk services.
+  mem?: string;
+  memBytes?: number;
 }
 
 interface ComposeProject {
@@ -155,6 +158,10 @@ interface ComposeProject {
   services: ComposeService[];
   path: string;
   source: 'containers' | 'disk';
+  description?: string; // auto-detected from the compose file
+  note?: string;        // user-written (config.composeNotes)
+  mem?: string;         // project total, human-readable
+  memBytes?: number;
 }
 
 function labelVal(labels: string, key: string): string {
@@ -181,6 +188,49 @@ function parseServiceNames(yaml: string): string[] {
   return names;
 }
 
+// Skim a human description out of a compose file: a top-level
+// `x-description:`/`description:` key, else the leading `#` comment block.
+function parseDescription(yaml: string): string {
+  for (const line of yaml.split('\n')) {
+    const m = line.match(/^x?-?description:\s*["']?(.+?)["']?\s*$/i);
+    if (m && !/^\s/.test(line)) return m[1].trim().slice(0, 200);
+    if (line.trim() && !line.startsWith('#') && !/^x?-?description/i.test(line)) {
+      if (!/^(version|name|services|x-|description)/i.test(line)) break;
+    }
+  }
+  const comments: string[] = [];
+  for (const line of yaml.split('\n')) {
+    if (line.startsWith('#')) {
+      const t = line.replace(/^#+\s?/, '').trim();
+      if (t) comments.push(t);
+    } else if (line.trim()) break;
+    if (comments.join(' ').length > 200) break;
+  }
+  return comments.join(' ').slice(0, 200);
+}
+
+const MEM_UNITS: Record<string, number> = { B: 1, KiB: 1 << 10, MiB: 1 << 20, GiB: 1 << 30, TiB: 1 << 40, kB: 1000, MB: 1e6, GB: 1e9 };
+
+// `docker stats` MemUsage looks like "45.2MiB / 3.79GiB" — take the left side.
+function parseMemUsage(usage: string): { text: string; bytes: number } | null {
+  const m = usage.match(/^([\d.]+)\s*([A-Za-z]+)/);
+  if (!m) return null;
+  const mult = MEM_UNITS[m[2]] ?? 1;
+  return { text: `${m[1]} ${m[2]}`, bytes: Math.round(parseFloat(m[1]) * mult) };
+}
+
+function fmtBytes(bytes: number): string {
+  if (bytes >= 1 << 30) return `${(bytes / (1 << 30)).toFixed(1)} GiB`;
+  if (bytes >= 1 << 20) return `${(bytes / (1 << 20)).toFixed(1)} MiB`;
+  if (bytes >= 1 << 10) return `${(bytes / (1 << 10)).toFixed(1)} KiB`;
+  return `${bytes} B`;
+}
+
+interface ComposeDeps {
+  getNotes?: () => Record<string, string> | undefined;
+  setNote?: (key: string, note: string) => Promise<void> | void;
+}
+
 async function readHead(hostPath: string, maxBytes: number): Promise<string> {
   const cp = hostToContainer(hostPath);
   let fh: Awaited<ReturnType<typeof open>> | null = null;
@@ -196,12 +246,13 @@ async function readHead(hostPath: string, maxBytes: number): Promise<string> {
   }
 }
 
-export function registerComposeRoutes(app: Hono): void {
+export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
   // ---------- List projects: containers' compose labels + dormant files ----------
   app.get('/api/compose', async (c) => {
     const projects = new Map<string, ComposeProject>();
     const knownFiles = new Set<string>();
     let dockerError: string | undefined;
+    const notes = deps.getNotes?.() || {};
 
     // 1) Running/stopped containers grouped by com.docker.compose.project.
     const ps = await dockerCmd(`ps -a --format '{{json .}}'`);
@@ -280,8 +331,37 @@ export function registerComposeRoutes(app: Hono): void {
           services,
           path: real,
           source: 'disk',
+          description: parseDescription(head) || undefined,
         });
       } catch { /* unreadable / vanished file — skip */ }
+    }
+
+    // 3) Decorate: live memory per container + file-derived descriptions.
+    const stats = await dockerCmd(`stats --no-stream --format '{{json .}}'`);
+    const memByName = new Map<string, { text: string; bytes: number }>();
+    if (stats.ok) {
+      for (const line of stats.stdout.split('\n').filter(Boolean)) {
+        try {
+          const row = JSON.parse(line) as { Name?: string; MemUsage?: string };
+          const mem = row.MemUsage ? parseMemUsage(row.MemUsage) : null;
+          if (row.Name && mem) memByName.set(row.Name, mem);
+        } catch { /* malformed line */ }
+      }
+    }
+    for (const p of projects.values()) {
+      let total = 0;
+      for (const s of p.services) {
+        const mem = s.container ? memByName.get(s.container) : null;
+        if (mem) { s.mem = mem.text; s.memBytes = mem.bytes; total += mem.bytes; }
+      }
+      if (total > 0) { p.memBytes = total; p.mem = fmtBytes(total); }
+      if (!p.description && p.configFile) {
+        const head = await readHead(p.configFile, 32 * 1024);
+        const d = parseDescription(head);
+        if (d) p.description = d;
+      }
+      const key = p.configFile || p.path;
+      if (key && notes[key]) p.note = notes[key];
     }
 
     const list = Array.from(projects.values()).sort((a, b) => {
@@ -290,6 +370,22 @@ export function registerComposeRoutes(app: Hono): void {
       return ra - rb || a.project.localeCompare(b.project);
     });
     return c.json({ ok: true, projects: list, dockerError });
+  });
+
+  // ---------- User note per stack ({key: compose file path, note}) ----------
+  app.post('/api/compose/note', async (c) => {
+    let body: any;
+    try {
+      body = await c.req.json();
+    } catch {
+      return fail(c, 400, 'Cuerpo JSON inválido');
+    }
+    const key = String(body?.key || '').trim();
+    const note = String(body?.note ?? '').slice(0, 500);
+    if (!key) return fail(c, 400, 'Falta el campo key');
+    if (!deps.setNote) return fail(c, 501, 'Notas no disponibles');
+    await deps.setNote(key, note);
+    return c.json({ ok: true });
   });
 
   // ---------- Read file ----------

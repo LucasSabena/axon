@@ -1615,6 +1615,7 @@ function openProcMenu(p, anchor, coords) {
   const items = [];
   if (port) {
     items.push(
+      { icon: 'monitor', label: `Abrir :${port} en el navegador`, run: () => openInServerBrowser(`http://localhost:${port}`) },
       { icon: 'external-link', label: `Abrir :${port} (proxy)`, run: () => window.open(`/p/${port}/`, '_blank', 'noopener') },
       { icon: 'house', label: `Abrir localhost:${port}`, run: () => window.open(`http://localhost:${port}`, '_blank', 'noopener') },
     );
@@ -1877,6 +1878,22 @@ function unloadBrowser() {
 }
 
 loaders.navegador = loadBrowser;
+
+// Open a URL inside the embedded Chromium and jump to its tab. The URL is
+// resolved on the SERVER, so localhost:* means the server's own services.
+async function openInServerBrowser(url) {
+  try {
+    await api('/api/browser/open', { method: 'POST', body: { url } });
+  } catch (e) {
+    toast(e.message || 'El navegador del server no respondió', 'error', e.detail || '', 4000);
+    return false;
+  }
+  document.querySelector('.tab-btn[data-tab="navegador"]')?.click();
+  loadBrowser();
+  return true;
+}
+window.openInServerBrowser = openInServerBrowser;
+
 $('#browser-open-ext').addEventListener('click', () => window.open(browserUrl, '_blank', 'noopener'));
 $('#browser-reload').addEventListener('click', () => { unloadBrowser(); loadBrowser(); });
 

@@ -208,6 +208,8 @@ export interface AppConfig {
   // Domains the user deliberately deleted — import never brings them back.
   deletedDomains?: string[];
   projects?: Project[];
+  // User-written notes per compose stack, keyed by compose file path.
+  composeNotes?: Record<string, string>;
   settings: {
     scanIntervalMs: number;
     protectedPids: number[];

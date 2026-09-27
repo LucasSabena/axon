@@ -1033,7 +1033,41 @@ registerDropRoutes(app);
 registerSessionRoutes(app);
 registerOpsRoutes(app);
 registerDockerOpsRoutes(app);
-registerComposeRoutes(app);
+registerComposeRoutes(app, {
+  getNotes: () => config.composeNotes,
+  setNote: async (key, note) => {
+    config.composeNotes = { ...(config.composeNotes || {}), [key]: note };
+    if (!note) delete config.composeNotes[key];
+    await saveConfig(config);
+  },
+});
+
+// Open a URL inside the embedded server-side Chromium via its CDP endpoint.
+// The jlesage image publishes remote debugging on 127.0.0.1:9222 when
+// CHROMIUM_REMOTE_DEBUGGING=1 — this only opens tabs in the running session.
+app.post('/api/browser/open', async (c) => {
+  const body = await c.req.json<{ url?: string }>().catch(() => ({} as { url?: string }));
+  const raw = (body.url || '').trim();
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return fail(c, 400, 'URL inválida');
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    return fail(c, 400, 'Solo se pueden abrir URLs http/https');
+  }
+  const res = await fetch(`http://127.0.0.1:9222/json/new?${encodeURIComponent(u.toString())}`, {
+    method: 'PUT',
+    signal: AbortSignal.timeout(5000),
+  }).catch(() => null);
+  if (!res || !res.ok) {
+    return fail(c, 502, 'El navegador del servidor no responde', {
+      detail: res ? `CDP ${res.status}` : 'sin conexión a 127.0.0.1:9222',
+    });
+  }
+  return c.json({ ok: true });
+});
 
 startAlertLoop();
 startScriptScheduler();
