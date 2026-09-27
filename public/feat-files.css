@@ -140,3 +140,76 @@
 
 /* Fallback inline confirm (only used if app.js's confirmDialog is missing) */
 .fm-confirm-msg { color: var(--text-dim); font-size: 0.87rem; margin: 0; }
+
+/* ---------- Multi-selection ---------- */
+.fm-selcell { width: 28px; text-align: center; }
+.fm-check, #fm-check-all { accent-color: var(--accent); cursor: pointer; margin: 0; }
+tr.fm-row.fm-selected td { background: var(--accent-soft, rgba(88, 166, 255, 0.14)); }
+tr.fm-row.fm-selected .fm-name { color: var(--accent); }
+.fm-row .fm-selcell { opacity: 0.55; }
+.fm-row:hover .fm-selcell, .fm-row.fm-selected .fm-selcell { opacity: 1; }
+
+.fm-selbar {
+  position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%);
+  z-index: 25;
+  display: flex; align-items: center; gap: 8px;
+  background: var(--bg-elevated); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg); padding: 8px 12px;
+  box-shadow: var(--shadow-modal);
+  font-size: 0.84rem; color: var(--text);
+}
+.fm-selbar.hidden { display: none; }
+#fm-sel-count { font-weight: 600; margin-right: 4px; white-space: nowrap; }
+.fm-selbar .lucide-icon { width: 14px; height: 14px; }
+
+/* Rubber-band rectangle — fixed to viewport since coords are clientX/Y */
+.fm-marquee {
+  position: fixed; z-index: 60; pointer-events: none;
+  border: 1px solid var(--accent);
+  background: var(--accent-soft, rgba(88, 166, 255, 0.12));
+  border-radius: 2px;
+}
+body.fm-marqueeing { user-select: none; cursor: crosshair; }
+body.fm-marqueeing * { cursor: crosshair !important; }
+
+/* ---------- Upload progress ---------- */
+.fm-upload-progress {
+  position: absolute; left: 18px; right: 18px; bottom: 18px; z-index: 24;
+  display: flex; align-items: center; gap: 10px;
+  background: var(--bg-elevated); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg); padding: 10px 14px;
+  box-shadow: var(--shadow-modal);
+}
+.fm-upload-progress.hidden { display: none; }
+#fm-up-label { font-size: 0.82rem; color: var(--text-dim); white-space: nowrap; }
+.fm-up-track {
+  flex: 1; height: 6px; border-radius: 3px;
+  background: var(--bg-hover); overflow: hidden;
+}
+.fm-up-bar {
+  height: 100%; width: 0%;
+  background: var(--accent); border-radius: 3px;
+  transition: width 0.15s ease-out;
+}
+#fm-up-cancel { flex-shrink: 0; }
+#fm-up-cancel .lucide-icon { width: 13px; height: 13px; }
+
+/* ---------- Prompt modal (mkdir / rename) ---------- */
+.fm-prompt-modal { z-index: 120; }
+.fm-prompt-label { display: block; }
+.fm-prompt-label span {
+  display: block; font-size: 0.8rem; color: var(--text-dim); margin-bottom: 6px;
+  word-break: break-all;
+}
+.fm-prompt-input {
+  width: 100%; padding: 8px 10px;
+  background: var(--bg-canvas); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); color: var(--text);
+  font-family: var(--font-mono); font-size: 0.85rem; outline: none;
+}
+.fm-prompt-input:focus { border-color: var(--accent); }
+
+@media (max-width: 720px) {
+  .fm-selbar { left: 10px; right: 10px; transform: none; bottom: 10px; flex-wrap: wrap; }
+  .fm-upload-progress { left: 10px; right: 10px; bottom: 10px; }
+}

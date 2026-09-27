@@ -14,7 +14,8 @@
         <h2>Archivos</h2>
         <div class="section-actions">
           <input type="text" id="fm-filter" class="filter-input" placeholder="Filtrar…">
-          <button id="fm-upload-btn" class="btn-secondary">${icon('upload')} Subir</button>
+          <button id="fm-upload-btn" class="btn-secondary" title="Subir archivos">${icon('upload')} Subir</button>
+          <button id="fm-upload-dir-btn" class="btn-secondary" title="Subir una carpeta completa">${icon('folder-up')} Carpeta</button>
           <button id="fm-mkdir-btn" class="btn-secondary">${icon('folder-plus')} Nueva carpeta</button>
           <button id="fm-refresh-btn" class="btn-secondary" title="Actualizar">${icon('refresh-cw')}</button>
         </div>
@@ -27,6 +28,7 @@
         <table class="data-table" id="fm-table">
           <thead>
             <tr>
+              <th class="fm-selcell"><input type="checkbox" id="fm-check-all" tabindex="-1" title="Seleccionar todo"></th>
               <th></th>
               <th>Nombre</th>
               <th>Tamaño</th>
@@ -54,6 +56,19 @@
       <p class="listener-note">Ctrl/Cmd+S guarda · Esc vuelve a la lista</p>
     </div>
     <input type="file" id="fm-file-input" class="hidden" multiple>
+    <input type="file" id="fm-dir-input" class="hidden" webkitdirectory>
+    <div class="fm-selbar hidden" id="fm-selbar">
+      <span id="fm-sel-count"></span>
+      <button id="fm-sel-all" class="btn-secondary" title="Seleccionar todo">${icon('check-square')} Todos</button>
+      <button id="fm-sel-dl" class="btn-secondary">${icon('download')} Descargar</button>
+      <button id="fm-sel-del" class="btn-danger">${icon('trash-2')} Eliminar</button>
+      <button id="fm-sel-clear" class="btn-secondary" title="Limpiar selección">${icon('x')}</button>
+    </div>
+    <div class="fm-upload-progress hidden" id="fm-upload-progress">
+      <span id="fm-up-label"></span>
+      <div class="fm-up-track"><div class="fm-up-bar" id="fm-up-bar"></div></div>
+      <button id="fm-up-cancel" class="btn-secondary" title="Cancelar la subida">${icon('x')} Cancelar</button>
+    </div>
     <div class="fm-drop-overlay" id="fm-drop-overlay">
       <div class="fm-drop-box">${icon('upload')}<span id="fm-drop-text"></span></div>
     </div>
@@ -71,6 +86,8 @@
     readOnly: false,
     originalContent: '',
     dragDepth: 0,
+    sel: new Set(),   // multi-selection (names within cwd)
+    anchor: null,     // last-clicked row name — shift+click range base
   };
 
   const el = (id) => sec.querySelector('#' + id);
@@ -161,7 +178,9 @@
           <button class="fm-act" data-act="rename" title="Renombrar">${icon('pencil')}</button>
           <button class="fm-act fm-act-danger" data-act="delete" title="Eliminar">${icon('trash-2')}</button>
         </div>`;
-    return `<tr class="fm-row${isUp ? ' fm-up' : ''}" data-name="${esc(e.name)}" data-type="${esc(e.type)}">
+    const selected = !isUp && S.sel.has(e.name);
+    return `<tr class="fm-row${isUp ? ' fm-up' : ''}${selected ? ' fm-selected' : ''}" data-name="${esc(e.name)}" data-type="${esc(e.type)}">
+      <td class="fm-selcell">${isUp ? '' : `<input type="checkbox" class="fm-check" ${selected ? 'checked' : ''} tabindex="-1">`}</td>
       <td class="icon-cell">${ic}</td>
       <td class="fm-name">${esc(e.name)}${linkBadge}</td>
       <td class="num">${isUp || e.type === 'dir' ? '—' : fmtSize(e.size)}</td>
@@ -187,6 +206,8 @@
 
   // ---------- Navigation ----------
   async function navigate(p) {
+    S.sel.clear();
+    S.anchor = null;
     showList();
     setState('Cargando…');
     try {
@@ -498,10 +519,10 @@
     if (act === 'download') {
       download(p, name);
     } else if (act === 'rename') {
-      const nn = window.prompt(`Renombrar «${name}» a:`, name);
+      const nn = await fmPrompt('Renombrar', `Nuevo nombre para «${name}»`, name);
       if (!nn || nn === name) return;
-      if (nn.includes('/')) {
-        toast('El nombre no puede contener /', 'error');
+      if (nn.includes('/') || nn === '.' || nn === '..') {
+        toast('Nombre inválido — sin "/", "." ni ".."', 'error');
         return;
       }
       try {
@@ -527,17 +548,93 @@
     }
   }
 
+  // ---------- Multi-selection ----------
+  function updateSelbar() {
+    const bar = el('fm-selbar');
+    const n = S.sel.size;
+    bar.classList.toggle('hidden', n === 0);
+    el('fm-sel-count').textContent = `${n} seleccionado${n === 1 ? '' : 's'}`;
+    const checkAll = el('fm-check-all');
+    if (checkAll) {
+      const total = S.entries.length;
+      checkAll.checked = n > 0 && n === total;
+      checkAll.indeterminate = n > 0 && n < total;
+    }
+  }
+
+  function applySelToDom() {
+    el('fm-tbody').querySelectorAll('tr.fm-row').forEach((tr) => {
+      const on = S.sel.has(tr.dataset.name);
+      tr.classList.toggle('fm-selected', on);
+      const cb = tr.querySelector('.fm-check');
+      if (cb) cb.checked = on;
+    });
+    updateSelbar();
+  }
+
+  function toggleSel(name, on) {
+    if (on === undefined) on = !S.sel.has(name);
+    if (on) S.sel.add(name);
+    else S.sel.delete(name);
+    applySelToDom();
+  }
+
+  function clearSel() {
+    if (!S.sel.size) return;
+    S.sel.clear();
+    S.anchor = null;
+    applySelToDom();
+  }
+
+  // Visible (filtered) row names in display order — for shift-range selects.
+  function visibleNames() {
+    const q = S.filter.trim().toLowerCase();
+    return S.entries.filter((e) => !q || e.name.toLowerCase().includes(q)).map((e) => e.name);
+  }
+
+  function rangeSelect(name) {
+    const names = visibleNames();
+    const a = names.indexOf(S.anchor);
+    const b = names.indexOf(name);
+    if (a === -1 || b === -1) {
+      toggleSel(name, true);
+      return;
+    }
+    for (let i = Math.min(a, b); i <= Math.max(a, b); i++) S.sel.add(names[i]);
+    applySelToDom();
+  }
+
   el('fm-table').addEventListener('click', (e) => {
-    const actBtn = e.target.closest('.fm-act');
     const tr = e.target.closest('tr.fm-row');
+    const actBtn = e.target.closest('.fm-act');
     if (actBtn && tr) {
       e.stopPropagation();
       doAction(actBtn.dataset.act, tr.dataset.name, tr.dataset.type);
       return;
     }
+    const check = e.target.closest('.fm-check');
+    if (check && tr) {
+      e.stopPropagation();
+      S.anchor = tr.dataset.name;
+      toggleSel(tr.dataset.name);
+      return;
+    }
     if (!tr) return;
     const { name, type } = tr.dataset;
     if (name === '..') return navigate(parentOf(S.cwd));
+    // Selection modifiers — plain clicks keep their old behavior.
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      S.anchor = name;
+      toggleSel(name);
+      return;
+    }
+    if (e.shiftKey && S.sel.size) {
+      e.preventDefault();
+      rangeSelect(name);
+      return;
+    }
+    if (S.sel.size) clearSel();
     if (type === 'dir') return navigate(join(S.cwd, name));
     openEditor(join(S.cwd, name));
   });
@@ -573,6 +670,171 @@
     if (b) navigate(b.dataset.p);
   });
 
+  // Header checkbox → select everything visible
+  el('fm-check-all').addEventListener('change', (e) => {
+    if (e.target.checked) {
+      for (const n of visibleNames()) S.sel.add(n);
+    } else {
+      S.sel.clear();
+    }
+    S.anchor = null;
+    applySelToDom();
+  });
+
+  // ---------- Selection bar actions ----------
+  el('fm-sel-clear').addEventListener('click', clearSel);
+  el('fm-sel-all').addEventListener('click', () => {
+    for (const n of visibleNames()) S.sel.add(n);
+    applySelToDom();
+  });
+  el('fm-sel-dl').addEventListener('click', () => {
+    let i = 0;
+    for (const name of S.sel) {
+      const entry = S.entries.find((e) => e.name === name);
+      if (!entry || entry.type === 'dir') continue;
+      // Stagger so the browser doesn't drop queued downloads.
+      const p = join(S.cwd, name);
+      setTimeout(() => download(p, name), i++ * 350);
+    }
+    toast(`Descargando ${i} archivo${i === 1 ? '' : 's'}…`, 'ok', '', 2500);
+  });
+  el('fm-sel-del').addEventListener('click', async () => {
+    const names = [...S.sel];
+    if (!names.length) return;
+    const preview = names.slice(0, 6).join(', ') + (names.length > 6 ? ` y ${names.length - 6} más` : '');
+    const ok = await confirmDialog(
+      `Eliminar ${names.length} elemento${names.length === 1 ? '' : 's'}`,
+      `Se borran permanentemente: ${preview}`
+    );
+    if (!ok) return;
+    const failed = [];
+    for (const name of names) {
+      try {
+        await api('/api/files/delete', { method: 'POST', body: { path: join(S.cwd, name), confirm: true } });
+      } catch (err) {
+        failed.push(`${name}: ${err.message}`);
+      }
+    }
+    if (failed.length) toast(`Error al eliminar ${failed.length}`, 'error', failed.join('\n'));
+    else toast(`${names.length} eliminado${names.length === 1 ? '' : 's'}`, 'ok', '', 3000);
+    navigate(S.cwd);
+  });
+
+  // ---------- Marquee (rubber-band) selection ----------
+  // Mousedown on empty list space starts a drag-rect; rows it covers get
+  // selected. Rows/buttons/links stay clickable — only the gaps trigger it.
+  const listEl = el('fm-list');
+  let marquee = null; // {x0,y0,div,moved}
+
+  listEl.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    if (e.target.closest('tr.fm-row, button, a, input, textarea, select, .fm-crumb')) return;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const div = document.createElement('div');
+    div.className = 'fm-marquee';
+    div.style.display = 'none';
+    document.body.appendChild(div);
+    marquee = { x0: startX, y0: startY, div, moved: false };
+    e.preventDefault(); // no text selection while dragging
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!marquee) return;
+    const dx = Math.abs(e.clientX - marquee.x0);
+    const dy = Math.abs(e.clientY - marquee.y0);
+    if (!marquee.moved && dx < 4 && dy < 4) return; // plain clicks pass through
+    if (!marquee.moved) {
+      marquee.moved = true;
+      marquee.div.style.display = 'block';
+      document.body.classList.add('fm-marqueeing');
+    }
+    const r = {
+      left: Math.min(marquee.x0, e.clientX),
+      right: Math.max(marquee.x0, e.clientX),
+      top: Math.min(marquee.y0, e.clientY),
+      bottom: Math.max(marquee.y0, e.clientY),
+    };
+    Object.assign(marquee.div.style, {
+      left: r.left + 'px', top: r.top + 'px',
+      width: r.right - r.left + 'px', height: r.bottom - r.top + 'px',
+    });
+    // Live-select rows whose rect intersects the marquee (additive only —
+    // dragging back over a row doesn't deselect, matching file managers).
+    el('fm-tbody').querySelectorAll('tr.fm-row:not(.fm-up)').forEach((tr) => {
+      const b = tr.getBoundingClientRect();
+      const hit = b.left < r.right && b.right > r.left && b.top < r.bottom && b.bottom > r.top;
+      if (hit) S.sel.add(tr.dataset.name);
+      tr.classList.toggle('fm-selected', S.sel.has(tr.dataset.name));
+      const cb = tr.querySelector('.fm-check');
+      if (cb) cb.checked = S.sel.has(tr.dataset.name);
+    });
+    updateSelbar();
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!marquee) return;
+    const moved = marquee.moved;
+    marquee.div.remove();
+    marquee = null;
+    document.body.classList.remove('fm-marqueeing');
+    if (!moved) clearSel(); // click on empty space clears the selection
+  });
+
+  // Esc clears the selection; Ctrl/Cmd+A selects all (files tab only).
+  document.addEventListener('keydown', (e) => {
+    if (!sec.classList.contains('active') || S.editingPath) return;
+    if (document.querySelector('.modal:not(.hidden)')) return;
+    const tag = (e.target.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea') return;
+    if (e.key === 'Escape' && S.sel.size) {
+      clearSel();
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+      e.preventDefault();
+      for (const n of visibleNames()) S.sel.add(n);
+      applySelToDom();
+    }
+  });
+
+  // ---------- Custom prompt modal (mkdir / rename) ----------
+  function fmPrompt(title, label, value = '') {
+    return new Promise((resolve) => {
+      const m = document.createElement('div');
+      m.className = 'modal fm-prompt-modal';
+      m.innerHTML = `
+        <div class="modal-content">
+          <h3></h3>
+          <label class="fm-prompt-label"><span></span>
+            <input type="text" class="fm-prompt-input" maxlength="255" autocomplete="off" spellcheck="false">
+          </label>
+          <div class="modal-actions">
+            <button class="btn-secondary fm-p-cancel">Cancelar</button>
+            <button class="btn-primary fm-p-ok">Aceptar</button>
+          </div>
+        </div>`;
+      m.querySelector('h3').textContent = title;
+      m.querySelector('.fm-prompt-label span').textContent = label;
+      const input = m.querySelector('.fm-prompt-input');
+      input.value = value;
+      const done = (v) => {
+        document.removeEventListener('keydown', onKey, true);
+        m.remove();
+        resolve(v);
+      };
+      const onKey = (e) => {
+        if (e.key === 'Escape') { e.stopPropagation(); done(null); }
+        if (e.key === 'Enter') { e.preventDefault(); done(input.value.trim() || null); }
+      };
+      document.addEventListener('keydown', onKey, true);
+      m.querySelector('.fm-p-ok').addEventListener('click', () => done(input.value.trim() || null));
+      m.querySelector('.fm-p-cancel').addEventListener('click', () => done(null));
+      m.addEventListener('click', (e) => { if (e.target === m) done(null); });
+      document.body.appendChild(m);
+      input.focus();
+      input.select();
+    });
+  }
+
   // ---------- Toolbar ----------
   el('fm-refresh-btn').addEventListener('click', () => navigate(S.cwd || undefined));
 
@@ -582,10 +844,10 @@
   });
 
   el('fm-mkdir-btn').addEventListener('click', async () => {
-    const name = window.prompt('Nombre de la nueva carpeta:');
+    const name = await fmPrompt('Nueva carpeta', 'Nombre');
     if (!name) return;
-    if (name.includes('/')) {
-      toast('El nombre no puede contener /', 'error');
+    if (name.includes('/') || name === '.' || name === '..') {
+      toast('Nombre inválido — sin "/", "." ni ".."', 'error');
       return;
     }
     try {
@@ -598,22 +860,42 @@
   });
 
   el('fm-upload-btn').addEventListener('click', () => el('fm-file-input').click());
+  el('fm-upload-dir-btn').addEventListener('click', () => el('fm-dir-input').click());
 
-  // ---------- Upload (shared by file picker and drag & drop) ----------
+  // ---------- Upload (shared by file pickers and drag & drop) ----------
+  let uploadAbort = null;
+  el('fm-up-cancel').addEventListener('click', () => uploadAbort && uploadAbort.abort());
+
+  function setUploadBar(done, total, label) {
+    const wrap = el('fm-upload-progress');
+    wrap.classList.remove('hidden');
+    el('fm-up-label').textContent = label;
+    el('fm-up-bar').style.width = total ? `${Math.round((done / total) * 100)}%` : '0%';
+  }
+
   async function uploadFiles(files) {
-    const list = Array.from(files || []);
+    const list = Array.from(files || []).filter(Boolean);
     if (!list.length) return;
-    toast(`Subiendo ${list.length} archivo${list.length === 1 ? '' : 's'}…`, 'warn', '', 2500);
+    const total = list.length;
+    uploadAbort = new AbortController();
+    el('fm-up-cancel').disabled = false;
+    setUploadBar(0, total, `Subiendo 0/${total}…`);
     const failed = [];
     let okCount = 0;
     for (const f of list) {
+      if (uploadAbort.signal.aborted) break;
+      // Folder uploads carry webkitRelativePath ("dir/sub/file"); drops of
+      // folders carry _relPath stamped by collectDropped(). Plain files: name.
+      const rel = (f.webkitRelativePath || f._relPath || f.name || 'archivo').replace(/^\/+/, '');
       try {
         const fd = new FormData();
-        fd.append('file', f, f.name);
+        fd.append('rel', rel);
+        fd.append('file', f, rel.split('/').pop() || 'archivo');
         const res = await fetch(`/api/files/upload?path=${encodeURIComponent(S.cwd)}`, {
           method: 'POST',
           credentials: 'same-origin',
           body: fd,
+          signal: uploadAbort.signal,
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data.ok === false) {
@@ -624,24 +906,79 @@
         }
         okCount++;
       } catch (err) {
+        if (uploadAbort.signal.aborted) break;
         // Per-file errors (incl. 413 for >64MB) go into one batch toast.
         const why =
-          err.status === 413 ? err.message || 'El archivo supera el límite de 64 MB' : err.message || 'Error';
-        failed.push(`${f.name}: ${why}`);
+          err.status === 413 ? 'El archivo supera el límite de 64 MB' : err.message || 'Error';
+        failed.push(`${rel}: ${why}`);
       }
+      setUploadBar(okCount + failed.length, total, `Subiendo ${okCount + failed.length}/${total}…`);
     }
-    if (failed.length) {
-      toast(`Error al subir ${failed.length} archivo${failed.length === 1 ? '' : 's'}`, 'error', failed.join('\n'));
+    const aborted = uploadAbort.signal.aborted;
+    uploadAbort = null;
+    el('fm-upload-progress').classList.add('hidden');
+    if (aborted) {
+      toast(`Subida cancelada — ${okCount} ok, ${total - okCount - failed.length} pendientes`, 'warn', '', 4000);
+    } else if (failed.length) {
+      toast(`Error al subir ${failed.length} archivo${failed.length === 1 ? '' : 's'}`, 'error', failed.slice(0, 6).join('\n'));
     }
     if (okCount) toast(`${okCount} subido${okCount === 1 ? '' : 's'}`, 'ok', '', 3000);
     navigate(S.cwd);
   }
 
   el('fm-file-input').addEventListener('change', (e) => {
-    const files = e.target.files;
+    // Clone before resetting — FileList is a live view of the input and
+    // clearing .value empties it (this was the "upload does nothing" bug).
+    const files = Array.from(e.target.files || []);
     e.target.value = '';
     uploadFiles(files);
   });
+  el('fm-dir-input').addEventListener('change', (e) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    uploadFiles(files);
+  });
+
+  // Expand dropped folders: Chrome exposes them via webkitGetAsEntry; each
+  // nested file gets _relPath stamped ("folder/sub/x.png") for the `rel` field.
+  async function collectDropped(dt) {
+    const items = Array.from(dt.items || []);
+    const out = [];
+    const readAll = (reader) =>
+      new Promise((res) => {
+        const acc = [];
+        const step = () =>
+          reader.readEntries((batch) => {
+            if (!batch.length) return res(acc);
+            acc.push(...batch);
+            step(); // readEntries returns batches — loop until empty
+          });
+        step();
+      });
+    const walk = async (entry, prefix) => {
+      if (entry.isFile) {
+        const file = await new Promise((res, rej) => entry.file(res, rej));
+        file._relPath = (prefix + entry.name).replace(/^\/+/, '');
+        out.push(file);
+      } else if (entry.isDirectory) {
+        const subs = await readAll(entry.createReader());
+        for (const sub of subs) await walk(sub, prefix + entry.name + '/');
+      }
+    };
+    const pending = [];
+    for (const item of items) {
+      const entry = item.webkitGetAsEntry && item.webkitGetAsEntry();
+      if (entry) pending.push(walk(entry, ''));
+      else {
+        const f = item.getAsFile && item.getAsFile();
+        if (f) out.push(f);
+      }
+    }
+    await Promise.all(pending);
+    // Fallback for browsers without the entries API.
+    if (!out.length) out.push(...Array.from(dt.files || []));
+    return out;
+  }
 
   // ---------- Drag & drop upload ----------
   const hasFiles = (e) => Array.from(e.dataTransfer?.types || []).includes('Files');
@@ -676,11 +1013,16 @@
     }
   });
 
-  sec.addEventListener('drop', (e) => {
+  sec.addEventListener('drop', async (e) => {
     if (!hasFiles(e)) return;
     e.preventDefault();
     S.dragDepth = 0;
     setDragOver(false);
-    uploadFiles(e.dataTransfer.files);
+    try {
+      const files = await collectDropped(e.dataTransfer);
+      uploadFiles(files);
+    } catch {
+      uploadFiles(e.dataTransfer.files);
+    }
   });
 })();
