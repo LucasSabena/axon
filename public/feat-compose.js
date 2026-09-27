@@ -57,7 +57,8 @@
   function chipHtml(s) {
     const running = s.status === 'running';
     const tip = [s.container, s.statusText || s.status].filter(Boolean).join(' · ');
-    return `<span class="cp-chip ${running ? 'cp-on' : 'cp-off'}" title="${esc(tip || s.name)}"><span class="cp-dot"></span>${esc(s.name)}</span>`;
+    const mem = s.mem ? `<span class="cp-chip-mem">${esc(s.mem)}</span>` : '';
+    return `<span class="cp-chip ${running ? 'cp-on' : 'cp-off'}" title="${esc(tip || s.name)}"><span class="cp-dot"></span>${esc(s.name)}${mem}</span>`;
   }
 
   function cardHtml(p) {
@@ -78,13 +79,17 @@
       : p.source === 'disk'
         ? '<span class="badge badge-other">dormido</span>'
         : '';
+    const memBadge = p.mem ? `<span class="badge badge-other" title="RAM total del stack">${icon('cpu')} ${esc(p.mem)}</span>` : '';
+    const desc = p.note || p.description || '';
+    const descHtml = `<div class="cp-desc ${p.note ? 'cp-desc-note' : ''}" data-key="${esc(file)}" title="Click para editar la nota">${desc ? esc(desc) : '<span class="cp-desc-empty">+ agregar descripción…</span>'}</div>`;
     return `
       <div class="cp-card" data-path="${esc(file)}">
         <div class="cp-head">
           <span class="cp-name">${icon('layers')} ${esc(p.project)}</span>
-          ${badge}
+          ${badge}${memBadge}
         </div>
         <div class="cp-file mono" title="${esc(file)}">${esc(file || '—')}</div>
+        ${descHtml}
         <div class="cp-chips">${chips}</div>
         <div class="cp-actions">${acts}</div>
       </div>`;
@@ -435,6 +440,37 @@
     el('cp-refresh').addEventListener('click', load);
 
     el('cp-grid').addEventListener('click', (e) => {
+      // Click en la descripción → editor inline de la nota del stack.
+      const desc = e.target.closest('.cp-desc');
+      if (desc && !desc.querySelector('input')) {
+        const key = desc.dataset.key;
+        const p = S.projects.find((x) => (x.configFile || x.path) === key);
+        const cur = p?.note || '';
+        const input = document.createElement('input');
+        input.className = 'cp-desc-input';
+        input.value = cur;
+        input.placeholder = 'De qué es este stack… (Enter guarda)';
+        input.maxLength = 300;
+        desc.replaceChildren(input);
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+        const commit = async () => {
+          const note = input.value.trim();
+          try {
+            await api('/api/compose/note', { method: 'POST', body: { key, note } });
+            if (p) p.note = note || undefined;
+          } catch (err) {
+            toast(err.message || 'No se pudo guardar la nota', 'error', '', 3000);
+          }
+          render();
+        };
+        input.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
+          else if (ev.key === 'Escape') render();
+        });
+        input.addEventListener('blur', commit);
+        return;
+      }
       const btn = e.target.closest('button');
       if (!btn) return;
       const card = btn.closest('.cp-card');

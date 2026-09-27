@@ -87,6 +87,38 @@
 #tab-compose .cp-chip.cp-on .cp-dot { background: var(--ok); }
 #tab-compose .cp-chip.cp-off .cp-dot { background: var(--text-faint); }
 
+#tab-compose .cp-chip-mem {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  opacity: 0.75;
+  padding-left: 6px;
+  border-left: 1px solid currentColor;
+}
+
+#tab-compose .cp-desc {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  line-height: 1.4;
+  cursor: text;
+  border-radius: var(--radius-sm);
+  padding: 2px 4px;
+  margin: -2px -4px;
+  min-height: 1.1em;
+}
+#tab-compose .cp-desc:hover { background: var(--bg-overlay); }
+#tab-compose .cp-desc-note { color: var(--text); }
+#tab-compose .cp-desc-empty { color: var(--text-faint); font-style: italic; }
+#tab-compose .cp-desc-input {
+  width: 100%;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-focus, var(--border));
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  outline: none;
+}
+
 #tab-compose .cp-actions {
   display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto;
 }
