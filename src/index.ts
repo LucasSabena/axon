@@ -1062,20 +1062,9 @@ app.post('/api/browser/open', async (c) => {
   if (u.protocol !== 'http:' && u.protocol !== 'https:') {
     return fail(c, 400, 'Solo se pueden abrir URLs http/https');
   }
-  // The embedded browser lives in its own container: `localhost` there is the
-  // container itself, and even the host gateway can't reach services bound to
-  // 127.0.0.1. Route loopback URLs through this app's own /p/:port proxy
-  // (host network) and log the browser in with a one-shot pair token — the
-  // resulting session persists in the Chromium profile.
-  let openUrl = u.toString();
-  if (['localhost', '127.0.0.1', '::1', '[::1]'].includes(u.hostname)) {
-    const port = u.port || (u.protocol === 'https:' ? '443' : '80');
-    const next = `/p/${port}${u.pathname === '/' ? '/' : u.pathname + u.search + u.hash}`;
-    const pair = crypto.randomUUID();
-    pairTokens.set(pair, Date.now() + PAIR_TTL_MS);
-    openUrl = `http://host.docker.internal:${PORT}/pair?t=${pair}&next=${encodeURIComponent(next)}`;
-  }
-  const res = await fetch(`http://127.0.0.1:9222/json/new?${encodeURIComponent(openUrl)}`, {
+  // The embedded Chromium shares the host network (network_mode: host), so
+  // localhost URLs resolve to the server's own services directly.
+  const res = await fetch(`http://127.0.0.1:9222/json/new?${encodeURIComponent(u.toString())}`, {
     method: 'PUT',
     signal: AbortSignal.timeout(5000),
   }).catch(() => null);
