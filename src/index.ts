@@ -70,7 +70,7 @@ import { parseLogsSrc, startLogsSocket, stopLogsSocket, registerLogsRoutes } fro
 import type { LogsWsData } from './logs';
 import { registerMetricsRoutes } from './metrics';
 import { registerDropRoutes, startDropSweeper } from './drop';
-import { registerSessionRoutes, recordSession, sessionIdForToken, isRevoked, touchSession } from './sessions';
+import { registerSessionRoutes, recordSession, sessionIdForToken, isRevoked, touchSession, revokeSession } from './sessions';
 import { registerOpsRoutes } from './ops';
 import { registerDockerOpsRoutes } from './docker-ops';
 import { registerComposeRoutes } from './compose';
@@ -149,13 +149,23 @@ app.post('/api/login', async (c) => {
 });
 
 app.post('/api/logout', async (c) => {
+  // Revoke server-side too — the cookie is stateless, so clearing it alone
+  // leaves the signed token valid for the rest of its TTL.
+  const token = c.req.header('cookie')?.match(/(?:^|;\s*)ports_session=([^;]+)/)?.[1];
+  if (token) revokeSession(token);
   clearSessionCookie(c);
   return c.json({ ok: true });
 });
 
 app.get('/api/me', async (c) => {
   const session = await getSession(c);
-  return c.json({ authenticated: !!session, username: session?.username || null });
+  if (!session) return c.json({ authenticated: false, username: null });
+  // A revoked token must report as logged out, not half-authenticated.
+  const token = c.req.header('cookie')?.match(/(?:^|;\s*)ports_session=([^;]+)/)?.[1];
+  if (token && isRevoked(sessionIdForToken(token))) {
+    return c.json({ authenticated: false, username: null });
+  }
+  return c.json({ authenticated: true, username: session.username });
 });
 
 app.use('/api/*', requireAuth);
@@ -616,7 +626,7 @@ app.post('/api/domains/import', async (c) => {
 app.post('/api/domains', async (c) => {
   const { subdomain, port, processType, projectName } = await c.req.json<{
     subdomain: string; port: number; processType: 'process' | 'docker'; projectName: string;
-  }>();
+  }>().catch(() => ({}) as { subdomain?: string; port?: number; processType?: 'process' | 'docker'; projectName?: string });
   const clean = (subdomain || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
   if (!clean) return fail(c, 400, 'Subdominio inválido');
   const fullDomain = `${clean}.${BASE_DOMAIN}`;
@@ -660,7 +670,7 @@ app.post('/api/domains', async (c) => {
 app.put('/api/domains/:id', async (c) => {
   const domain = config.domains.find((d) => d.id === c.req.param('id'));
   if (!domain) return fail(c, 404, 'Dominio no encontrado');
-  const { subdomain } = await c.req.json<{ subdomain: string }>();
+  const { subdomain } = await c.req.json<{ subdomain: string }>().catch(() => ({}) as { subdomain?: string });
   const clean = (subdomain || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
   if (!clean) return fail(c, 400, 'Subdominio inválido');
   const newFullDomain = `${clean}.${BASE_DOMAIN}`;
