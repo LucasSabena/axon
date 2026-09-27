@@ -10,6 +10,7 @@ import {
   clearSessionCookie,
   getSession,
   verifySessionToken,
+  setSessionHooks,
 } from './auth';
 import { loadConfig, saveConfig } from './config';
 import { getServerStats, getServerHosts } from './stats';
@@ -61,6 +62,17 @@ import {
 import type { DomainMapping, DomainStatus, Project } from './types';
 import { notify, setNotifyUrl } from './notify';
 import { loadHeartbeats, recordHeartbeat, lastState, allHeartbeats, uptimePct, pruneHeartbeats } from './heartbeats';
+import { registerFilesRoutes } from './files';
+import { registerEventRoutes, loadEvents, recordEvent } from './events';
+import { registerAlertRoutes, startAlertLoop } from './alerts';
+import { registerScriptRoutes, startScriptScheduler } from './scripts';
+import { parseLogsSrc, startLogsSocket, stopLogsSocket, registerLogsRoutes } from './logs';
+import type { LogsWsData } from './logs';
+import { registerMetricsRoutes } from './metrics';
+import { registerDropRoutes, startDropSweeper } from './drop';
+import { registerSessionRoutes, recordSession, sessionIdForToken, isRevoked, touchSession } from './sessions';
+import { registerOpsRoutes } from './ops';
+import { registerDockerOpsRoutes } from './docker-ops';
 
 const PORT = parseInt(process.env.PORT || '3457', 10);
 const BASE_DOMAIN = process.env.BASE_DOMAIN || 'example.com';
@@ -70,7 +82,9 @@ configurePorts(config.settings);
 setHostUser(config.settings.hostUser);
 initProjects(config, saveConfig);
 await loadHeartbeats();
+await loadEvents();
 setNotifyUrl(config.settings.notifyUrl);
+setSessionHooks({ isRevoked, touch: touchSession });
 
 // ---------- Heartbeat monitor ----------
 // Lightweight public probe per domain every 90s; records history and fires a
@@ -100,8 +114,10 @@ async function heartbeatTick(): Promise<void> {
       const prev = lastState(d.id);
       recordHeartbeat(d.id, r.s, r.ms);
       if (prev === 'up' && r.s === 'down') {
+        recordEvent('domain', `Dominio caído — ${d.fullDomain}`);
         notify(`Dominio caído — ${d.fullDomain}`, `Dejó de responder tras ${d.port ? `puerto ${d.port}` : 'su target'}`, 4).catch(() => {});
       }
+      if (prev === 'down' && r.s === 'up') recordEvent('domain', `Dominio recuperado — ${d.fullDomain}`);
     })
   );
 }
@@ -127,6 +143,7 @@ app.post('/api/login', async (c) => {
   if (!valid) return fail(c, 401, 'Credenciales inválidas');
   const token = await createSession(username);
   setSessionCookie(c, token);
+  recordSession(token, username, c.req.header('user-agent') || '');
   return c.json({ ok: true });
 });
 
@@ -162,6 +179,7 @@ app.get('/pair', async (c) => {
   pairTokens.delete(t);
   const token = await createSession('paired-device');
   setSessionCookie(c, token);
+  recordSession(token, 'paired-device', c.req.header('user-agent') || '');
   return c.redirect('/');
 });
 
@@ -418,7 +436,7 @@ app.post('/api/projects/:id/install', async (c) => {
   if (!project) return fail(c, 404, 'Proyecto no encontrado');
   const job = runJob(`install ${project.name}`, [{
     label: installCommand(project),
-    cmd: `cd ${JSON.stringify(project.cwd)} && ${installCommand(project)}`,
+    cmd: `cd ${shq(project.cwd)} && ${installCommand(project)}`,
     user: 'user',
   }]);
   return c.json({ ok: true, job });
@@ -872,7 +890,7 @@ app.get('/p/:port', (c) => c.redirect(`/p/${c.req.param('port')}/`));
 app.use('/*', async (c, next) => {
   await next();
   const p = c.req.path;
-  if (p === '/' || p.endsWith('.html') || p.endsWith('/app.js') || p.endsWith('.css')) {
+  if (p === '/' || p.endsWith('.html') || p.endsWith('.js') || p.endsWith('.css')) {
     c.header('Cache-Control', 'no-cache');
   } else if (p.includes('/vendor/')) {
     c.header('Cache-Control', 'public, max-age=86400');
@@ -911,6 +929,9 @@ app.post('/api/system/power', async (c) => {
   notify('Ports Manager — Servidor', `Se programó ${action === 'reboot' ? 'un reinicio' : 'un apagado'} en 3 segundos`, 5).catch(() => {});
   return c.json({ ok: true });
 });
+
+// POSIX single-quote escaping for host-side shells: 'foo'bar' -> 'foo'"'"'bar'
+const shq = (s: string) => `'${String(s).replace(/'/g, `'"'"'`)}'`;
 
 // ---------- Convert process to systemd user service ----------
 
@@ -990,6 +1011,22 @@ app.post('/api/systemd/preview-service', async (c) => {
   return c.json({ ok: true, unit, cwd, command: argv.join(' '), suggested: `pm-${name || 'servicio'}.service` });
 });
 
+// ---------- Feature modules (self-contained, wired here) ----------
+registerFilesRoutes(app);
+registerEventRoutes(app);
+registerAlertRoutes(app);
+registerScriptRoutes(app);
+registerLogsRoutes(app);
+registerMetricsRoutes(app);
+registerDropRoutes(app);
+registerSessionRoutes(app);
+registerOpsRoutes(app);
+registerDockerOpsRoutes(app);
+
+startAlertLoop();
+startScriptScheduler();
+startDropSweeper();
+
 app.get('/*', serveStatic({ root: './public' }));
 
 app.onError((err, c) => {
@@ -1003,7 +1040,7 @@ app.onError((err, c) => {
 // browser refreshes and reconnects.
 interface WsProxyData { kind: 'proxy'; upstream: WebSocket; pendingClient: unknown[]; pendingServer: unknown[]; ws: Bun.ServerWebSocket<WsData> | null }
 interface WsTermData { kind: 'term'; proc?: ReturnType<typeof Bun.spawn>; session?: string; cols?: number; rows?: number }
-type WsData = WsProxyData | WsTermData;
+type WsData = WsProxyData | WsTermData | LogsWsData;
 
 function startTermSocket(ws: Bun.ServerWebSocket<WsData>): void {
   const t = ws.data as WsTermData;
@@ -1039,7 +1076,8 @@ export default {
     const wsMatch = url.pathname.match(/^\/p\/(\d+)(\/.*)?$/);
     if (wsMatch && isWs) {
       const token = req.headers.get('cookie')?.match(/(?:^|;\s*)ports_session=([^;]+)/)?.[1];
-      if (!token || !(await verifySessionToken(token))) return new Response('Unauthorized', { status: 401 });
+      if (!token || !(await verifySessionToken(token)) || isRevoked(sessionIdForToken(token))) return new Response('Unauthorized', { status: 401 });
+      touchSession(sessionIdForToken(token));
       // Forward the client's subprotocol list (noVNC requires 'binary').
       // Upstream handlers attach NOW — before server.upgrade — so frames
       // that arrive early (RFB greeting, banners) and close/error events
@@ -1087,7 +1125,8 @@ export default {
     }
     if (isWs && url.pathname === '/ws/term') {
       const token = req.headers.get('cookie')?.match(/(?:^|;\s*)ports_session=([^;]+)/)?.[1];
-      if (!token || !(await verifySessionToken(token))) return new Response('Unauthorized', { status: 401 });
+      if (!token || !(await verifySessionToken(token)) || isRevoked(sessionIdForToken(token))) return new Response('Unauthorized', { status: 401 });
+      touchSession(sessionIdForToken(token));
       const data: WsData = {
         kind: 'term',
         session: (url.searchParams.get('s') || 'pm-term').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32) || 'pm-term',
@@ -1097,11 +1136,24 @@ export default {
       if (server.upgrade(req, { data })) return;
       return new Response('WS upgrade failed', { status: 500 });
     }
+    if (isWs && url.pathname === '/ws/logs') {
+      const token = req.headers.get('cookie')?.match(/(?:^|;\s*)ports_session=([^;]+)/)?.[1];
+      if (!token || !(await verifySessionToken(token))) return new Response('Unauthorized', { status: 401 });
+      if (isRevoked(sessionIdForToken(token))) return new Response('Unauthorized', { status: 401 });
+      touchSession(sessionIdForToken(token));
+      const src = url.searchParams.get('src') || '';
+      const p = parseLogsSrc(src);
+      if (!p.ok) return new Response(`src inválido: ${p.error}`, { status: 400 });
+      const data: WsData = { kind: 'logs', src };
+      if (server.upgrade(req, { data })) return;
+      return new Response('WS upgrade failed', { status: 500 });
+    }
     return app.fetch(req, server);
   },
   websocket: {
     open(ws: Bun.ServerWebSocket<WsData>) {
       if (ws.data.kind === 'term') { startTermSocket(ws); return; }
+      if (ws.data.kind === 'logs') { startLogsSocket(ws); return; }
       // Handlers were attached in fetch() before upgrade — just link the
       // socket and flush any upstream frames buffered in between.
       ws.data.ws = ws;
@@ -1110,6 +1162,7 @@ export default {
       }
     },
     message(ws: Bun.ServerWebSocket<WsData>, msg: string | Buffer) {
+      if (ws.data.kind === 'logs') return; // read-only stream
       if (ws.data.kind === 'term') {
         const t = ws.data;
         if (typeof msg === 'string' && msg[0] === '{') {
@@ -1137,6 +1190,7 @@ export default {
       else ws.data.pendingClient.push(msg);
     },
     close(ws: Bun.ServerWebSocket<WsData>) {
+      if (ws.data.kind === 'logs') { stopLogsSocket(ws.data); return; }
       if (ws.data.kind === 'term') {
         // Killing runuser orphans bash→script→tmux-client on the host; detach
         // the tmux client first so the whole chain exits cleanly, then kill.

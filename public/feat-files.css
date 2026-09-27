@@ -1,0 +1,78 @@
+/* File manager tab — everything scoped under #tab-files / .fm-* */
+
+/* Fill the viewport like the terminal tab: kill content padding/scroll
+   only while the files tab is active. */
+.content:has(> #tab-files.active) { padding: 0; overflow: hidden; }
+
+#tab-files.tab-content.active {
+  display: flex; flex-direction: column;
+  height: calc(100vh - var(--header-h)); height: calc(100dvh - var(--header-h));
+  max-width: none; padding: 0;
+}
+
+/* ---------- Top: header + breadcrumb ---------- */
+#tab-files .fm-top { padding: 12px 18px 0; flex-shrink: 0; }
+#tab-files .fm-note { margin: 6px 0 10px; }
+
+.fm-breadcrumb {
+  display: flex; align-items: center; gap: 2px; flex-wrap: wrap;
+  font-family: var(--font-mono); font-size: 12px; margin-bottom: 2px;
+}
+.fm-crumb {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: none; border: 0; border-radius: var(--radius-sm);
+  color: var(--accent); font: inherit; padding: 3px 5px; cursor: pointer;
+}
+.fm-crumb:hover { background: var(--bg-hover); color: var(--accent-hover); }
+.fm-crumb .lucide-icon { width: 13px; height: 13px; }
+.fm-crumb:last-child { color: var(--text); }
+.fm-sep { color: var(--text-faint); }
+
+/* ---------- List ---------- */
+#tab-files .fm-list {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column;
+  padding: 0 18px 14px;
+}
+.fm-table-wrap { flex: 1; min-height: 0; overflow: auto; }
+#tab-files .empty-state { margin-bottom: 12px; }
+
+#fm-table .fm-name {
+  font-family: var(--font-mono); font-size: 0.82rem;
+  word-break: break-all; color: var(--text);
+}
+.fm-row { cursor: pointer; }
+.fm-row .icon-cell .lucide-icon { width: 15px; height: 15px; }
+.fm-mtime { color: var(--text-dim); font-size: 0.8rem; white-space: nowrap; }
+.fm-mode { color: var(--text-faint); font-size: 0.78rem; }
+.fm-actcell { width: 1%; white-space: nowrap; text-align: right; }
+
+.fm-acts { display: inline-flex; gap: 4px; opacity: 0; transition: opacity 0.12s; }
+.fm-row:hover .fm-acts, .fm-acts:focus-within { opacity: 1; }
+.fm-act {
+  display: inline-flex; align-items: center; padding: 4px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--bg-elevated); color: var(--text-dim); cursor: pointer;
+}
+.fm-act:hover { color: var(--text); border-color: var(--border-strong); }
+.fm-act .lucide-icon { width: 13px; height: 13px; }
+.fm-act-danger:hover { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
+
+/* ---------- Editor ---------- */
+#tab-files .fm-editor {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column;
+  gap: 8px; padding: 0 18px 14px;
+}
+.fm-editor-bar { display: flex; align-items: center; gap: 10px; justify-content: space-between; flex-wrap: wrap; }
+.fm-editor-name { font-size: 0.84rem; color: var(--text-dim); word-break: break-all; }
+#fm-editor-text {
+  flex: 1; min-height: 50vh; resize: none;
+  background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text);
+  font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.5;
+  padding: 12px; outline: none; tab-size: 2; white-space: pre;
+}
+#fm-editor-text:focus { border-color: var(--accent); }
+#fm-editor-text[readonly] { opacity: 0.75; }
+#tab-files .fm-editor .listener-note { margin: 0; }

@@ -1,0 +1,196 @@
+/* Ports Manager — feature: Scripts (library + scheduler + webhooks)
+   Scoped under #tab-scripts and .sc-* classes; reuses app.css tokens. */
+
+#tab-scripts .sc-note {
+  margin: -4px 0 14px;
+}
+
+#tab-scripts .sc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  gap: 12px;
+}
+
+#tab-scripts .sc-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: border-color 0.15s ease;
+}
+
+#tab-scripts .sc-card:hover {
+  border-color: var(--border-strong);
+}
+
+#tab-scripts .sc-card.sc-off {
+  opacity: 0.55;
+}
+
+#tab-scripts .sc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+#tab-scripts .sc-name {
+  font-weight: 650;
+  font-size: 0.92rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#tab-scripts .sc-name .lucide-icon {
+  width: 15px;
+  height: 15px;
+  color: var(--accent-hover);
+  flex-shrink: 0;
+}
+
+#tab-scripts .sc-cmd {
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  line-height: 1.45;
+  color: var(--text-dim);
+  background: var(--bg-canvas);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 84px;
+  overflow: auto;
+}
+
+#tab-scripts .sc-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.74rem;
+  color: var(--text-faint);
+}
+
+#tab-scripts .sc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+  font-size: 0.72rem;
+  font-weight: 500;
+}
+
+#tab-scripts .sc-chip .lucide-icon {
+  width: 11px;
+  height: 11px;
+}
+
+#tab-scripts .sc-chip-manual {
+  background: var(--bg-overlay);
+  color: var(--text-dim);
+}
+
+#tab-scripts .sc-chip-next {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+#tab-scripts .sc-last-wrap {
+  color: var(--text-faint);
+}
+
+#tab-scripts .sc-last.ok {
+  color: var(--ok);
+}
+
+#tab-scripts .sc-last.fail {
+  color: var(--danger);
+}
+
+#tab-scripts .sc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: auto;
+}
+
+#tab-scripts .sc-actions .btn-secondary,
+#tab-scripts .sc-actions .btn-danger {
+  padding: 5px 8px;
+}
+
+#tab-scripts .sc-actions .lucide-icon {
+  width: 13px;
+  height: 13px;
+}
+
+#tab-scripts .sc-run .lucide-icon {
+  width: 12px;
+  height: 12px;
+}
+
+/* ---------- Editor / fallback job modal ---------- */
+
+.sc-modal .modal-content {
+  max-width: 560px;
+}
+
+.sc-modal textarea.mono {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.sc-modal .sc-help {
+  display: block;
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+.sc-modal .sc-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-dim);
+}
+
+.sc-modal .sc-check input[type='checkbox'] {
+  width: auto;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.sc-modal .sc-job-log {
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  line-height: 1.45;
+  color: var(--text-dim);
+  background: var(--bg-canvas);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  margin: 0;
+  max-height: 50vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (max-width: 640px) {
+  #tab-scripts .sc-grid {
+    grid-template-columns: 1fr;
+  }
+}

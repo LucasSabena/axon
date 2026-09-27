@@ -1,5 +1,6 @@
 import { hostSpawn } from './host';
 import { notify } from './notify';
+import { recordEvent } from './events';
 import { readFile, writeFile, mkdir } from 'fs/promises';
 import * as path from 'path';
 import type { Job, JobStepState, ProgramStep } from './types';
@@ -183,6 +184,11 @@ async function execute(job: Job, steps: JobStep[]) {
   job.endedAt = new Date().toISOString();
   appendLog(job, anyFailed ? '\n— Finalizado con errores —\n' : '\n— Finalizado correctamente —\n');
   persistJob(job);
+  recordEvent(
+    'job',
+    job.title,
+    anyFailed ? `Fallaron ${job.steps.filter((s) => s.status === 'failed').length} paso(s)` : 'Completado'
+  );
   notify(
     `Ports Manager — ${job.title}`,
     anyFailed

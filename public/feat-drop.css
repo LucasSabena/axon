@@ -1,0 +1,186 @@
+/* Ports Manager — feat: Drop. Todo scoping bajo #tab-drop para no tocar app.css. */
+
+#tab-drop .drop-note-top { margin: -4px 0 14px; }
+
+#tab-drop .drop-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 12px;
+}
+
+#tab-drop .card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+#tab-drop .drop-card-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+#tab-drop .drop-card-title svg { color: var(--accent); }
+
+/* ---------- Upload ---------- */
+
+#tab-drop .drop-zone {
+  border: 1.5px dashed var(--border-strong);
+  border-radius: var(--radius);
+  padding: 20px;
+  text-align: center;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s, color 0.12s;
+}
+#tab-drop .drop-zone:hover { border-color: var(--accent); color: var(--text); }
+#tab-drop .drop-zone.drop-over {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+#tab-drop .drop-zone-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+}
+#tab-drop .drop-zone-inner svg { width: 20px; height: 20px; }
+#tab-drop .drop-zone-inner small { font-size: 0.72rem; color: var(--text-faint); }
+#tab-drop .drop-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+#tab-drop .drop-save { display: flex; flex-direction: column; gap: 4px; }
+
+/* ---------- Inputs ---------- */
+
+#tab-drop .drop-label {
+  font-size: 0.76rem;
+  color: var(--text-faint);
+}
+
+#tab-drop .drop-input,
+#tab-drop .drop-textarea {
+  width: 100%;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 0.85rem;
+  padding: 7px 10px;
+  outline: none;
+}
+#tab-drop .drop-input:focus,
+#tab-drop .drop-textarea:focus { border-color: var(--accent); }
+#tab-drop .drop-textarea { resize: vertical; min-height: 84px; line-height: 1.45; }
+
+#tab-drop .drop-btnrow { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* ---------- Link result ---------- */
+
+#tab-drop .drop-result {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+}
+#tab-drop .drop-url {
+  font-size: 0.76rem;
+  color: var(--info);
+  word-break: break-all;
+  user-select: all;
+}
+#tab-drop .drop-note { font-size: 0.72rem; color: var(--text-faint); }
+#tab-drop .drop-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+#tab-drop .drop-status svg { flex-shrink: 0; margin-top: 1px; }
+#tab-drop .drop-status.ok { color: var(--ok); }
+#tab-drop .drop-status.err { color: var(--danger); }
+
+#tab-drop .drop-qr { display: flex; justify-content: center; }
+#tab-drop .drop-qr svg {
+  width: 150px;
+  height: 150px;
+  background: #fff;
+  border-radius: 6px;
+  padding: 5px;
+}
+#tab-drop .drop-qr img,
+#tab-drop .drop-qr canvas { width: 150px; height: 150px; background: #fff; border-radius: 6px; padding: 5px; }
+
+/* ---------- Clipboard ---------- */
+
+#tab-drop .drop-clip-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+#tab-drop .drop-clip-view {
+  margin: 0;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  max-height: 140px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---------- Sessions ---------- */
+
+#tab-drop .drop-table-wrap { max-height: 240px; overflow-y: auto; }
+#tab-drop .drop-sessions-actions { margin-top: 2px; }
+#tab-drop .drop-device { display: inline-flex; align-items: center; gap: 6px; }
+#tab-drop .drop-device svg { color: var(--text-dim); }
+#tab-drop tr.drop-self td { background: var(--accent-soft); }
+#tab-drop #drop-sessions td { font-size: 0.82rem; }
+
+/* ---------- Drops list ---------- */
+
+#tab-drop .drop-list-header { margin-top: 22px; }
+#tab-drop .drop-preview {
+  display: inline-block;
+  max-width: 380px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+#tab-drop .drop-qr-row td {
+  background: var(--bg-canvas);
+  text-align: center;
+  padding: 14px;
+}
+#tab-drop .drop-qr-row .drop-url { margin-top: 8px; }
+
+@media (max-width: 900px) {
+  #tab-drop .drop-grid { grid-template-columns: 1fr; }
+  #tab-drop .drop-preview { max-width: 46vw; }
+}

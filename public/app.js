@@ -1092,6 +1092,9 @@ async function loadDocker() {
         <td><span class="badge ${ct.state === 'running' ? 'badge-status-running' : 'badge-status-stopped'}">${esc(ct.status)}</span></td>
         <td>${ports} ${domainLink}</td>
         <td><div class="actions">
+          ${ct.state === 'running'
+            ? `<button class="btn-secondary dk-restart" data-id="${ct.id}" title="Reiniciar">${icon('rotate-cw')}</button>`
+            : `<button class="btn-secondary dk-start" data-id="${ct.id}" title="Iniciar">${icon('play')}</button>`}
           <button class="btn-secondary dk-logs" data-id="${ct.id}">${icon('file-text')} Logs</button>
           <button class="btn-action dk-domain" data-id="${ct.id}" data-ports="${ct.publicPorts.join(',')}" data-name="${esc(ct.names)}">${icon('globe')} Dominio</button>
           <button class="btn-danger dk-stop" data-id="${ct.id}">${icon('square')} Parar</button>
@@ -1115,6 +1118,15 @@ $('#docker-table').addEventListener('click', async (e) => {
       toast('Contenedor detenido', 'ok');
       loadDocker();
     } catch (err) { errToast(err); }
+  } else if (btn.classList.contains('dk-start') || btn.classList.contains('dk-restart')) {
+    const restart = btn.classList.contains('dk-restart');
+    if (restart && !confirm(`¿Reiniciar ${id}?`)) return;
+    btn.disabled = true;
+    try {
+      await api(`/api/docker/${id}/${restart ? 'restart' : 'start'}`, { method: 'POST' });
+      toast(restart ? 'Contenedor reiniciado' : 'Contenedor iniciado', 'ok');
+      loadDocker();
+    } catch (err) { errToast(err); loadDocker(); }
   } else if (btn.classList.contains('dk-logs')) {
     $('#logs-modal-title').textContent = `Logs — ${id}`;
     $('#logs-modal').classList.remove('hidden');
@@ -1794,6 +1806,21 @@ $('#term-new-tab').addEventListener('click', () => {
   openTermTab(`pm-term-${termCounter}`);
 });
 window.addEventListener('resize', () => { if (activeTerm) termSessions.get(activeTerm)?.fit.fit(); });
+
+// openTermCmd(cmd): open a fresh terminal tab and type a command into it —
+// used by other features (docker exec, journalctl viewer, kill menus).
+function openTermCmd(cmd) {
+  document.querySelector('.tab-btn[data-tab="terminal"]')?.click();
+  termCounter++;
+  const sess = openTermTab(`pm-term-${termCounter}`);
+  const t = setInterval(() => {
+    if (sess.ws?.readyState === 1) {
+      clearInterval(t);
+      sess.ws.send(JSON.stringify({ t: 'i', d: cmd + '\n' }));
+    }
+  }, 200);
+  setTimeout(() => clearInterval(t), 8000);
+}
 
 loaders.terminal = () => {
   if (!termSessions.size) {
