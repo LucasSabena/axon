@@ -1095,6 +1095,9 @@ async function loadDocker() {
           ${ct.state === 'running'
             ? `<button class="btn-secondary dk-restart" data-id="${ct.id}" title="Reiniciar">${icon('rotate-cw')}</button>`
             : `<button class="btn-secondary dk-start" data-id="${ct.id}" title="Iniciar">${icon('play')}</button>`}
+          ${ct.state === 'running'
+            ? `<button class="btn-secondary dk-term" data-id="${ct.id}" data-name="${esc(ct.names)}" title="Terminal">${icon('terminal')}</button>`
+            : ''}
           <button class="btn-secondary dk-logs" data-id="${ct.id}">${icon('file-text')} Logs</button>
           <button class="btn-action dk-domain" data-id="${ct.id}" data-ports="${ct.publicPorts.join(',')}" data-name="${esc(ct.names)}">${icon('globe')} Dominio</button>
           <button class="btn-danger dk-stop" data-id="${ct.id}">${icon('square')} Parar</button>
@@ -1127,6 +1130,8 @@ $('#docker-table').addEventListener('click', async (e) => {
       toast(restart ? 'Contenedor reiniciado' : 'Contenedor iniciado', 'ok');
       loadDocker();
     } catch (err) { errToast(err); loadDocker(); }
+  } else if (btn.classList.contains('dk-term')) {
+    openTermExec(id, btn.dataset.name || id);
   } else if (btn.classList.contains('dk-logs')) {
     $('#logs-modal-title').textContent = `Logs — ${id}`;
     $('#logs-modal').classList.remove('hidden');
@@ -1699,10 +1704,14 @@ function savedTermSessions() {
   try { return JSON.parse(localStorage.getItem(TERM_SESSIONS_KEY) || '[]'); } catch { return []; }
 }
 function saveTermSessions() {
-  localStorage.setItem(TERM_SESSIONS_KEY, JSON.stringify([...termSessions.keys()]));
+  // Only tmux-backed sessions persist across reloads; docker exec tabs die
+  // with their socket and must not be restored.
+  localStorage.setItem(TERM_SESSIONS_KEY, JSON.stringify([...termSessions.values()].filter((s) => !s.exec).map((s) => s.name)));
 }
 
-function openTermTab(name, cwd) {
+// opts.exec: open a docker exec shell into that container id/name instead of a
+// tmux session. opts.label: text shown on the tab (defaults to name).
+function openTermTab(name, cwd, opts = {}) {
   if (termSessions.has(name)) { activateTermTab(name); return termSessions.get(name); }
   const page = document.createElement('div');
   page.className = 'term-page';
@@ -1715,14 +1724,14 @@ function openTermTab(name, cwd) {
 
   const tabBtn = document.createElement('button');
   tabBtn.className = 'term-tab';
-  tabBtn.innerHTML = `${icon('terminal')} <span>${esc(name)}</span> <span class="term-tab-x" data-x="1">×</span>`;
+  tabBtn.innerHTML = `${icon('terminal')} <span>${esc(opts.label || name)}</span> <span class="term-tab-x" data-x="1">×</span>`;
   tabBtn.addEventListener('click', (e) => {
     if (e.target.dataset.x) { closeTermTab(name); return; }
     activateTermTab(name);
   });
   $('#term-tabs').appendChild(tabBtn);
 
-  const sess = { term: t, fit, ws: null, page, tabBtn, name, pendingCwd: cwd || '' };
+  const sess = { term: t, fit, ws: null, page, tabBtn, name, exec: opts.exec || '', pendingCwd: cwd || '' };
   termSessions.set(name, sess);
   saveTermSessions();
 
@@ -1738,7 +1747,10 @@ function openTermTab(name, cwd) {
 function connectTermTab(sess) {
   const old = sess.ws;
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(`${proto}://${location.host}/ws/term?s=${encodeURIComponent(sess.name)}&c=${sess.term.cols}&r=${sess.term.rows}`);
+  const wsUrl = sess.exec
+    ? `${proto}://${location.host}/ws/term?exec=${encodeURIComponent(sess.exec)}&c=${sess.term.cols}&r=${sess.term.rows}`
+    : `${proto}://${location.host}/ws/term?s=${encodeURIComponent(sess.name)}&c=${sess.term.cols}&r=${sess.term.rows}`;
+  const ws = new WebSocket(wsUrl);
   // Swap the reference BEFORE closing the old socket so its onclose can't
   // mark the new connection as offline.
   sess.ws = ws;
@@ -1820,6 +1832,16 @@ function openTermCmd(cmd) {
     }
   }, 200);
   setTimeout(() => clearInterval(t), 8000);
+}
+
+// openTermExec(id, name): open a fresh terminal tab running an interactive
+// shell inside a docker container (`docker exec -it`). Not tmux-persistent —
+// the session dies when the tab/socket closes.
+function openTermExec(id, name) {
+  document.querySelector('.tab-btn[data-tab="terminal"]')?.click();
+  termCounter++;
+  const label = (name || id).length > 20 ? `${(name || id).slice(0, 19)}…` : (name || id);
+  openTermTab(`pm-exec-${termCounter}`, '', { exec: id, label });
 }
 
 loaders.terminal = () => {

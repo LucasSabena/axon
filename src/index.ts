@@ -73,6 +73,7 @@ import { registerDropRoutes, startDropSweeper } from './drop';
 import { registerSessionRoutes, recordSession, sessionIdForToken, isRevoked, touchSession } from './sessions';
 import { registerOpsRoutes } from './ops';
 import { registerDockerOpsRoutes } from './docker-ops';
+import { registerComposeRoutes } from './compose';
 
 const PORT = parseInt(process.env.PORT || '3457', 10);
 const BASE_DOMAIN = process.env.BASE_DOMAIN || 'example.com';
@@ -1022,6 +1023,7 @@ registerDropRoutes(app);
 registerSessionRoutes(app);
 registerOpsRoutes(app);
 registerDockerOpsRoutes(app);
+registerComposeRoutes(app);
 
 startAlertLoop();
 startScriptScheduler();
@@ -1039,7 +1041,7 @@ app.onError((err, c) => {
 // `script` (provides the PTY). The tmux session 'pm-term' persists across
 // browser refreshes and reconnects.
 interface WsProxyData { kind: 'proxy'; upstream: WebSocket; pendingClient: unknown[]; pendingServer: unknown[]; ws: Bun.ServerWebSocket<WsData> | null }
-interface WsTermData { kind: 'term'; proc?: ReturnType<typeof Bun.spawn>; session?: string; cols?: number; rows?: number }
+interface WsTermData { kind: 'term'; proc?: ReturnType<typeof Bun.spawn>; session?: string; exec?: string; cols?: number; rows?: number }
 type WsData = WsProxyData | WsTermData | LogsWsData;
 
 function startTermSocket(ws: Bun.ServerWebSocket<WsData>): void {
@@ -1047,7 +1049,14 @@ function startTermSocket(ws: Bun.ServerWebSocket<WsData>): void {
   const cols = t.cols || 120;
   const rows = t.rows || 40;
   const session = t.session || 'pm-term';
-  const cmd = `export TERM=xterm-256color; script -qfc "stty cols ${cols} rows ${rows}; exec tmux new-session -A -s ${session}" /dev/null`;
+  // exec mode: `docker exec -it` into a container instead of a tmux session.
+  // No persistence — the shell dies with the WS. `script` still provides the
+  // local PTY (docker -t allocates the container-side one); COLUMNS/LINES are
+  // a best-effort hint for the container's initial winsize.
+  const inner = t.exec
+    ? `docker exec -it -e COLUMNS=${cols} -e LINES=${rows} ${shq(t.exec)} sh -c 'command -v bash >/dev/null && exec bash -l || exec sh -l'`
+    : `tmux new-session -A -s ${session}`;
+  const cmd = `export TERM=xterm-256color; script -qfc "stty cols ${cols} rows ${rows}; exec ${inner}" /dev/null`;
   const proc = hostSpawnInteractive(cmd, { user: 'user' });
   t.proc = proc;
   const pump = async (stream: ReadableStream<Uint8Array> | undefined) => {
@@ -1127,9 +1136,15 @@ export default {
       const token = req.headers.get('cookie')?.match(/(?:^|;\s*)ports_session=([^;]+)/)?.[1];
       if (!token || !(await verifySessionToken(token)) || isRevoked(sessionIdForToken(token))) return new Response('Unauthorized', { status: 401 });
       touchSession(sessionIdForToken(token));
+      // ?exec=<container id|name> → interactive docker exec instead of tmux.
+      const exec = url.searchParams.get('exec') || '';
+      if (exec && !/^[a-zA-Z0-9_.-]{1,128}$/.test(exec)) {
+        return new Response('Contenedor inválido', { status: 400 });
+      }
       const data: WsData = {
         kind: 'term',
         session: (url.searchParams.get('s') || 'pm-term').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32) || 'pm-term',
+        exec: exec || undefined,
         cols: parseInt(url.searchParams.get('c') || '120', 10),
         rows: parseInt(url.searchParams.get('r') || '40', 10),
       };
@@ -1169,6 +1184,9 @@ export default {
           try {
             const j = JSON.parse(msg);
             if (j.t === 'r' && Number.isFinite(j.c) && Number.isFinite(j.r)) {
+              // docker exec sessions can't be resized server-side — initial
+              // size only; ignore the message.
+              if (t.exec) return;
               const sess = t.session || 'pm-term';
               const c = Math.max(2, Math.min(j.c, 500)), r = Math.max(2, Math.min(j.r, 200));
               hostExec(`tmux resize-window -t ${sess} -x ${c} -y ${r} 2>/dev/null; tmux refresh-client -t ${sess} -C ${c},${r} 2>/dev/null; true`, { user: 'user', timeoutMs: 4000 }).catch(() => {});
@@ -1194,8 +1212,11 @@ export default {
       if (ws.data.kind === 'term') {
         // Killing runuser orphans bash→script→tmux-client on the host; detach
         // the tmux client first so the whole chain exits cleanly, then kill.
-        const sess = ws.data.session || 'pm-term';
-        hostExec(`tmux detach-client -s ${sess} 2>/dev/null; true`, { user: 'user', timeoutMs: 3000 }).catch(() => {});
+        // (exec sessions aren't tmux-backed — just kill the process.)
+        if (!ws.data.exec) {
+          const sess = ws.data.session || 'pm-term';
+          hostExec(`tmux detach-client -s ${sess} 2>/dev/null; true`, { user: 'user', timeoutMs: 3000 }).catch(() => {});
+        }
         try { (ws.data.proc as { kill(s?: string): void } | undefined)?.kill('SIGKILL'); } catch { /* gone */ }
         return;
       }

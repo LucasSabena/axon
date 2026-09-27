@@ -2,7 +2,7 @@
 <html lang="es" data-theme="linear">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta name="theme-color" content="#0a0a0c">
   <link rel="manifest" href="/manifest.webmanifest">
@@ -18,6 +18,7 @@
   <link rel="stylesheet" href="/feat-drop.css?v=17">
   <link rel="stylesheet" href="/feat-ops.css?v=17">
   <link rel="stylesheet" href="/feat-notify.css?v=17">
+  <link rel="stylesheet" href="/feat-compose.css?v=17">
 </head>
 <body>
   <div id="app">
@@ -112,6 +113,7 @@
 
         <div class="main-area">
           <header class="topbar">
+            <button id="mobile-menu-btn" class="icon-btn mobile-only" aria-label="Menú"><i data-lucide="menu"></i></button>
             <button class="cmdk-trigger" id="cmdk-open">
               <i data-lucide="search" class="lucide-icon"></i> Buscar o ejecutar…
               <kbd>⌘K</kbd>
@@ -549,5 +551,7 @@
   <script src="/feat-drop.js?v=17"></script>
   <script src="/feat-ops.js?v=17"></script>
   <script src="/feat-notify.js?v=17"></script>
+  <script src="/feat-compose.js?v=17"></script>
+  <script src="/mobile.js?v=17"></script>
 </body>
 </html>
