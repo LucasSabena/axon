@@ -380,7 +380,23 @@ export function registerFilesRoutes(app: Hono): void {
     if (!name || name === '.' || name === '..') {
       return c.json({ ok: false, error: 'Nombre de archivo inválido' }, 400);
     }
-    const rt = await resolveAllowed(path.posix.join(rd.path, name));
+    // Folder uploads carry the file's webkitRelativePath ("subdir/a/b.txt")
+    // in a `rel` field — keep the intermediate dirs, sanitizing each segment.
+    const rel = typeof body['rel'] === 'string' ? body['rel'] : '';
+    const dirParts = rel
+      .split('/')
+      .slice(0, -1)
+      .map((s) => s.replace(/[^\S ]/g, ''))
+      .filter((s) => s && s !== '.' && s !== '..' && !s.includes('/') && !s.includes('\\'));
+    const targetDir = path.posix.join(rd.path, ...dirParts);
+    const rdDir = await resolveAllowed(targetDir);
+    if (!rdDir.path) return c.json({ ok: false, error: rdDir.error }, 403);
+    // The target dir may not exist yet (first file of a folder upload).
+    const mk = await hostExec(`mkdir -p -- ${shq(rdDir.path)}`, { user: WRITE_USER, timeoutMs: 15_000 });
+    if (!mk.ok) {
+      return c.json({ ok: false, error: 'No se pudo crear la carpeta destino', detail: mk.stderr || `exit ${mk.code}` }, 500);
+    }
+    const rt = await resolveAllowed(path.posix.join(rdDir.path, name));
     if (!rt.path) return c.json({ ok: false, error: rt.error }, 403);
 
     const buf = Buffer.from(await f.arrayBuffer());
