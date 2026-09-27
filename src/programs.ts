@@ -56,7 +56,27 @@ const PROGRAMS: ProgramDef[] = [
       check: { cmd: 'python3 -c "import json,sys;k=list(json.load(open(\'$HOME/.local/share/opencode/auth.json\')).keys());print(\', \'.join(k));sys.exit(0 if k else 1)" 2>/dev/null', user: 'user' },
       loginHint: 'Ejecutá `opencode auth login` en una terminal (es interactivo)',
     },
-    steps: [{ label: 'pnpm update opencode', cmd: 'pnpm add -g @opencode/cli@latest', user: 'user' }],
+    // opencode-sync actualiza el binario Y reinicia los servicios systemd del TUI.
+    // NUNCA usar pnpm add -g opencode-ai directamente (regla del host).
+    steps: [{ label: 'opencode-sync', cmd: 'opencode-sync', user: 'user' }],
+  },
+  {
+    id: 'mpcli',
+    name: 'Mercado Pago CLI',
+    icon: 'hand-coins',
+    desc: 'mpcli — CLI oficial de Mercado Pago (binario en ~/.local/bin).',
+    channel: 'script',
+    npmPkg: 'mercadopago-cli', // proxy para detectar la última versión publicada
+    detect: [{ cmd: 'command -v mpcli', user: 'user' }],
+    version: { cmd: 'mpcli --version 2>/dev/null | head -1', user: 'user' },
+    auth: {
+      check: { cmd: "mpcli config list --silent 2>/dev/null | grep -i 'active profile' | head -1", user: 'user' },
+      logout: [{ label: 'mpcli logout', cmd: 'mpcli logout', user: 'user' }],
+      loginHint: 'Ejecutá `mpcli login --token APP_USR-...` en una terminal (guarda en el keychain del sistema)',
+    },
+    // Binario standalone en ~/.local/bin: la forma oficial de instalar/actualizar
+    // es el install script del tap de Homebrew (también existe mercadopago-cli en npm).
+    steps: [{ label: 'install script mpcli', cmd: 'curl -fsSL https://raw.githubusercontent.com/mercadopago/homebrew-tap/main/install.sh | sh', user: 'user' }],
   },
   {
     id: 'devin',
@@ -343,6 +363,7 @@ const BRAND_ICONS: Record<string, string> = {
   'claude-code': '/icons/claudecode.svg',
   opencode: '/api/icons/ai.opencode.desktop',
   devin: '/api/icons/devin-desktop',
+  mpcli: '/icons/mercadopago.svg',
   gemini: '/icons/googlegemini.svg',
   vercel: '/icons/vercel.svg',
   supabase: '/icons/supabase.svg',

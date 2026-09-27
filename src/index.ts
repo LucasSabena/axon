@@ -74,6 +74,7 @@ import { registerSessionRoutes, recordSession, sessionIdForToken, isRevoked, tou
 import { registerOpsRoutes } from './ops';
 import { registerDockerOpsRoutes } from './docker-ops';
 import { registerComposeRoutes } from './compose';
+import { registerAgentRoutes } from './agents';
 
 const PORT = parseInt(process.env.PORT || '3457', 10);
 const BASE_DOMAIN = process.env.BASE_DOMAIN || 'example.com';
@@ -1033,6 +1034,7 @@ registerDropRoutes(app);
 registerSessionRoutes(app);
 registerOpsRoutes(app);
 registerDockerOpsRoutes(app);
+registerAgentRoutes(app);
 registerComposeRoutes(app, {
   getNotes: () => config.composeNotes,
   setNote: async (key, note) => {
@@ -1065,6 +1067,15 @@ app.post('/api/browser/open', async (c) => {
     return fail(c, 502, 'El navegador del servidor no responde', {
       detail: res ? `CDP ${res.status}` : 'sin conexión a 127.0.0.1:9222',
     });
+  }
+  // json/new opens the target in the background — activate it so the VNC
+  // display switches to the new tab, otherwise it looks like nothing happened.
+  const target = (await res.json().catch(() => ({}))) as { id?: string };
+  if (target.id) {
+    await fetch(`http://127.0.0.1:9222/json/activate/${target.id}`, {
+      method: 'PUT',
+      signal: AbortSignal.timeout(3000),
+    }).catch(() => {});
   }
   return c.json({ ok: true });
 });
