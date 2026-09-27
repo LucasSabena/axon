@@ -106,9 +106,9 @@ export async function hostSpawnDetached(
   logFile: string,
   user: ExecUser = 'user'
 ): Promise<{ ok: boolean; pid?: number; error?: string }> {
-  const qCwd = JSON.stringify(cwd);
-  const qLog = JSON.stringify(logFile);
-  const inner = `cd ${qCwd} && setsid bash -lc ${JSON.stringify(USER_PATH_EXPORT + command + ` >> ${qLog} 2>&1`)} < /dev/null & echo $!`;
+  // Single-quote escaping: JSON.stringify would still expand $()/backticks.
+  const shq = (s: string) => `'${s.replace(/'/g, `'"'"'`)}'`;
+  const inner = `cd ${shq(cwd)} && setsid bash -lc ${shq(USER_PATH_EXPORT + command + ` >> ${shq(logFile)} 2>&1`)} < /dev/null & echo $!`;
   const res = await hostExec(inner, { user, timeoutMs: 15_000 });
   const pid = parseInt(res.stdout.trim().split('\n').pop() || '', 10);
   if (!res.ok || !pid) {

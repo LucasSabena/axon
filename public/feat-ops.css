@@ -1,0 +1,190 @@
+/* Ports Manager — feature: Salud (ops) tab
+ * Scoped under #tab-ops / .ops-* — reuses app.css theme tokens
+ * (--bg-elevated, --border, --ok/-soft, --warn, --danger, --radius*).
+ */
+
+#tab-ops .ops-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+#tab-ops .ops-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px;
+  min-width: 0;
+}
+
+#tab-ops .ops-card-wide { grid-column: span 2; }
+@media (max-width: 720px) {
+  #tab-ops .ops-card-wide { grid-column: span 1; }
+}
+
+#tab-ops .ops-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  color: var(--text-dim);
+}
+#tab-ops .ops-card-head h3 {
+  margin: 0;
+  font-size: 0.86rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text);
+}
+#tab-ops .ops-card-head svg { width: 15px; height: 15px; }
+
+#tab-ops .ops-pill {
+  margin-left: auto;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 0.7rem;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+#tab-ops .ops-loading { color: var(--text-faint); font-size: 0.82rem; margin: 0; }
+#tab-ops .ops-sub { color: var(--text-faint); font-size: 0.78rem; margin: 4px 0 0; }
+#tab-ops .ops-src { color: var(--text-faint); font-family: var(--font-mono); font-size: 0.72rem; }
+#tab-ops .ops-err {
+  color: var(--warn);
+  font-size: 0.8rem;
+  margin: 4px 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+#tab-ops .ops-err svg { width: 13px; height: 13px; flex: none; }
+#tab-ops .ops-err-inline { color: var(--warn); font-weight: 500; }
+#tab-ops .ops-ok-line {
+  color: var(--ok);
+  font-size: 0.82rem;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+#tab-ops .ops-ok-line svg { width: 14px; height: 14px; }
+
+#tab-ops .ops-big { font-size: 1.9rem; font-weight: 700; line-height: 1.1; font-family: var(--font-mono); }
+#tab-ops .ops-good { color: var(--ok); }
+#tab-ops .ops-warn-t { color: var(--warn); }
+#tab-ops .ops-bad { color: var(--danger); }
+
+#tab-ops .ops-kv {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  padding: 3px 0;
+}
+#tab-ops .ops-kv strong { color: var(--text); font-weight: 600; display: flex; align-items: center; gap: 6px; }
+#tab-ops .ops-kv .health-dot { display: inline-block; }
+
+#tab-ops .ops-bar {
+  height: 4px;
+  border-radius: 3px;
+  background: var(--bg-overlay);
+  overflow: hidden;
+  margin: 2px 0 6px;
+}
+#tab-ops .ops-bar span { display: block; height: 100%; border-radius: 3px; transition: width 0.4s ease; }
+#tab-ops .ops-bar-ok { background: var(--ok); }
+#tab-ops .ops-bar-warn { background: var(--warn); }
+#tab-ops .ops-bar-bad { background: var(--danger); }
+
+#tab-ops .ops-chips,
+#tab-ops .ops-temps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+#tab-ops .ops-chip {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#tab-ops .ops-chip-ok { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+#tab-ops .ops-chip-warn { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+#tab-ops .ops-chip-bad { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
+#tab-ops .ops-chip-err { background: var(--bg-overlay); color: var(--text-faint); }
+
+/* Unidades fallidas */
+#tab-ops .ops-units { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+#tab-ops .ops-unit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  flex-wrap: wrap;
+}
+#tab-ops .ops-unit-name {
+  font-size: 0.76rem;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+#tab-ops .ops-scope {
+  font-size: 0.64rem;
+  font-family: var(--font-mono);
+  color: var(--text-faint);
+  background: var(--bg-canvas);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+#tab-ops .ops-unit-acts { display: flex; gap: 4px; margin-left: auto; }
+#tab-ops .ops-mini { padding: 3px 8px; font-size: 0.72rem; }
+#tab-ops .ops-mini svg { width: 11px; height: 11px; }
+
+/* Wake-on-LAN */
+#tab-ops .ops-table { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
+#tab-ops .ops-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 0.8rem; }
+#tab-ops .ops-table tr:last-child td { border-bottom: none; }
+#tab-ops .ops-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+#tab-ops .ops-form input,
+#tab-ops .ops-form select {
+  background: var(--bg-canvas);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 0.8rem;
+  padding: 6px 9px;
+  min-width: 0;
+}
+#tab-ops .ops-form input:focus,
+#tab-ops .ops-form select:focus { outline: none; border-color: var(--accent); }
+#tab-ops .ops-form input[type='text'] { flex: 1 1 150px; }
+#tab-ops .ops-form .ops-num { width: 70px; flex: 0 0 auto; }
+#tab-ops .ops-wakes { margin-top: 10px; font-size: 0.76rem; color: var(--text-faint); }
+#tab-ops .ops-wakes summary { cursor: pointer; }
+#tab-ops .ops-wakes ul { margin: 6px 0 0; padding-left: 16px; }
+
+/* Apagado programado */
+#tab-ops #ops-power-cancel { margin-top: 10px; }

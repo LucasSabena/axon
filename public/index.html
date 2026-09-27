@@ -11,7 +11,13 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Ports Manager</title>
-  <link rel="stylesheet" href="/app.css?v=16">
+  <link rel="stylesheet" href="/app.css?v=17">
+  <link rel="stylesheet" href="/feat-files.css?v=17">
+  <link rel="stylesheet" href="/feat-scripts.css?v=17">
+  <link rel="stylesheet" href="/feat-metrics.css?v=17">
+  <link rel="stylesheet" href="/feat-drop.css?v=17">
+  <link rel="stylesheet" href="/feat-ops.css?v=17">
+  <link rel="stylesheet" href="/feat-notify.css?v=17">
 </head>
 <body>
   <div id="app">
@@ -56,6 +62,10 @@
               <i data-lucide="globe" class="lucide-icon"></i>
               <span class="nav-label">Dominios</span>
               <span class="nav-count" id="nav-count-domains"></span>
+            </button>
+            <button class="nav-item tab-btn" data-tab="files">
+              <i data-lucide="folder-open" class="lucide-icon"></i>
+              <span class="nav-label">Archivos</span>
             </button>
             <button class="nav-item tab-btn" data-tab="terminal">
               <i data-lucide="terminal" class="lucide-icon"></i>
@@ -115,6 +125,7 @@
             <button id="term-btn" class="btn-secondary" title="Terminal del servidor"><i data-lucide="terminal" class="lucide-icon"></i></button>
             <button id="pair-btn" class="btn-secondary" title="Vincular otro dispositivo (QR)"><i data-lucide="qr-code" class="lucide-icon"></i></button>
             <button id="settings-btn" class="btn-secondary" title="Configuración"><i data-lucide="settings" class="lucide-icon"></i></button>
+            <button id="notif-bell" class="btn-secondary" title="Notificaciones"><i data-lucide="bell" class="lucide-icon"></i><span id="notif-badge" class="hidden"></span></button>
             <button id="logout-btn" class="btn-secondary" title="Salir"><i data-lucide="log-out" class="lucide-icon"></i></button>
           </header>
 
@@ -529,7 +540,14 @@
   <script src="/vendor/xterm.js"></script>
   <script src="/vendor/xterm-addon-fit.js"></script>
   <script src="/vendor/qrcode.js"></script>
-  <script src="/vendor/lucide.min.js?v=16"></script>
-  <script src="/app.js?v=16"></script>
+  <script src="/vendor/lucide.min.js?v=17"></script>
+  <script src="/app.js?v=17"></script>
+  <script src="/feat-files.js?v=17"></script>
+  <script src="/feat-scripts.js?v=17"></script>
+  <script src="/feat-logs.js?v=17"></script>
+  <script src="/feat-metrics.js?v=17"></script>
+  <script src="/feat-drop.js?v=17"></script>
+  <script src="/feat-ops.js?v=17"></script>
+  <script src="/feat-notify.js?v=17"></script>
 </body>
 </html>

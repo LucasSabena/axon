@@ -10,6 +10,7 @@ if (!SESSION_SECRET) {
 interface SessionPayload {
   username: string;
   exp: number;
+  jti?: string;
 }
 
 async function sign(payload: SessionPayload): Promise<string> {
@@ -93,7 +94,7 @@ export async function verifyPassword(password: string, stored: string): Promise<
 }
 
 export async function createSession(username: string): Promise<string> {
-  return sign({ username, exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 });
+  return sign({ username, exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7, jti: crypto.randomUUID() });
 }
 
 // For the raw WS upgrade path (outside Hono middleware).
@@ -120,10 +121,43 @@ export function clearSessionCookie(c: Context): void {
   c.header('set-cookie', `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
 }
 
+// Optional revocation hook — wired by the sessions module at boot so auth.ts
+// stays dependency-free.
+let revokedCheck: ((sessionId: string) => boolean) | null = null;
+let touchHook: ((sessionId: string) => void) | null = null;
+export function setSessionHooks(hooks: { isRevoked?: (id: string) => boolean; touch?: (id: string) => void }): void {
+  revokedCheck = hooks.isRevoked || null;
+  touchHook = hooks.touch || null;
+}
+
+// Session id used by the sessions registry: the `jti` claim, or a stable
+// `tok-<sha256>` of the raw cookie for tokens minted before jti existed —
+// must match sessions.ts sessionIdForToken().
+function legacySessionId(cookie: string, payload: SessionPayload): string | null {
+  if (payload.jti) return payload.jti;
+  const match = cookie.match(new RegExp(`(?:^|;\\s*)${COOKIE_NAME}=([^;]+)`));
+  if (!match) return null;
+  try {
+    const hash = new Bun.CryptoHasher('sha256')
+      .update(decodeURIComponent(match[1]))
+      .digest('hex')
+      .slice(0, 32);
+    return `tok-${hash}`;
+  } catch {
+    return null;
+  }
+}
+
 export const requireAuth: MiddlewareHandler = async (c, next) => {
+  const cookie = c.req.header('cookie') || '';
   const session = await getSession(c);
   if (!session) {
     return c.json({ error: 'Unauthorized' }, 401);
+  }
+  const sid = legacySessionId(cookie, session);
+  if (sid) {
+    if (revokedCheck?.(sid)) return c.json({ error: 'Sesión revocada' }, 401);
+    touchHook?.(sid);
   }
   c.set('user', session.username);
   await next();

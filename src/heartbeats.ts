@@ -44,6 +44,7 @@ function saveSoon(): void {
       } catch { /* best-effort */ }
     });
   }, 5000);
+  (saveTimer as { unref?: () => void })?.unref?.();
 }
 
 export function recordHeartbeat(id: string, s: Heartbeat['s'], ms?: number): void {

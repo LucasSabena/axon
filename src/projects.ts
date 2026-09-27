@@ -10,6 +10,10 @@ import {
 import { killProcessTree, listPortProcesses } from './ports';
 import type { AppConfig, Project } from './types';
 
+// POSIX single-quote escaping: 'foo'bar' -> 'foo'"'"'bar'. JSON.stringify
+// would still expand $()/backticks inside a shell double-quoted string.
+const shq = (s: string) => `'${s.replace(/'/g, `'"'"'`)}'`;
+
 const LOG_DIR = process.env.LOG_DIR || '/app/data/logs';
 
 let configRef: AppConfig | null = null;
@@ -230,7 +234,7 @@ export async function startProject(project: Project): Promise<{ ok: boolean; err
   await Bun.sleep(800);
   const alive = (await hostExec(`kill -0 ${res.pid}`, { timeoutMs: 5000 })).ok;
   if (!alive) {
-    const tail = await hostExec(`tail -n 30 ${JSON.stringify(logFile)}`, { timeoutMs: 5000 });
+    const tail = await hostExec(`tail -n 30 ${shq(logFile)}`, { timeoutMs: 5000 });
     return {
       ok: false,
       command,
@@ -267,7 +271,7 @@ export function installCommand(project: Project): string {
 
 export async function installDeps(project: Project): Promise<{ ok: boolean; output?: string; error?: string; command: string }> {
   const command = installCommand(project);
-  const res = await hostExec(`cd ${JSON.stringify(project.cwd)} && ${command} 2>&1`, {
+  const res = await hostExec(`cd ${shq(project.cwd)} && ${command} 2>&1`, {
     user: 'user',
     timeoutMs: 10 * 60_000,
   });
@@ -281,7 +285,7 @@ export async function projectLogs(project: Project, tail = 200): Promise<string[
       .sort();
     const latest = files[files.length - 1];
     if (!latest) return [];
-    const res = await hostExec(`tail -n ${tail} ${JSON.stringify(path.join(LOG_DIR, latest))}`, { timeoutMs: 10_000 });
+    const res = await hostExec(`tail -n ${tail} ${shq(path.join(LOG_DIR, latest))}`, { timeoutMs: 10_000 });
     return res.stdout.split('\n');
   } catch {
     return [];
