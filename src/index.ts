@@ -192,7 +192,10 @@ app.get('/pair', async (c) => {
   const token = await createSession('paired-device');
   setSessionCookie(c, token);
   recordSession(token, 'paired-device', c.req.header('user-agent') || '');
-  return c.redirect('/');
+  // Optional in-app target after pairing (e.g. /p/4321/ for the embedded
+  // browser) — same-origin paths only, never an open redirect.
+  const next = c.req.query('next') || '/';
+  return c.redirect(next.startsWith('/') ? next : '/');
 });
 
 // ---------- Ports (core) ----------
@@ -1059,7 +1062,20 @@ app.post('/api/browser/open', async (c) => {
   if (u.protocol !== 'http:' && u.protocol !== 'https:') {
     return fail(c, 400, 'Solo se pueden abrir URLs http/https');
   }
-  const res = await fetch(`http://127.0.0.1:9222/json/new?${encodeURIComponent(u.toString())}`, {
+  // The embedded browser lives in its own container: `localhost` there is the
+  // container itself, and even the host gateway can't reach services bound to
+  // 127.0.0.1. Route loopback URLs through this app's own /p/:port proxy
+  // (host network) and log the browser in with a one-shot pair token — the
+  // resulting session persists in the Chromium profile.
+  let openUrl = u.toString();
+  if (['localhost', '127.0.0.1', '::1', '[::1]'].includes(u.hostname)) {
+    const port = u.port || (u.protocol === 'https:' ? '443' : '80');
+    const next = `/p/${port}${u.pathname === '/' ? '/' : u.pathname + u.search + u.hash}`;
+    const pair = crypto.randomUUID();
+    pairTokens.set(pair, Date.now() + PAIR_TTL_MS);
+    openUrl = `http://host.docker.internal:${PORT}/pair?t=${pair}&next=${encodeURIComponent(next)}`;
+  }
+  const res = await fetch(`http://127.0.0.1:9222/json/new?${encodeURIComponent(openUrl)}`, {
     method: 'PUT',
     signal: AbortSignal.timeout(5000),
   }).catch(() => null);
