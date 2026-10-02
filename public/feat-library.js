@@ -1,7 +1,8 @@
 /* AXON — feature: Biblioteca
  * Media library over host folders: browse by type / date / folder / collection,
  * viewer, organize (favorites, collections, move, rename, trash), chunked
- * uploads, and temporary public share links (/s/<token>).
+ * uploads, temporary public share links (/s/<token>), optimize / convert
+ * photos-videos-audio (Squoosh codecs + ffmpeg) and on-demand transcription.
  * Reuses app.js globals: $, $$, api, esc, icon, toast, errToast, confirmDialog,
  * refreshIcons, activeTabName, unloadBrowser.
  */
@@ -48,6 +49,7 @@
     size: Number(localStorage.getItem('lib-size') || 170),
     layout: localStorage.getItem('lib-layout') || 'grid',
     sel: new Set(),
+    selMode: false,
     lastIdx: -1,
     list: [],
     shown: 0,
@@ -176,6 +178,7 @@
             <button data-layout="grid" title="Cuadrícula">${icon('layout-grid')}</button>
             <button data-layout="list" title="Lista">${icon('list')}</button>
           </div>
+          <button class="icon-btn lib-selmode" id="lib-selmode" title="Seleccionar">${icon('check-square')}</button>
           <button class="btn-primary" id="lib-upload">${icon('upload')}<span>Subir</span></button>
           <button class="icon-btn" id="lib-refresh" title="Volver a escanear">${icon('refresh-cw')}</button>
           <button class="icon-btn" id="lib-settings" title="Carpetas y ajustes">${icon('settings-2')}</button>
@@ -189,7 +192,7 @@
         </div>
       </div>
       <div class="lib-bulk hidden" id="lib-bulk"></div>
-      <div class="lib-uploads hidden" id="lib-uploads"></div>
+      <div class="lib-dock"><div class="lib-uploads lib-jobs hidden" id="lib-jobs"></div><div class="lib-uploads hidden" id="lib-uploads"></div></div>
       <div class="lib-drop hidden" id="lib-drop"><div>${icon('upload-cloud')}<p>Soltá para subir</p><span id="lib-drop-dest"></span></div></div>
       <input type="file" id="lib-file" multiple hidden>
       <div class="lib-viewer hidden" id="lib-viewer"></div>
@@ -215,6 +218,12 @@
     $('#lib-upload').addEventListener('click', () => $('#lib-file').click());
     $('#lib-file').addEventListener('change', (e) => { startUploads([...e.target.files]); e.target.value = ''; });
     $('#lib-refresh').addEventListener('click', rescan);
+    $('#lib-selmode').addEventListener('click', () => {
+      L.selMode = !L.selMode;
+      if (!L.selMode) L.sel.clear();
+      syncSelClasses();
+    });
+    setupLongPress(sec);
     $('#lib-settings').addEventListener('click', openSettings);
     $('#lib-side-toggle').addEventListener('click', () => sec.classList.toggle('side-open'));
     $('#lib-modal').addEventListener('mousedown', (e) => { if (e.target.id === 'lib-modal') closeModal(); });
@@ -254,6 +263,7 @@
   // ---------- Data ----------
 
   async function load() {
+    const viewerId = !$('#lib-viewer')?.classList.contains('hidden') ? L.list[vIdx]?.id : null;
     try {
       const d = await api('/api/library');
       L.loaded = true;
@@ -270,7 +280,13 @@
       for (const id of [...L.sel]) if (!L.byId.has(id)) L.sel.delete(id);
       const nc = $('#nav-count-library');
       if (nc) nc.textContent = d.items.length ? d.items.length.toLocaleString('es-AR') : '';
-      render();
+      const first = !L.rendered;
+      L.rendered = true;
+      render({ keep: !first });
+      if (viewerId) {
+        const i = L.list.findIndex((x) => x.id === viewerId);
+        if (i >= 0) { vIdx = i; viewerBar(); }
+      }
       statusLine(d);
       if (d.scanning || d.metaPending || d.thumbsPending) pollStatus();
     } catch (err) {
@@ -318,6 +334,7 @@
     L.view = v;
     localStorage.setItem('lib-view', JSON.stringify(v));
     L.sel.clear();
+    L.selMode = false;
     $('#tab-library')?.classList.remove('side-open');
     $('#lib-main')?.scrollTo?.(0, 0);
     render();
@@ -394,11 +411,16 @@
 
   // ---------- Render ----------
 
-  function render() {
+  // keep: re-render after a data refresh without losing the scroll position
+  // (and the already-rendered pages) of the current view.
+  function render(opts = {}) {
     if (!$('#tab-library')) return;
     renderSide();
     if (L.view.type === 'shares') return renderShares();
     renderCrumbs();
+    const main = $('#lib-main');
+    const keepShown = opts.keep ? L.shown : 0;
+    const keepTop = opts.keep ? main?.scrollTop || 0 : 0;
     L.list = sortList(baseList());
     L.shown = 0;
     const body = $('#lib-body');
@@ -434,6 +456,8 @@
     body.innerHTML = html;
     body.querySelectorAll('.lib-folder').forEach((b) => b.addEventListener('click', () => setView({ type: 'folder', value: b.dataset.path })));
     renderMore();
+    while (L.shown < Math.min(keepShown, L.list.length)) renderMore();
+    if (keepTop && main) main.scrollTop = keepTop;
     setupSentinel();
     updateBulk();
   }
@@ -522,31 +546,74 @@
     const i = Number(tile.dataset.i);
     const it = L.list[i];
     if (!it) return;
+    if (lpFired) { lpFired = false; return; }
     const act = e.target.closest('[data-act]')?.dataset.act;
     if (act === 'fav') { e.stopPropagation(); return toggleFav([it.id], !L.favs.has(it.id)); }
-    if (act === 'sel' || e.ctrlKey || e.metaKey || (L.sel.size && !e.shiftKey)) return toggleSel(i, e.shiftKey);
+    if (act === 'sel' || e.ctrlKey || e.metaKey || L.selMode || (L.sel.size && !e.shiftKey)) return toggleSel(i, e.shiftKey);
     if (e.shiftKey) return toggleSel(i, true);
     openViewer(i);
   });
+
+  // Touch: long-press selects (and enters selection mode) instead of the
+  // context menu; a tap then toggles more items.
+  let lpFired = false;
+  let lastTouch = 0;
+  function setupLongPress(root) {
+    let t = null, sx = 0, sy = 0;
+    root.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse') return;
+      lastTouch = Date.now();
+      const tile = e.target.closest('.lib-tile, .lib-row');
+      if (!tile || !root.querySelector('#lib-body').contains(tile)) return;
+      sx = e.clientX; sy = e.clientY; lpFired = false;
+      clearTimeout(t);
+      t = setTimeout(() => {
+        lpFired = true;
+        const i = Number(tile.dataset.i);
+        const it = L.list[i];
+        if (!it) return;
+        L.selMode = true;
+        if (!L.sel.has(it.id)) toggleSel(i, false);
+        else syncSelClasses();
+        navigator.vibrate?.(12);
+      }, 430);
+    });
+    const cancel = () => clearTimeout(t);
+    root.addEventListener('pointermove', (e) => { if (Math.hypot(e.clientX - sx, e.clientY - sy) > 10) cancel(); });
+    root.addEventListener('pointerup', cancel);
+    root.addEventListener('pointercancel', cancel);
+    root.addEventListener('scroll', cancel, true);
+  }
+
+  function itemMenu(it, ids, i) {
+    const list = ids.map((id) => L.byId.get(id)).filter(Boolean);
+    const nTool = list.filter(canTool).length;
+    const nTr = list.filter(canTranscribe).length;
+    return [
+      ...(i != null ? [{ icon: 'eye', label: 'Ver', run: () => openViewer(i) }] : []),
+      { icon: 'share-2', label: ids.length > 1 ? `Compartir ${ids.length} archivos` : 'Compartir link', run: () => openShareModal(ids) },
+      { icon: 'link-2', label: 'Agregar a un link existente…', run: () => addToShare(ids) },
+      { icon: 'download', label: 'Descargar', run: () => downloadIds(ids) },
+      ...(nTool ? [{ icon: 'wand-2', label: nTool > 1 ? `Optimizar / convertir ${nTool}…` : 'Optimizar / convertir…', run: () => openTools(ids) }] : []),
+      ...(nTr ? [{ icon: 'captions', label: nTr > 1 ? `Transcribir ${nTr}…` : 'Transcribir…', run: () => openTranscribe(ids) }] : []),
+      { icon: 'star', label: L.favs.has(it.id) ? 'Quitar de favoritos' : 'Favorito', run: () => toggleFav(ids, !L.favs.has(it.id)) },
+      { icon: 'folder-plus', label: 'Agregar a colección…', run: () => addToCollection(ids) },
+      { icon: 'folder-input', label: 'Mover a…', run: () => openMove(ids) },
+      ...(ids.length === 1 ? [{ icon: 'pencil', label: 'Renombrar', run: () => renameItem(it) }] : []),
+      { icon: 'folder-open', label: 'Ir a la carpeta', run: () => { closeViewer(); setView({ type: 'folder', value: dirOf(it.p) }); } },
+      { icon: 'trash-2', label: 'Eliminar', danger: true, run: () => trashIds(ids) },
+    ];
+  }
 
   document.addEventListener('contextmenu', (e) => {
     const tile = e.target.closest('#tab-library .lib-tile, #tab-library .lib-row');
     if (!tile || typeof showCtxMenu !== 'function') return;
     e.preventDefault();
+    if (Date.now() - lastTouch < 1200) return; // long-press = select on touch
     const it = L.list[Number(tile.dataset.i)];
     if (!it) return;
     const ids = L.sel.has(it.id) ? [...L.sel] : [it.id];
-    showCtxMenu([
-      { icon: 'eye', label: 'Ver', run: () => openViewer(Number(tile.dataset.i)) },
-      { icon: 'share-2', label: ids.length > 1 ? `Compartir ${ids.length} archivos` : 'Compartir link', run: () => openShareModal(ids) },
-      { icon: 'download', label: 'Descargar', run: () => downloadIds(ids) },
-      { icon: 'star', label: L.favs.has(it.id) ? 'Quitar de favoritos' : 'Favorito', run: () => toggleFav(ids, !L.favs.has(it.id)) },
-      { icon: 'folder-plus', label: 'Agregar a colección…', run: () => addToCollection(ids) },
-      { icon: 'folder-input', label: 'Mover a…', run: () => openMove(ids) },
-      ...(ids.length === 1 ? [{ icon: 'pencil', label: 'Renombrar', run: () => renameItem(it) }] : []),
-      { icon: 'folder-open', label: 'Ir a la carpeta', run: () => setView({ type: 'folder', value: dirOf(it.p) }) },
-      { icon: 'trash-2', label: 'Eliminar', danger: true, run: () => trashIds(ids) },
-    ], e.clientX, e.clientY);
+    showCtxMenu(itemMenu(it, ids, Number(tile.dataset.i)), e.clientX, e.clientY);
   });
 
   function toggleSel(i, range) {
@@ -569,40 +636,66 @@
 
   function syncSelClasses() {
     $$('#lib-body .lib-tile, #lib-body .lib-row').forEach((el) => el.classList.toggle('sel', L.sel.has(el.dataset.id)));
+    $('#lib-selmode')?.classList.toggle('on', L.selMode || L.sel.size > 0);
     updateBulk();
   }
 
   function updateBulk() {
     const bar = $('#lib-bulk');
     if (!bar) return;
-    $('#lib-body')?.classList.toggle('selecting', L.sel.size > 0);
-    if (!L.sel.size || L.view.type === 'shares') { bar.classList.add('hidden'); return; }
+    const on = L.sel.size > 0 || L.selMode;
+    $('#lib-body')?.classList.toggle('selecting', on);
+    $('#tab-library')?.classList.toggle('lib-selecting', on);
+    if (!on || L.view.type === 'shares') { bar.classList.add('hidden'); return; }
     const ids = [...L.sel];
-    const size = ids.reduce((a, id) => a + (L.byId.get(id)?.s || 0), 0);
+    const list = ids.map((id) => L.byId.get(id)).filter(Boolean);
+    const size = list.reduce((a, it) => a + it.s, 0);
     const inCol = L.view.type === 'col';
+    const nTool = list.filter(canTool).length;
+    const nTr = list.filter(canTranscribe).length;
+    const dis = ids.length ? '' : ' disabled';
     bar.innerHTML = `
-      <span class="lib-bulk-n"><b>${ids.length}</b> seleccionados · ${fmtSize(size)}</span>
-      <button class="btn-primary" data-b="share">${icon('share-2')}<span>Compartir</span></button>
-      <button class="btn-secondary" data-b="dl">${icon('download')}<span>Descargar</span></button>
-      <button class="btn-secondary" data-b="fav">${icon('star')}<span>Favorito</span></button>
-      <button class="btn-secondary" data-b="col">${icon('folder-plus')}<span>Colección</span></button>
-      ${inCol ? `<button class="btn-secondary" data-b="uncol">${icon('folder-minus')}<span>Quitar</span></button>` : ''}
-      <button class="btn-secondary" data-b="move">${icon('folder-input')}<span>Mover</span></button>
-      <button class="btn-danger" data-b="trash">${icon('trash-2')}</button>
-      <button class="btn-secondary" data-b="all" title="Seleccionar todo">${icon('check-check')}</button>
+      <span class="lib-bulk-n">${ids.length ? `<b>${ids.length}</b> · ${fmtSize(size)}` : 'Tocá archivos para elegir'}</span>
+      <button class="btn-primary" data-b="share"${dis}>${icon('share-2')}<span>Compartir</span></button>
+      <button class="btn-secondary" data-b="dl"${dis}>${icon('download')}<span>Descargar</span></button>
+      ${nTool ? `<button class="btn-secondary" data-b="tools">${icon('wand-2')}<span>Optimizar</span></button>` : ''}
+      ${nTr ? `<button class="btn-secondary lib-bw" data-b="tr">${icon('captions')}<span>Transcribir</span></button>` : ''}
+      <button class="btn-secondary lib-bw" data-b="fav"${dis}>${icon('star')}<span>Favorito</span></button>
+      <button class="btn-secondary lib-bw" data-b="col"${dis}>${icon('folder-plus')}<span>Colección</span></button>
+      ${inCol ? `<button class="btn-secondary lib-bw" data-b="uncol"${dis}>${icon('folder-minus')}<span>Quitar</span></button>` : ''}
+      <button class="btn-secondary lib-bw" data-b="move"${dis}>${icon('folder-input')}<span>Mover</span></button>
+      <button class="btn-danger lib-bw" data-b="trash"${dis}>${icon('trash-2')}</button>
+      <button class="btn-secondary lib-bw" data-b="all" title="Seleccionar todo">${icon('check-check')}</button>
+      <button class="btn-secondary lib-bm" data-b="more" title="Más">${icon('more-horizontal')}</button>
       <button class="icon-btn" data-b="clear" title="Cancelar (Esc)">${icon('x')}</button>`;
     bar.classList.remove('hidden');
-    bar.querySelectorAll('[data-b]').forEach((b) => b.addEventListener('click', () => {
+    const clear = () => { L.sel.clear(); L.selMode = false; syncSelClasses(); };
+    bar.querySelectorAll('[data-b]').forEach((b) => b.addEventListener('click', (e) => {
       const a = b.dataset.b;
       if (a === 'share') openShareModal(ids);
       if (a === 'dl') downloadIds(ids);
+      if (a === 'tools') openTools(ids);
+      if (a === 'tr') openTranscribe(ids);
       if (a === 'fav') toggleFav(ids, !ids.every((id) => L.favs.has(id)));
       if (a === 'col') addToCollection(ids);
       if (a === 'uncol') removeFromCollection(ids);
       if (a === 'move') openMove(ids);
       if (a === 'trash') trashIds(ids);
       if (a === 'all') { L.list.forEach((it) => L.sel.add(it.id)); syncSelClasses(); }
-      if (a === 'clear') { L.sel.clear(); syncSelClasses(); }
+      if (a === 'clear') clear();
+      if (a === 'more') {
+        const r = e.currentTarget.getBoundingClientRect();
+        showCtxMenu?.([
+          ...(nTr ? [{ icon: 'captions', label: 'Transcribir…', run: () => openTranscribe(ids) }] : []),
+          { icon: 'link-2', label: 'Agregar a un link existente…', run: () => addToShare(ids) },
+          { icon: 'star', label: 'Favorito', run: () => toggleFav(ids, !ids.every((id) => L.favs.has(id))) },
+          { icon: 'folder-plus', label: 'Agregar a colección…', run: () => addToCollection(ids) },
+          ...(inCol ? [{ icon: 'folder-minus', label: 'Quitar de la colección', run: () => removeFromCollection(ids) }] : []),
+          { icon: 'folder-input', label: 'Mover a…', run: () => openMove(ids) },
+          { icon: 'check-check', label: 'Seleccionar todo', run: () => { L.list.forEach((it) => L.sel.add(it.id)); syncSelClasses(); } },
+          { icon: 'trash-2', label: 'Eliminar', danger: true, run: () => trashIds(ids) },
+        ].filter((x) => ids.length || x.icon === 'check-check'), r.left, r.top - 8);
+      }
     }));
     refreshIcons();
   }
@@ -847,7 +940,9 @@
 
   let vIdx = -1;
   let vInfo = localStorage.getItem('lib-vinfo') !== '0';
+  let vPanel = 'info';
   let tcPoll = null;
+  let vZoom = null;
 
   function openViewer(i) {
     vIdx = i;
@@ -860,13 +955,17 @@
         <div class="lv-stage" id="lv-stage"></div>
         <button class="lv-nav prev" id="lv-prev">${icon('chevron-left')}</button>
         <button class="lv-nav next" id="lv-next">${icon('chevron-right')}</button>
-        <aside class="lv-info${vInfo ? '' : ' hidden'}" id="lv-info"></aside>
+        <aside class="lv-info${vInfo || vPanel === 'tr' ? '' : ' hidden'}" id="lv-info"></aside>
       </div>`;
+    if (vPanel === 'tr') vInfo = true;
     $('#lv-prev').addEventListener('click', () => step(-1));
     $('#lv-next').addEventListener('click', () => step(1));
     let sx = null, sy = null;
     const st = $('#lv-stage');
-    st.addEventListener('touchstart', (e) => { sx = e.touches[0].clientX; sy = e.touches[0].clientY; }, { passive: true });
+    st.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 1 || vZoom?.zoomed()) { sx = null; return; }
+      sx = e.touches[0].clientX; sy = e.touches[0].clientY;
+    }, { passive: true });
     st.addEventListener('touchend', (e) => {
       if (sx === null) return;
       const dx = e.changedTouches[0].clientX - sx, dy = e.changedTouches[0].clientY - sy;
@@ -874,8 +973,26 @@
       else if (dy > 110 && Math.abs(dy) > Math.abs(dx)) closeViewer();
       sx = null;
     });
+    // Android back button / swipe-back closes the viewer instead of leaving.
+    if (!vHist.pushed) {
+      if (vHist.skip) vHist.pending = true;
+      else { history.pushState({ libViewer: true }, ''); vHist.pushed = true; }
+    }
     showItem();
   }
+
+  // pushed: our history entry is on top · skip: a back() we triggered is in
+  // flight · pending: a viewer opened while that back() was still running.
+  const vHist = { pushed: false, skip: 0, pending: false };
+  window.addEventListener('popstate', () => {
+    if (vHist.skip) {
+      vHist.skip--;
+      if (vHist.pending) { vHist.pending = false; history.pushState({ libViewer: true }, ''); vHist.pushed = true; }
+      return;
+    }
+    vHist.pushed = false;
+    if (!$('#lib-viewer')?.classList.contains('hidden')) closeViewer(false);
+  });
 
   function step(d) {
     if (!L.list.length) return;
@@ -883,69 +1000,130 @@
     showItem();
   }
 
-  function closeViewer() {
+  function closeViewer(back = true) {
     const v = $('#lib-viewer');
     if (!v || v.classList.contains('hidden')) return;
     v.classList.add('hidden');
     v.innerHTML = '';
+    vZoom = null;
     document.body.classList.remove('lib-noscroll');
     clearTimeout(tcPoll);
+    vHist.pending = false;
+    if (back && vHist.pushed) { vHist.pushed = false; vHist.skip++; history.back(); }
   }
 
   function viewerBar() {
     const it = L.list[vIdx];
     if (!it) return;
+    const tool = canTool(it);
+    const tr = canTranscribe(it);
     $('#lv-bar').innerHTML = `
       <button class="lv-btn" id="lv-close" title="Cerrar (Esc)">${icon('x')}</button>
       <div class="lv-title"><b>${esc(it.n)}</b><small>${vIdx + 1} / ${L.list.length} · ${fmtSize(it.s)}</small></div>
       <div class="lv-actions">
-        <button class="lv-btn${L.favs.has(it.id) ? ' on' : ''}" id="lv-fav" title="Favorito (F)">${icon('star')}</button>
+        <button class="lv-btn${L.favs.has(it.id) ? ' on' : ''} lv-hide-sm" id="lv-fav" title="Favorito (F)">${icon('star')}</button>
+        ${tool ? `<button class="lv-btn" id="lv-tools" title="Optimizar / convertir (O)">${icon('wand-2')}<span>Optimizar</span></button>` : ''}
+        ${tr ? `<button class="lv-btn${vInfo && vPanel === 'tr' ? ' on-ac' : ''}" id="lv-tr" title="Transcripción (T)">${icon('captions')}<span>${it.tr ? 'Transcripción' : 'Transcribir'}</span></button>` : ''}
         <button class="lv-btn lv-primary" id="lv-share" title="Compartir link (S)">${icon('share-2')}<span>Compartir</span></button>
-        <a class="lv-btn" href="/api/library/file/${it.id}?dl=1" title="Descargar (D)">${icon('download')}</a>
-        <a class="lv-btn lv-hide-sm" href="/api/library/file/${it.id}" target="_blank" title="Abrir original">${icon('external-link')}</a>
+        <a class="lv-btn lv-hide-sm" href="/api/library/file/${it.id}?dl=1" title="Descargar (D)">${icon('download')}</a>
         <button class="lv-btn" id="lv-more" title="Más">${icon('more-vertical')}</button>
-        <button class="lv-btn lv-hide-sm${vInfo ? ' on' : ''}" id="lv-info-t" title="Información (I)">${icon('info')}</button>
+        <button class="lv-btn lv-hide-sm${vInfo && vPanel === 'info' ? ' on-ac' : ''}" id="lv-info-t" title="Información (I)">${icon('info')}</button>
       </div>`;
-    $('#lv-close').addEventListener('click', closeViewer);
+    $('#lv-close').addEventListener('click', () => closeViewer());
     $('#lv-fav').addEventListener('click', () => toggleFav([it.id], !L.favs.has(it.id)));
     $('#lv-share').addEventListener('click', () => openShareModal([it.id]));
-    $('#lv-info-t').addEventListener('click', toggleInfo);
+    $('#lv-tools')?.addEventListener('click', () => openTools([it.id]));
+    $('#lv-tr')?.addEventListener('click', () => (it.tr || J.list.some((j) => j.type === 'transcribe' && j.itemId === it.id && ['queued', 'running'].includes(j.state)) ? togglePanel('tr') : openTranscribe([it.id])));
+    $('#lv-info-t').addEventListener('click', () => togglePanel('info'));
     $('#lv-more').addEventListener('click', (e) => {
       e.stopPropagation();
       const r = e.currentTarget.getBoundingClientRect();
       showCtxMenu?.([
-        { icon: 'info', label: 'Información', run: toggleInfo },
-        { icon: 'pencil', label: 'Renombrar', run: () => renameItem(it) },
-        { icon: 'folder-input', label: 'Mover a…', run: () => openMove([it.id]) },
-        { icon: 'folder-plus', label: 'Agregar a colección…', run: () => addToCollection([it.id]) },
-        { icon: 'folder-open', label: 'Ir a la carpeta', run: () => { closeViewer(); setView({ type: 'folder', value: dirOf(it.p) }); } },
-        { icon: 'trash-2', label: 'Eliminar', danger: true, run: () => trashIds([it.id]) },
-      ], r.right - 200, r.bottom + 4);
+        { icon: 'info', label: 'Información', run: () => togglePanel('info') },
+        { icon: 'star', label: L.favs.has(it.id) ? 'Quitar de favoritos' : 'Favorito', run: () => toggleFav([it.id], !L.favs.has(it.id)) },
+        { icon: 'download', label: 'Descargar original', run: () => { location.href = `/api/library/file/${it.id}?dl=1`; } },
+        { icon: 'external-link', label: 'Abrir original en otra pestaña', run: () => window.open(`/api/library/file/${it.id}`, '_blank') },
+        ...itemMenu(it, [it.id]).filter((x) => !['share-2', 'download', 'star'].includes(x.icon)),
+      ], r.right - 240, r.bottom + 4);
     });
     refreshIcons();
   }
 
-  function toggleInfo() {
-    vInfo = !vInfo;
+  function togglePanel(which) {
+    if (vInfo && vPanel === which) vInfo = false;
+    else { vInfo = true; vPanel = which; }
     localStorage.setItem('lib-vinfo', vInfo ? '1' : '0');
     $('#lv-info')?.classList.toggle('hidden', !vInfo);
-    $('#lv-info-t')?.classList.toggle('on', vInfo);
+    const it = L.list[vIdx];
+    if (it) { renderInfo(it); viewerBar(); }
   }
 
   function mediaHtml(it) {
     const f = `/api/library/file/${it.id}`;
     if (it.k === 'video') {
       const src = it.wv ? `/api/library/web/${it.id}` : f;
-      return `<video controls autoplay playsinline preload="metadata" ${it.th >= 1 ? `poster="${thumbUrl(it)}"` : ''} src="${src}"></video>`;
+      const track = it.tr ? `<track kind="subtitles" label="Transcripción" src="/api/library/transcript/${it.id}/export?fmt=vtt&v=${Date.now()}">` : '';
+      return `<video controls autoplay playsinline preload="metadata" ${it.th >= 1 ? `poster="${thumbUrl(it)}"` : ''} src="${src}">${track}</video>`;
     }
     if (it.k === 'image' || it.k === 'raw' || it.k === 'vector' || (it.k === 'design' && it.vw)) {
-      const src = it.vw ? `/api/library/view/${it.id}` : f;
-      return `<div class="lv-img-wrap">${it.vw && it.th >= 1 ? `<img class="lv-ph" src="${thumbUrl(it)}" alt="">` : ''}<img class="lv-img" src="${src}" alt="" onload="this.previousElementSibling?.classList?.contains('lv-ph')&&this.previousElementSibling.remove()"></div>`;
+      const light = it.vw || it.bv;
+      const src = light ? `/api/library/view/${it.id}?k=${it.tk}` : f;
+      return `<div class="lv-img-wrap" id="lv-zoom">${light && it.th >= 1 ? `<img class="lv-ph" src="${thumbUrl(it)}" alt="">` : ''}<img class="lv-img" src="${src}" alt="" draggable="false" onload="this.previousElementSibling?.classList?.contains('lv-ph')&&this.previousElementSibling.remove()"></div>`;
     }
     if (it.k === 'audio') return `<div class="lv-audio">${it.th >= 1 ? `<img src="${thumbUrl(it)}" alt="">` : icon('music')}<b>${esc(it.n)}</b><audio controls autoplay src="${f}"></audio></div>`;
     if (it.k === 'pdf' || ['txt', 'md', 'csv'].includes(it.e)) return `<iframe class="lv-frame" src="${f}"></iframe>`;
     return `<div class="lv-file">${icon(KIND[it.k]?.ic || 'file')}<b>${esc(it.e.toUpperCase())}</b><span>${esc(it.n)}</span><span>Este tipo de archivo no tiene vista previa</span>
       <a class="btn-primary" href="${f}?dl=1">${icon('download')} Descargar</a></div>`;
+  }
+
+  // Wheel / pinch / double-tap zoom. Past 1.3× the light 2048px view is
+  // swapped for the original so details stay sharp.
+  function zoomer(wrap, it) {
+    const img = wrap.querySelector('.lv-img');
+    let s = 1, x = 0, y = 0, pinch = null, pan = null, lastTap = 0, full = !it.bv;
+    const pts = {};
+    const apply = () => {
+      img.style.transform = `translate(${x}px,${y}px) scale(${s})`;
+      wrap.classList.toggle('zoomed', s > 1);
+    };
+    const zoomAt = (ns, cx, cy) => {
+      const r = wrap.getBoundingClientRect();
+      cx -= r.left; cy -= r.top;
+      ns = Math.max(1, Math.min(10, ns));
+      x = cx - (cx - x) * (ns / s); y = cy - (cy - y) * (ns / s); s = ns;
+      if (s === 1) { x = 0; y = 0; }
+      apply();
+      if (s > 1.3 && !full) {
+        full = true;
+        const o = new Image();
+        o.onload = () => { if (img.isConnected) img.src = o.src; };
+        o.src = `/api/library/file/${it.id}`;
+      }
+    };
+    img.style.transformOrigin = '0 0';
+    wrap.addEventListener('wheel', (e) => { e.preventDefault(); zoomAt(s * (e.deltaY < 0 ? 1.2 : 1 / 1.2), e.clientX, e.clientY); }, { passive: false });
+    wrap.addEventListener('dblclick', (e) => zoomAt(s > 1 ? 1 : 2.5, e.clientX, e.clientY));
+    wrap.addEventListener('pointerdown', (e) => {
+      pts[e.pointerId] = { x: e.clientX, y: e.clientY };
+      const k = Object.keys(pts);
+      if (k.length === 2) { const [a, b] = k.map((i) => pts[i]); pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), s }; pan = null; return; }
+      if (s > 1) { pan = { x: e.clientX - x, y: e.clientY - y }; wrap.setPointerCapture(e.pointerId); }
+      if (e.pointerType === 'touch') {
+        const now = Date.now();
+        if (now - lastTap < 280) { zoomAt(s > 1 ? 1 : 2.5, e.clientX, e.clientY); lastTap = 0; } else lastTap = now;
+      }
+    });
+    wrap.addEventListener('pointermove', (e) => {
+      if (!pts[e.pointerId]) return;
+      pts[e.pointerId] = { x: e.clientX, y: e.clientY };
+      const k = Object.keys(pts);
+      if (pinch && k.length === 2) { const [a, b] = k.map((i) => pts[i]); zoomAt(pinch.s * Math.hypot(a.x - b.x, a.y - b.y) / pinch.d, (a.x + b.x) / 2, (a.y + b.y) / 2); }
+      else if (pan) { x = e.clientX - pan.x; y = e.clientY - pan.y; apply(); }
+    });
+    const up = (e) => { delete pts[e.pointerId]; if (Object.keys(pts).length < 2) pinch = null; if (!Object.keys(pts).length) pan = null; };
+    wrap.addEventListener('pointerup', up);
+    wrap.addEventListener('pointercancel', up);
+    return { zoomed: () => s > 1, reset: () => zoomAt(1, 0, 0) };
   }
 
   function showItem() {
@@ -955,6 +1133,7 @@
     viewerBar();
     const st = $('#lv-stage');
     st.innerHTML = mediaHtml(it);
+    vZoom = $('#lv-zoom') ? zoomer($('#lv-zoom'), it) : null;
     if (it.k === 'video') {
       const note = document.createElement('div');
       note.className = 'lv-note hidden';
@@ -969,11 +1148,14 @@
       v.addEventListener('error', () => offerWeb('Este navegador no puede reproducir el formato original.'));
       if (it.nw && !it.wv) offerWeb(`Video ${it.c ? it.c.toUpperCase() : esc(it.e.toUpperCase())}: puede no reproducirse en todos los navegadores.`);
     }
-    // Preload neighbours' thumbs for snappy navigation.
+    // Warm up the neighbours (light views for photos) for snappy navigation.
     for (const d of [1, -1]) {
       const n = L.list[(vIdx + d + L.list.length) % L.list.length];
-      if (n && n.th >= 0 && n.th !== -1) new Image().src = thumbUrl(n);
+      if (!n || n.th === -1) continue;
+      new Image().src = thumbUrl(n);
+      if (n.k === 'image' && (n.vw || n.bv)) new Image().src = `/api/library/view/${n.id}?k=${n.tk}`;
     }
+    if (vPanel === 'tr' && !canTranscribe(it)) vPanel = 'info';
     renderInfo(it);
     refreshIcons();
   }
@@ -1006,25 +1188,47 @@
   function renderInfo(it) {
     const el = $('#lv-info');
     if (!el) return;
+    const tabs = canTranscribe(it)
+      ? `<div class="lv-tabs"><button data-p="info" class="${vPanel === 'info' ? 'on' : ''}">${icon('info')} Info</button><button data-p="tr" class="${vPanel === 'tr' ? 'on' : ''}">${icon('captions')} Transcripción${it.tr ? '' : ''}</button><button class="lv-tabs-x" data-p="x" title="Cerrar panel">${icon('x')}</button></div>`
+      : `<div class="lv-tabs"><button class="on" data-p="info">${icon('info')} Info</button><button class="lv-tabs-x" data-p="x" title="Cerrar panel">${icon('x')}</button></div>`;
+    if (vPanel === 'tr' && canTranscribe(it)) {
+      el.innerHTML = `${tabs}<div class="lv-tr" id="lv-tr-box"></div>`;
+      bindTabs(el, it);
+      renderTranscript(it, $('#lv-tr-box'));
+      return;
+    }
     const cols = L.cols.filter((c) => c.ids.includes(it.id));
     const rows = [
       ['Tipo', `${KIND_ONE[it.k]} · ${it.e.toUpperCase()}`],
       ['Tamaño', fmtSize(it.s)],
       it.w ? ['Dimensiones', `${it.w} × ${it.h}${it.w * it.h > 1e6 ? ` (${((it.w * it.h) / 1e6).toFixed(1)} MP)` : ''}`] : null,
       it.d ? ['Duración', fmtDur(it.d)] : null,
+      it.d && it.k === 'video' ? ['Bitrate', `${((it.s * 8) / it.d / 1e6).toFixed(1)} Mbit/s`] : null,
       it.c ? ['Códec', it.c] : null,
       it.t ? ['Tomada', fmtDateTime(it.t)] : null,
       ['Modificado', fmtDateTime(it.m)],
     ].filter(Boolean);
-    el.innerHTML = `
-      <h4>Información</h4>
+    el.innerHTML = `${tabs}
       <dl>${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>
       <h4>Ubicación</h4>
       <button class="lv-path" id="lv-goto" title="Ir a la carpeta">${icon('folder-open')} <span>${esc(prettyPath(dirOf(it.p)))}</span></button>
       ${cols.length ? `<h4>Colecciones</h4><div class="lv-tags">${cols.map((c) => `<span>${esc(c.name)}</span>`).join('')}</div>` : ''}
+      ${canTool(it) ? `<button class="btn-secondary lv-share-big" id="lv-tools2">${icon('wand-2')} Optimizar o convertir</button>` : ''}
       <button class="btn-primary lv-share-big" id="lv-share2">${icon('link')} Crear link para compartir</button>`;
+    bindTabs(el, it);
     $('#lv-goto').addEventListener('click', () => { closeViewer(); setView({ type: 'folder', value: dirOf(it.p) }); });
     $('#lv-share2').addEventListener('click', () => openShareModal([it.id]));
+    $('#lv-tools2')?.addEventListener('click', () => openTools([it.id]));
+    refreshIcons();
+  }
+
+  function bindTabs(el, it) {
+    el.querySelectorAll('.lv-tabs button').forEach((b) => b.addEventListener('click', () => {
+      if (b.dataset.p === 'x') return togglePanel(vPanel);
+      vPanel = b.dataset.p;
+      renderInfo(it);
+      viewerBar();
+    }));
   }
 
   function onKey(e) {
@@ -1044,7 +1248,9 @@
       else if (e.key === 'ArrowLeft') step(-1);
       else if (e.key === 'f' || e.key === 'F') toggleFav([it.id], !L.favs.has(it.id));
       else if (e.key === 's' || e.key === 'S') openShareModal([it.id]);
-      else if (e.key === 'i' || e.key === 'I') toggleInfo();
+      else if (e.key === 'i' || e.key === 'I') togglePanel('info');
+      else if ((e.key === 'o' || e.key === 'O') && canTool(it)) openTools([it.id]);
+      else if ((e.key === 't' || e.key === 'T') && canTranscribe(it)) (it.tr ? togglePanel('tr') : openTranscribe([it.id]));
       else if (e.key === 'd' || e.key === 'D') location.href = `/api/library/file/${it.id}?dl=1`;
       else if (e.key === 'Delete') trashIds([it.id]);
       else return;
@@ -1056,7 +1262,7 @@
       return;
     }
     if (e.key === '/') { e.preventDefault(); $('#lib-q').focus(); }
-    else if (e.key === 'Escape' && L.sel.size) { L.sel.clear(); syncSelClasses(); }
+    else if (e.key === 'Escape' && (L.sel.size || L.selMode)) { L.sel.clear(); L.selMode = false; syncSelClasses(); }
     else if ((e.ctrlKey || e.metaKey) && e.key === 'a' && L.view.type !== 'shares') {
       e.preventDefault();
       L.list.forEach((it) => L.sel.add(it.id));
@@ -1100,24 +1306,31 @@
 
   // ---------- Share ----------
 
+  function sharePreview(list) {
+    const size = list.reduce((a, it) => a + it.s, 0);
+    return `<div class="lib-share-prev">${list.slice(0, 6).map((it) => (it.th === -1 ? `<span class="lib-ext k-${it.k}"><b>${esc(it.e.toUpperCase())}</b></span>` : `<img src="${thumbUrl(it)}" alt="">`)).join('')}${list.length > 6 ? `<span class="lib-more">+${list.length - 6}</span>` : ''}<small>${list.length} · ${fmtSize(size)}</small></div>`;
+  }
+
   function openShareModal(ids, title) {
     ids = ids.filter((id) => L.byId.has(id));
     if (!ids.length) return toast('Nada para compartir', 'error');
     const list = ids.map((id) => L.byId.get(id));
-    const size = list.reduce((a, it) => a + it.s, 0);
     const defTitle = title || (list.length === 1 ? list[0].n : `${list.length} archivos`);
-    const hevc = list.filter((it) => it.nw && !it.wv).length;
+    const heavy = list.filter((it) => it.k === 'video' && (it.nw && !it.wv || Math.min(it.w || 0, it.h || 0) > 1080 || (it.d && (it.s * 8) / it.d > 12e6))).length;
+    const bigPhotos = list.filter((it) => it.bv || it.vw).length;
     let ttl = Number(localStorage.getItem('lib-ttl') || 7 * 86400);
     openModal(`
       <h3>${icon('share-2')} Compartir ${list.length === 1 ? 'archivo' : `${list.length} archivos`}</h3>
-      <div class="lib-share-prev">${list.slice(0, 6).map((it) => (it.th === -1 ? `<span class="lib-ext k-${it.k}"><b>${esc(it.e.toUpperCase())}</b></span>` : `<img src="${thumbUrl(it)}" alt="">`)).join('')}${list.length > 6 ? `<span class="lib-more">+${list.length - 6}</span>` : ''}<small>${fmtSize(size)}</small></div>
+      ${sharePreview(list)}
       <label>Título que verá quien abra el link<input type="text" id="lsh-title" value="${esc(defTitle)}"></label>
+      <label>Mensaje <small class="lt-hint">(opcional, aparece arriba de los archivos)</small><textarea id="lsh-msg" rows="2" placeholder="Ej: ¡Hola! Acá están las fotos del evento."></textarea></label>
       <div class="lib-field-l">Disponible por</div>
       <div class="lib-pills" id="lsh-ttl">${TTLS.map((t) => `<button class="chip${t.s === ttl ? ' active' : ''}" data-s="${t.s}">${t.label}</button>`).join('')}</div>
       <label class="lib-toggle"><input type="checkbox" id="lsh-dl" checked><span>Permitir descargar <small>(si lo apagás, solo pueden ver online)</small></span></label>
       <label class="lib-toggle"><input type="checkbox" id="lsh-pw-on"><span>Proteger con contraseña</span></label>
       <input type="text" id="lsh-pw" class="filter-input lib-wide hidden" placeholder="Contraseña" autocomplete="off">
-      ${hevc ? `<p class="lib-muted">${icon('wand-2')} ${hevc} video${hevc > 1 ? 's' : ''} HEVC se van a convertir automáticamente a un formato que se reproduce en cualquier navegador.</p>` : ''}
+      <label class="lib-toggle" id="lsh-cdn-w"><input type="checkbox" id="lsh-cdn"${localStorage.getItem('lib-cdn') === '0' ? '' : ' checked'}><span>Acelerar con la CDN de Cloudflare <small>(vistas previas y archivos se sirven desde el nodo más cercano a quien abre el link)</small></span></label>
+      ${heavy || bigPhotos ? `<p class="lib-muted">${icon('zap')} Para que cargue rápido: ${[bigPhotos ? `${bigPhotos} foto${bigPhotos > 1 ? 's' : ''} se ${bigPhotos > 1 ? 'muestran' : 'muestra'} en una versión liviana (el original se baja al descargar o hacer zoom)` : '', heavy ? `${heavy} video${heavy > 1 ? 's' : ''} pesado${heavy > 1 ? 's' : ''} o HEVC se ${heavy > 1 ? 'preparan' : 'prepara'} en una versión para streaming` : ''].filter(Boolean).join(' · ')}.</p>` : ''}
       <div class="modal-actions"><button class="btn-secondary" data-close>Cancelar</button><button class="btn-primary" id="lsh-ok">${icon('link')} Crear link</button></div>`, 'lib-share-modal');
     $$('#lsh-ttl .chip').forEach((b) => b.addEventListener('click', () => {
       ttl = Number(b.dataset.s);
@@ -1125,6 +1338,7 @@
     }));
     $('#lsh-pw-on').addEventListener('change', (e) => {
       $('#lsh-pw').classList.toggle('hidden', !e.target.checked);
+      $('#lsh-cdn-w').classList.toggle('hidden', e.target.checked);
       if (e.target.checked) $('#lsh-pw').focus();
     });
     $('#lsh-ok').addEventListener('click', async () => {
@@ -1132,10 +1346,11 @@
       if ($('#lsh-pw-on').checked && !pw) return $('#lsh-pw').focus();
       $('#lsh-ok').disabled = true;
       localStorage.setItem('lib-ttl', String(ttl));
+      localStorage.setItem('lib-cdn', $('#lsh-cdn').checked ? '1' : '0');
       try {
         const r = await api('/api/library/shares', {
           method: 'POST',
-          body: { ids, title: $('#lsh-title').value, ttl, allowDownload: $('#lsh-dl').checked, password: pw },
+          body: { ids, title: $('#lsh-title').value, msg: $('#lsh-msg').value, ttl, allowDownload: $('#lsh-dl').checked, password: pw, cdn: $('#lsh-cdn').checked },
         });
         L.sharesCount++;
         renderSide();
@@ -1147,8 +1362,16 @@
     });
   }
 
+  function shareTargets(s) {
+    const text = `${s.title} — ${s.url}`;
+    return [
+      { ic: 'message-circle', l: 'WhatsApp', href: `https://wa.me/?text=${encodeURIComponent(text)}` },
+      { ic: 'send', l: 'Telegram', href: `https://t.me/share/url?url=${encodeURIComponent(s.url)}&text=${encodeURIComponent(s.title)}` },
+      { ic: 'mail', l: 'Mail', href: `mailto:?subject=${encodeURIComponent(s.title)}&body=${encodeURIComponent(`${s.msg ? s.msg + '\n\n' : ''}${s.url}`)}` },
+    ];
+  }
+
   function shareResult(s, pw) {
-    const wa = `https://wa.me/?text=${encodeURIComponent(`${s.title} — ${s.url}`)}`;
     openModal(`
       <h3>${icon('check-circle-2')} Link listo</h3>
       <div class="lib-link-box"><input type="text" readonly value="${esc(s.url)}" id="lsr-url"><button class="btn-primary" id="lsr-copy">${icon('copy')} Copiar</button></div>
@@ -1158,19 +1381,82 @@
           <p>${icon('clock')} ${esc(expiresIn(s.expires))}${s.expires ? ` · hasta ${esc(fmtDateTime(s.expires))}` : ''}</p>
           <p>${icon(s.allowDownload ? 'download' : 'eye')} ${s.allowDownload ? 'Pueden ver y descargar' : 'Solo pueden ver'}</p>
           ${pw ? `<p>${icon('lock')} Con contraseña — mandala por separado</p>` : ''}
+          ${s.cdn ? `<p>${icon('zap')} Acelerado por la CDN de Cloudflare</p>` : ''}
+          ${s.preparing ? `<p>${icon('loader', 'spin')} Preparando ${s.preparing} video${s.preparing > 1 ? 's' : ''} para streaming</p>` : ''}
           <div class="lib-share-btns">
+            ${navigator.share ? `<button class="btn-primary" id="lsr-native">${icon('share')} Compartir…</button>` : ''}
+            ${shareTargets(s).map((t) => `<a class="btn-secondary" href="${esc(t.href)}" target="_blank" rel="noopener">${icon(t.ic)} ${t.l}</a>`).join('')}
             <a class="btn-secondary" href="${esc(s.url)}" target="_blank">${icon('external-link')} Abrir</a>
-            <a class="btn-secondary" href="${esc(wa)}" target="_blank">${icon('message-circle')} WhatsApp</a>
-            ${navigator.share ? `<button class="btn-secondary" id="lsr-native">${icon('share')} Más…</button>` : ''}
           </div>
         </div>
       </div>
       <div class="modal-actions"><button class="btn-secondary" id="lsr-all">${icon('link')} Ver todos los links</button><button class="btn-primary" data-close>Listo</button></div>`);
     $('#lsr-url').addEventListener('focus', (e) => e.target.select());
     $('#lsr-copy').addEventListener('click', () => copyText(s.url));
-    $('#lsr-native')?.addEventListener('click', () => navigator.share({ title: s.title, url: s.url }).catch(() => {}));
+    $('#lsr-native')?.addEventListener('click', () => navigator.share({ title: s.title, text: s.msg || s.title, url: s.url }).catch(() => {}));
     $('#lsr-all').addEventListener('click', () => { closeModal(); closeViewer(); setView({ type: 'shares' }); });
     copyText(s.url);
+  }
+
+  async function addToShare(ids) {
+    let d;
+    try { d = await api('/api/library/shares'); } catch (err) { return errToast(err); }
+    const alive = d.shares.filter((s) => s.alive);
+    if (!alive.length) return openShareModal(ids);
+    openModal(`<h3>${icon('link-2')} Agregar ${ids.length} archivo${ids.length > 1 ? 's' : ''} a un link</h3>
+      <p class="lib-muted">Quien ya tenga el link va a ver los archivos nuevos al recargar.</p>
+      <div class="lib-picks">${alive.map((s) => `<button class="lib-pick" data-sid="${s.id}">${icon('link')} ${esc(s.title)} <em>${s.count} · ${esc(expiresIn(s.expires))}</em></button>`).join('')}</div>
+      <div class="modal-actions"><button class="btn-secondary" data-close>Cancelar</button><button class="btn-secondary" id="lats-new">${icon('plus')} Link nuevo</button></div>`);
+    $('#lats-new').addEventListener('click', () => openShareModal(ids));
+    $$('#lib-modal .lib-pick').forEach((b) => b.addEventListener('click', async () => {
+      try {
+        const r = await api(`/api/library/shares/${b.dataset.sid}`, { method: 'PATCH', body: { add: ids } });
+        closeModal();
+        toast(`Agregado a "${r.share.title}"`, 'ok', '', 2500);
+        copyText(r.share.url);
+      } catch (err) { errToast(err); }
+    }));
+  }
+
+  function editShare(s, after) {
+    const files = s.ids.map((id) => L.byId.get(id)).filter(Boolean);
+    const remove = new Set();
+    openModal(`
+      <h3>${icon('pencil')} Editar link</h3>
+      <label>Título<input type="text" id="les-title" value="${esc(s.title)}"></label>
+      <label>Mensaje<textarea id="les-msg" rows="2">${esc(s.msg || '')}</textarea></label>
+      <div class="lib-field-l">Vencimiento <small class="lt-hint">· ${esc(expiresIn(s.expires))}</small></div>
+      <div class="lib-pills" id="les-ttl"><button class="chip active" data-s="-1">Sin cambios</button>${TTLS.map((t) => `<button class="chip" data-s="${t.s}">${t.s ? `${t.label} desde hoy` : t.label}</button>`).join('')}</div>
+      <label class="lib-toggle"><input type="checkbox" id="les-dl"${s.allowDownload ? ' checked' : ''}><span>Permitir descargar</span></label>
+      <label class="lib-toggle"><input type="checkbox" id="les-cdn"${s.cdn || s.hasPassword ? ' checked' : ''}${s.hasPassword ? ' disabled' : ''}><span>Acelerar con la CDN de Cloudflare${s.hasPassword ? ' <small>(no aplica con contraseña)</small>' : ''}</span></label>
+      <label class="lib-toggle"><input type="checkbox" id="les-pw-on"${s.hasPassword ? ' checked' : ''}><span>Contraseña${s.hasPassword ? ' <small>(dejá el campo vacío para mantener la actual)</small>' : ''}</span></label>
+      <input type="text" id="les-pw" class="filter-input lib-wide${s.hasPassword ? '' : ' hidden'}" placeholder="${s.hasPassword ? 'Nueva contraseña' : 'Contraseña'}" autocomplete="off">
+      <div class="lib-field-l">Archivos <small class="lt-hint">· tocá para quitar</small></div>
+      <div class="les-files">${files.map((it) => `<button class="les-f" data-id="${it.id}" title="${esc(it.n)}">${it.th === -1 ? `<span class="lib-ext k-${it.k}"><b>${esc(it.e.toUpperCase())}</b></span>` : `<img src="${thumbUrl(it)}" alt="">`}<i>${icon('x')}</i></button>`).join('')}</div>
+      <div class="modal-actions"><button class="btn-secondary" data-close>Cancelar</button><button class="btn-primary" id="les-ok">${icon('save')} Guardar</button></div>`);
+    let ttl = -1;
+    $$('#les-ttl .chip').forEach((b) => b.addEventListener('click', () => { ttl = Number(b.dataset.s); $$('#les-ttl .chip').forEach((x) => x.classList.toggle('active', x === b)); }));
+    $('#les-pw-on').addEventListener('change', (e) => $('#les-pw').classList.toggle('hidden', !e.target.checked));
+    $$('#lib-modal .les-f').forEach((b) => b.addEventListener('click', () => {
+      const id = b.dataset.id;
+      if (remove.has(id)) remove.delete(id); else remove.add(id);
+      b.classList.toggle('off', remove.has(id));
+    }));
+    $('#les-ok').addEventListener('click', async () => {
+      const body = { title: $('#les-title').value, msg: $('#les-msg').value, allowDownload: $('#les-dl').checked };
+      if (!s.hasPassword) body.cdn = $('#les-cdn').checked;
+      if (ttl >= 0) body.ttl = ttl || null;
+      if (!$('#les-pw-on').checked && s.hasPassword) body.password = null;
+      else if ($('#les-pw-on').checked && $('#les-pw').value) body.password = $('#les-pw').value;
+      else if ($('#les-pw-on').checked && !s.hasPassword) return $('#les-pw').focus();
+      if (remove.size) body.remove = [...remove];
+      try {
+        await api(`/api/library/shares/${s.id}`, { method: 'PATCH', body });
+        closeModal();
+        toast('Link actualizado', 'ok', '', 2000);
+        after?.();
+      } catch (err) { errToast(err); }
+    });
   }
 
   async function renderShares() {
@@ -1199,20 +1485,22 @@
         <div class="lib-share-th n${thumbs.length}">${thumbs.map((it) => (it.th === -1 ? `<span class="lib-ext k-${it.k}"><b>${esc(it.e.toUpperCase())}</b></span>` : `<img loading="lazy" src="${thumbUrl(it)}" alt="">`)).join('') || icon('file')}</div>
         <div class="lib-share-main">
           <b>${esc(s.title)}</b>
-          <small>${s.count} archivo${s.count === 1 ? '' : 's'} · ${fmtSize(s.size)}${s.missing ? ` · ${s.missing} ya no existen` : ''}</small>
+          <small>${s.count} archivo${s.count === 1 ? '' : 's'} · ${fmtSize(s.size)}${s.missing ? ` · ${s.missing} ya no existen` : ''}${s.lastAccess ? ` · último acceso ${esc(fmtDateTime(s.lastAccess))}` : ''}</small>
           <div class="lib-share-meta">
             <span class="${s.alive ? 'ok' : 'bad'}">${icon('clock')} ${esc(expiresIn(s.expires))}</span>
-            <span>${icon('eye')} ${s.views}</span><span>${icon('download')} ${s.downloads}</span>
-            ${s.hasPassword ? `<span>${icon('lock')}</span>` : ''}${s.allowDownload ? '' : `<span>${icon('eye-off')} solo ver</span>`}
+            <span title="Visitas">${icon('eye')} ${s.views}</span><span title="Descargas${s.cdn ? ' (las servidas desde la CDN no se cuentan)' : ''}">${icon('download')} ${s.downloads}</span>
+            ${s.hasPassword ? `<span title="Con contraseña">${icon('lock')}</span>` : ''}${s.allowDownload ? '' : `<span>${icon('eye-off')} solo ver</span>`}
+            ${s.cdn ? `<span title="Acelerado por la CDN de Cloudflare">${icon('zap')} CDN</span>` : ''}
+            ${s.preparing ? `<span>${icon('loader', 'spin')} preparando ${s.preparing} video${s.preparing > 1 ? 's' : ''}</span>` : ''}
           </div>
           <small class="lib-share-url">${esc(s.url)}</small>
         </div>
         <div class="lib-share-acts">
           <button class="btn-secondary" data-a="copy" title="Copiar link">${icon('copy')}</button>
-          <button class="btn-secondary" data-a="qr" title="QR">${icon('qr-code')}</button>
+          <button class="btn-secondary" data-a="qr" title="QR y compartir">${icon('qr-code')}</button>
           <a class="btn-secondary" href="${esc(s.url)}" target="_blank" title="Abrir">${icon('external-link')}</a>
+          <button class="btn-secondary" data-a="edit" title="Editar">${icon('pencil')}</button>
           <button class="btn-secondary" data-a="ext" title="Extender 7 días">${icon('calendar-plus')}</button>
-          <button class="btn-secondary" data-a="dl" title="${s.allowDownload ? 'Deshabilitar descarga' : 'Permitir descarga'}">${icon(s.allowDownload ? 'download' : 'eye')}</button>
           <button class="btn-danger" data-a="del" title="Eliminar link">${icon('trash-2')}</button>
         </div>
       </div>`;
@@ -1223,11 +1511,9 @@
         const a = b.dataset.a;
         try {
           if (a === 'copy') return copyText(s.url);
-          if (a === 'qr') {
-            return openModal(`<h3>${esc(s.title)}</h3><div class="lib-qr big">${qrSvg(s.url)}</div><p class="lib-muted lib-center">${esc(s.url)}</p><div class="modal-actions"><button class="btn-primary" data-close>Cerrar</button></div>`);
-          }
+          if (a === 'qr') return shareResult(s, '');
+          if (a === 'edit') return editShare(s, renderShares);
           if (a === 'ext') await api(`/api/library/shares/${s.id}`, { method: 'PATCH', body: { extend: 7 * 86400 } });
-          if (a === 'dl') await api(`/api/library/shares/${s.id}`, { method: 'PATCH', body: { allowDownload: !s.allowDownload } });
           if (a === 'del') {
             if (!(await confirmDialog('Eliminar link', `"${s.title}" deja de funcionar inmediatamente. Los archivos no se tocan.`))) return;
             await api(`/api/library/shares/${s.id}`, { method: 'DELETE' });
@@ -1237,6 +1523,7 @@
         } catch (err) { errToast(err); }
       }));
     });
+    if (d.shares.some((s) => s.preparing)) setTimeout(() => { if (L.view.type === 'shares' && tabActive()) renderShares(); }, 8000);
     refreshIcons();
   }
 
@@ -1313,6 +1600,613 @@
     }
   }
 
+  // ---------- Tools: optimize / convert (Squoosh codecs + ffmpeg) ----------
+
+  const IMG_FMTS = [
+    { v: 'webp', l: 'WebP', q: 80, lossless: true },
+    { v: 'avif', l: 'AVIF', q: 60, lossless: true },
+    { v: 'jpg', l: 'JPEG · MozJPEG', q: 82 },
+    { v: 'png', l: 'PNG · OxiPNG' },
+    { v: 'jxl', l: 'JPEG XL', q: 80, lossless: true, cap: 'jxl' },
+    { v: 'heic', l: 'HEIC', q: 60, lossless: true, cap: 'heic' },
+    { v: 'gif', l: 'GIF' },
+    { v: 'tiff', l: 'TIFF' },
+    { v: 'bmp', l: 'BMP' },
+    { v: 'original', l: 'Mismo formato', q: 80 },
+  ];
+  const PHOTO_PRESETS = [
+    { k: 'web', l: 'Web equilibrado', d: 'WebP · calidad 80 · máx 2560 px', o: { format: 'webp', quality: 80, maxSide: 2560, lossless: false, colors: 0 } },
+    { k: 'max', l: 'Máxima compresión', d: 'AVIF · calidad 55 · máx 2560 px', o: { format: 'avif', quality: 55, maxSide: 2560, lossless: false, colors: 0 } },
+    { k: 'jpg', l: 'JPEG compatible', d: 'MozJPEG · calidad 82 · tamaño original', o: { format: 'jpg', quality: 82, maxSide: 0, lossless: false, colors: 0 } },
+    { k: 'same', l: 'Mismo formato', d: 'Recomprime sin cambiar el tipo de archivo', o: { format: 'original', quality: 80, maxSide: 0, lossless: false, colors: 0 } },
+    { k: 'lossless', l: 'Sin pérdida', d: 'PNG optimizado (OxiPNG)', o: { format: 'png', quality: 90, maxSide: 0, lossless: true, colors: 0 } },
+  ];
+  const VIDEO_PRESETS = [
+    { k: 'web', l: 'Web / compartir', d: 'H.264 · 1080p · se reproduce en cualquier lado' },
+    { k: 'small', l: 'Liviano', d: 'H.264 · 720p · ideal WhatsApp o mail' },
+    { k: 'hevc', l: 'H.265 eficiente', d: '≈ mitad de peso · misma resolución' },
+    { k: 'av1', l: 'AV1 máxima compresión', d: 'El más chico · tarda más en codificar' },
+    { k: 'archive', l: 'Archivo alta calidad', d: 'H.265 casi sin pérdida · MKV' },
+    { k: 'gif', l: 'GIF animado', d: '480 px · 12 fps · sin audio' },
+  ];
+  const AUDIO_FMTS = [
+    { v: 'mp3', l: 'MP3', br: 192 }, { v: 'm4a', l: 'M4A · AAC', br: 160 }, { v: 'opus', l: 'Opus', br: 96 },
+    { v: 'ogg', l: 'OGG · Opus', br: 96 }, { v: 'flac', l: 'FLAC (sin pérdida)' }, { v: 'wav', l: 'WAV' },
+  ];
+  const LANGS = [['', 'Detectar automáticamente'], ['es', 'Español'], ['en', 'Inglés'], ['pt', 'Portugués'], ['fr', 'Francés'], ['it', 'Italiano'], ['de', 'Alemán'], ['ca', 'Catalán'], ['nl', 'Neerlandés'], ['pl', 'Polaco'], ['ru', 'Ruso'], ['uk', 'Ucraniano'], ['ja', 'Japonés'], ['zh', 'Chino'], ['ko', 'Coreano'], ['ar', 'Árabe']];
+  const IMG_KINDS = ['image', 'raw', 'vector', 'design'];
+  const toolKind = (it) => (IMG_KINDS.includes(it.k) && (it.th !== -1 || it.k !== 'design') ? 'image' : it.k === 'video' ? 'video' : it.k === 'audio' ? 'audio' : '');
+  const canTool = (it) => !!toolKind(it);
+  const canTranscribe = (it) => it.k === 'video' || it.k === 'audio';
+  const secs = (v) => {
+    const s = String(v || '').trim();
+    if (!s) return 0;
+    if (s.includes(':')) return s.split(':').reduce((a, x) => a * 60 + Number(x || 0), 0);
+    return Number(s.replace(',', '.')) || 0;
+  };
+
+  let capsCache = null;
+  async function getCaps(force) {
+    if (capsCache && !force) return capsCache;
+    capsCache = await api('/api/library/tools/caps').catch(() => ({ caps: {}, asr: {} }));
+    return capsCache;
+  }
+
+  async function openTools(ids, tab) {
+    const list = ids.map((id) => L.byId.get(id)).filter(Boolean);
+    const groups = { image: list.filter((it) => toolKind(it) === 'image'), video: list.filter((it) => it.k === 'video'), audio: list.filter((it) => it.k === 'audio' || it.k === 'video') };
+    const tabs = [
+      groups.image.length && { k: 'image', l: 'Fotos', n: groups.image.length, ic: 'image' },
+      groups.video.length && { k: 'video', l: 'Video', n: groups.video.length, ic: 'film' },
+      groups.audio.length && { k: 'audio', l: groups.video.length && !list.some((it) => it.k === 'audio') ? 'Extraer audio' : 'Audio', n: groups.audio.length, ic: 'music' },
+    ].filter(Boolean);
+    if (!tabs.length) return toast('Estos archivos no se pueden optimizar ni convertir', 'error');
+    const caps = (await getCaps()).caps || {};
+    let cur = tabs.find((t) => t.k === tab)?.k || tabs[0].k;
+    const st = {
+      mode: localStorage.getItem('lt-mode') || 'copy',
+      smaller: true,
+      img: { preset: 'web', ...PHOTO_PRESETS[0].o, keepMeta: true, effort: 2 },
+      vid: { preset: 'web', adv: false, container: 'mp4', vcodec: 'h264', crf: 23, speed: 'medium', maxH: 1080, fps: 0, acodec: 'aac', abr: 128, hw: 'auto', start: '', end: '' },
+      aud: { format: 'mp3', bitrate: 192, mono: false, normalize: false, start: '', end: '' },
+    };
+    try { Object.assign(st.img, JSON.parse(localStorage.getItem('lt-img') || '{}')); } catch { /* defaults */ }
+    try { Object.assign(st.vid, JSON.parse(localStorage.getItem('lt-vid') || '{}'), { start: '', end: '' }); } catch { /* defaults */ }
+    try { Object.assign(st.aud, JSON.parse(localStorage.getItem('lt-aud') || '{}'), { start: '', end: '' }); } catch { /* defaults */ }
+
+    openModal(`
+      <h3>${icon('wand-2')} Optimizar y convertir</h3>
+      ${tabs.length > 1 ? `<div class="lt-tabs">${tabs.map((t) => `<button data-t="${t.k}">${icon(t.ic)} ${t.l} <em>${t.n}</em></button>`).join('')}</div>` : ''}
+      <div id="lt-body"></div>
+      <div class="lt-dest">
+        <div class="lt-seg" id="lt-mode">
+          <button data-m="copy">${icon('copy-plus')}<span><b>Guardar como copia</b><small>El original queda intacto</small></span></button>
+          <button data-m="replace">${icon('replace')}<span><b>Reemplazar original</b><small>El original va a la papelera</small></span></button>
+        </div>
+        <label class="lib-toggle" id="lt-smaller-w"><input type="checkbox" id="lt-smaller" checked><span>Descartar el resultado si no queda más liviano <small>(solo cuando no cambia el formato)</small></span></label>
+      </div>
+      <div class="modal-actions"><button class="btn-secondary" data-close>Cancelar</button><button class="btn-primary" id="lt-go"></button></div>`, 'lib-tools-modal');
+
+    const body = $('#lt-body');
+    const syncMode = () => {
+      $$('#lt-mode button').forEach((b) => b.classList.toggle('on', b.dataset.m === st.mode));
+    };
+    $$('#lt-mode button').forEach((b) => b.addEventListener('click', () => { st.mode = b.dataset.m; localStorage.setItem('lt-mode', st.mode); syncMode(); }));
+    $('#lt-smaller').addEventListener('change', (e) => { st.smaller = e.target.checked; });
+    syncMode();
+
+    const goLabel = () => {
+      const n = groups[cur].length;
+      const what = cur === 'image' ? (n === 1 ? 'foto' : 'fotos') : cur === 'video' ? (n === 1 ? 'video' : 'videos') : (n === 1 ? 'archivo' : 'archivos');
+      $('#lt-go').innerHTML = `${icon('wand-2')} Procesar ${n} ${what}`;
+      refreshIcons();
+    };
+
+    const drawTab = () => {
+      $$('.lt-tabs button').forEach((b) => b.classList.toggle('on', b.dataset.t === cur));
+      if (cur === 'image') drawImage(); else if (cur === 'video') drawVideo(); else drawAudio();
+      goLabel();
+      refreshIcons();
+    };
+    $$('.lt-tabs button').forEach((b) => b.addEventListener('click', () => { cur = b.dataset.t; drawTab(); }));
+
+    // ---- Photos ----
+    let cmpSeq = 0;
+    function drawImage() {
+      const one = groups.image.length === 1 ? groups.image[0] : null;
+      const o = st.img;
+      const fmt = IMG_FMTS.find((f) => f.v === o.format) || IMG_FMTS[0];
+      const effFmt = o.format === 'original' ? (one ? one.e.replace('jpeg', 'jpg') : '') : o.format;
+      const hasQ = !!fmt.q && !(o.lossless && fmt.lossless) || (effFmt === 'png' && o.colors);
+      body.innerHTML = `
+        ${one ? `<div class="lt-cmp" id="lt-cmp">
+          <div class="lt-cmp-in" id="lt-cmp-in">
+            <img class="lt-a" src="${one.vw ? `/api/library/view/${one.id}` : `/api/library/file/${one.id}`}" alt="" draggable="false">
+            <img class="lt-b" id="lt-b" alt="" draggable="false">
+          </div>
+          <div class="lt-cmp-line" id="lt-line"><span>${icon('chevrons-left-right')}</span></div>
+          <span class="lt-cmp-lbl l">Original · ${fmtSize(one.s)}</span>
+          <span class="lt-cmp-lbl r" id="lt-res">…</span>
+          <span class="lt-cmp-hint">Arrastrá para comparar · rueda / pellizco para zoom</span>
+        </div>` : `<div class="lt-many">${groups.image.slice(0, 8).map((it) => `<img src="${thumbUrl(it)}" alt="">`).join('')}${groups.image.length > 8 ? `<span>+${groups.image.length - 8}</span>` : ''}<small>${fmtSize(groups.image.reduce((a, it) => a + it.s, 0))}</small></div>`}
+        <div class="lt-presets">${PHOTO_PRESETS.map((p) => `<button class="lt-preset${o.preset === p.k ? ' on' : ''}" data-p="${p.k}"><b>${p.l}</b><small>${p.d}</small></button>`).join('')}</div>
+        <div class="lt-grid">
+          <label>Formato de salida<select id="lt-fmt">${IMG_FMTS.map((f) => `<option value="${f.v}"${f.v === o.format ? ' selected' : ''}${f.cap && !caps[f.cap] ? ' disabled' : ''}>${f.l}${f.cap && !caps[f.cap] ? ' (no instalado)' : ''}</option>`).join('')}</select></label>
+          <label>Tamaño máximo<select id="lt-max">${[[0, 'Original'], [3840, '3840 px (4K)'], [2560, '2560 px'], [2048, '2048 px'], [1920, '1920 px'], [1280, '1280 px'], [1080, '1080 px'], [800, '800 px'], [512, '512 px']].map(([v, l]) => `<option value="${v}"${v === o.maxSide ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+          <label class="${hasQ ? '' : 'hidden'}"><span>Calidad <b id="lt-qv">${o.quality}</b></span><input type="range" id="lt-q" min="1" max="100" value="${o.quality}"></label>
+          <label>Esfuerzo<select id="lt-eff"><option value="1"${o.effort === 1 ? ' selected' : ''}>Rápido</option><option value="2"${o.effort === 2 ? ' selected' : ''}>Normal</option><option value="3"${o.effort === 3 ? ' selected' : ''}>Máximo</option></select></label>
+        </div>
+        <div class="lt-checks">
+          ${fmt.lossless ? `<label class="lib-toggle"><input type="checkbox" id="lt-lossless"${o.lossless ? ' checked' : ''}><span>Sin pérdida</span></label>` : ''}
+          ${effFmt === 'png' || o.format === 'png' ? `<label class="lib-toggle"><input type="checkbox" id="lt-pal"${o.colors ? ' checked' : ''}><span>Reducir paleta (pngquant, hasta 256 colores)</span></label>` : ''}
+          <label class="lib-toggle"><input type="checkbox" id="lt-meta"${o.keepMeta ? ' checked' : ''}><span>Mantener metadatos (fecha, cámara, GPS)</span></label>
+        </div>`;
+      const set = (patch, preset = 'custom') => {
+        Object.assign(o, patch, { preset });
+        localStorage.setItem('lt-img', JSON.stringify(o));
+        drawImage();
+        refreshIcons();
+      };
+      body.querySelectorAll('.lt-preset').forEach((b) => b.addEventListener('click', () => set({ ...PHOTO_PRESETS.find((p) => p.k === b.dataset.p).o }, b.dataset.p)));
+      $('#lt-fmt').addEventListener('change', (e) => {
+        const f = IMG_FMTS.find((x) => x.v === e.target.value);
+        set({ format: f.v, quality: f.q || o.quality, lossless: false, colors: 0 });
+      });
+      $('#lt-max').addEventListener('change', (e) => set({ maxSide: Number(e.target.value) }, o.preset === 'custom' ? 'custom' : 'custom'));
+      $('#lt-eff').addEventListener('change', (e) => set({ effort: Number(e.target.value) }, o.preset));
+      $('#lt-q').addEventListener('input', (e) => { $('#lt-qv').textContent = e.target.value; });
+      $('#lt-q').addEventListener('change', (e) => set({ quality: Number(e.target.value) }));
+      $('#lt-lossless')?.addEventListener('change', (e) => set({ lossless: e.target.checked }));
+      $('#lt-pal')?.addEventListener('change', (e) => set({ colors: e.target.checked ? 256 : 0, quality: e.target.checked ? 85 : o.quality }));
+      $('#lt-meta').addEventListener('change', (e) => { o.keepMeta = e.target.checked; localStorage.setItem('lt-img', JSON.stringify(o)); });
+      if (one) {
+        compareWidget();
+        runPreview(one);
+      }
+    }
+
+    function compareWidget() {
+      const box = $('#lt-cmp'), inner = $('#lt-cmp-in'), line = $('#lt-line'), b = $('#lt-b');
+      let pos = 50, z = 1, x = 0, y = 0, drag = null, pan = null;
+      const pts = {};
+      let pinch = null;
+      const apply = () => {
+        b.style.clipPath = `inset(0 0 0 ${pos}%)`;
+        line.style.left = pos + '%';
+        inner.style.transform = `translate(${x}px,${y}px) scale(${z})`;
+      };
+      const zoomAt = (nz, cx, cy) => {
+        const r = box.getBoundingClientRect();
+        cx -= r.left; cy -= r.top;
+        nz = Math.max(1, Math.min(10, nz));
+        x = cx - (cx - x) * (nz / z); y = cy - (cy - y) * (nz / z); z = nz;
+        if (z === 1) { x = 0; y = 0; }
+        apply();
+      };
+      box.addEventListener('wheel', (e) => { e.preventDefault(); zoomAt(z * (e.deltaY < 0 ? 1.2 : 1 / 1.2), e.clientX, e.clientY); }, { passive: false });
+      box.addEventListener('dblclick', (e) => zoomAt(z > 1 ? 1 : 3, e.clientX, e.clientY));
+      box.addEventListener('pointerdown', (e) => {
+        box.setPointerCapture(e.pointerId);
+        pts[e.pointerId] = { x: e.clientX, y: e.clientY };
+        const k = Object.keys(pts);
+        if (k.length === 2) { const [a, c] = k.map((i) => pts[i]); pinch = { d: Math.hypot(a.x - c.x, a.y - c.y), z }; drag = null; pan = null; return; }
+        const r = box.getBoundingClientRect();
+        const lx = r.left + (pos / 100) * r.width;
+        if (z > 1 && Math.abs(e.clientX - lx) > 24) pan = { x: e.clientX - x, y: e.clientY - y };
+        else drag = true;
+        if (drag) { pos = Math.max(0, Math.min(100, ((e.clientX - r.left) / r.width) * 100)); apply(); }
+      });
+      box.addEventListener('pointermove', (e) => {
+        if (!pts[e.pointerId]) return;
+        pts[e.pointerId] = { x: e.clientX, y: e.clientY };
+        const k = Object.keys(pts);
+        if (pinch && k.length === 2) { const [a, c] = k.map((i) => pts[i]); zoomAt(pinch.z * Math.hypot(a.x - c.x, a.y - c.y) / pinch.d, (a.x + c.x) / 2, (a.y + c.y) / 2); return; }
+        if (drag) { const r = box.getBoundingClientRect(); pos = Math.max(0, Math.min(100, ((e.clientX - r.left) / r.width) * 100)); apply(); }
+        else if (pan) { x = e.clientX - pan.x; y = e.clientY - pan.y; apply(); }
+      });
+      const up = (e) => { delete pts[e.pointerId]; if (Object.keys(pts).length < 2) pinch = null; if (!Object.keys(pts).length) { drag = null; pan = null; } };
+      box.addEventListener('pointerup', up);
+      box.addEventListener('pointercancel', up);
+      apply();
+    }
+
+    const runPreview = debounce(async (one) => {
+      const seq = ++cmpSeq;
+      const res = $('#lt-res');
+      const b = $('#lt-b');
+      if (!res) return;
+      res.innerHTML = `${icon('loader', 'spin')} Comprimiendo…`;
+      $('#lt-cmp')?.classList.add('busy');
+      refreshIcons();
+      try {
+        const r = await api('/api/library/tools/preview', { method: 'POST', body: { id: one.id, opts: st.img } });
+        if (seq !== cmpSeq || !$('#lt-b')) return;
+        const pct = Math.round((1 - r.size / r.before) * 100);
+        await new Promise((ok) => { b.onload = ok; b.onerror = ok; b.src = r.url; });
+        if (seq !== cmpSeq) return;
+        const shown = b.naturalWidth > 0;
+        res.innerHTML = `${esc(r.label)} · <b>${fmtSize(r.size)}</b> <em class="${pct >= 0 ? 'ok' : 'bad'}">${pct >= 0 ? '−' : '+'}${Math.abs(pct)}%</em>${shown ? '' : ' · tu navegador no muestra este formato'}`;
+      } catch (err) {
+        if (seq === cmpSeq) res.textContent = err.detail || err.message || 'No se pudo previsualizar';
+      } finally {
+        if (seq === cmpSeq) $('#lt-cmp')?.classList.remove('busy');
+      }
+    }, 450);
+
+    // ---- Video ----
+    function drawVideo() {
+      const o = st.vid;
+      const one = groups.video.length === 1 ? groups.video[0] : null;
+      const sel = (id, opts, val) => `<select id="${id}">${opts.map(([v, l]) => `<option value="${v}"${String(v) === String(val) ? ' selected' : ''}>${l}</option>`).join('')}</select>`;
+      body.innerHTML = `
+        ${one ? `<p class="lt-info">${icon('film')} ${esc(one.n)} · ${fmtSize(one.s)}${one.d ? ' · ' + fmtDur(one.d) : ''}${one.w ? ` · ${one.w}×${one.h}` : ''}${one.c ? ' · ' + esc(one.c.toUpperCase()) : ''}</p>` : `<p class="lt-info">${icon('film')} ${groups.video.length} videos · ${fmtSize(groups.video.reduce((a, it) => a + it.s, 0))}</p>`}
+        <div class="lt-presets">${VIDEO_PRESETS.map((p) => `<button class="lt-preset${!o.adv && o.preset === p.k ? ' on' : ''}" data-p="${p.k}"><b>${p.l}</b><small>${p.d}</small></button>`).join('')}
+          <button class="lt-preset${o.adv ? ' on' : ''}" data-p="adv"><b>${icon('sliders-horizontal')} Avanzado</b><small>Códec, calidad, resolución, audio…</small></button></div>
+        <div class="lt-grid${o.adv ? '' : ' hidden'}" id="lt-adv">
+          <label>Contenedor${sel('lv-cont', [['mp4', 'MP4'], ['mkv', 'MKV'], ['webm', 'WebM'], ['mov', 'MOV'], ['gif', 'GIF animado']], o.container)}</label>
+          <label>Códec de video${sel('lv-vc', [['h264', 'H.264 (compatible)'], ['h265', 'H.265 / HEVC'], ['av1', 'AV1'], ['vp9', 'VP9'], ['copy', 'Copiar sin recodificar']], o.vcodec)}</label>
+          <label><span>Calidad (CRF) <b id="lv-crfv">${o.crf}</b></span><input type="range" id="lv-crf" min="14" max="50" value="${o.crf}"><small class="lt-hint">Menor = más calidad y más peso</small></label>
+          <label>Velocidad${sel('lv-sp', [['fast', 'Rápida'], ['medium', 'Normal'], ['slow', 'Lenta (más chico)']], o.speed)}</label>
+          <label>Resolución máxima${sel('lv-h', [[0, 'Original'], [2160, '4K (2160p)'], [1440, '1440p'], [1080, '1080p'], [720, '720p'], [480, '480p'], [360, '360p']], o.maxH)}</label>
+          <label>FPS máximo${sel('lv-fps', [[0, 'Original'], [60, '60'], [30, '30'], [24, '24'], [15, '15']], o.fps)}</label>
+          <label>Audio${sel('lv-ac', [['aac', 'AAC'], ['opus', 'Opus'], ['mp3', 'MP3'], ['copy', 'Copiar original'], ['none', 'Sin audio']], o.acodec)}</label>
+          <label>Bitrate de audio${sel('lv-abr', [[64, '64 kbps'], [96, '96 kbps'], [128, '128 kbps'], [160, '160 kbps'], [192, '192 kbps'], [256, '256 kbps'], [320, '320 kbps']], o.abr)}</label>
+          <label>Aceleración${sel('lv-hw', [['auto', caps.nvenc ? 'Auto (GPU NVENC)' : 'Auto (CPU)'], ['cpu', 'CPU (mejor compresión)'], ['gpu', caps.nvenc ? 'GPU NVENC' : 'GPU (no disponible)']], o.hw)}</label>
+        </div>
+        <div class="lt-trim">
+          <label>Recortar desde<input type="text" id="lv-ss" value="${esc(o.start)}" placeholder="0:00" inputmode="decimal"></label>
+          <label>hasta<input type="text" id="lv-to" value="${esc(o.end)}" placeholder="${one?.d ? fmtDur(one.d) : 'final'}" inputmode="decimal"></label>
+          ${one && $('#lv-stage video') ? `<button class="btn-secondary" id="lv-now" title="Usar la posición actual del video">${icon('timer')} Posición actual</button>` : ''}
+        </div>`;
+      const save = () => localStorage.setItem('lt-vid', JSON.stringify({ ...o, start: '', end: '' }));
+      body.querySelectorAll('.lt-preset').forEach((b) => b.addEventListener('click', () => {
+        if (b.dataset.p === 'adv') o.adv = true;
+        else { o.adv = false; o.preset = b.dataset.p; }
+        save();
+        drawVideo();
+        refreshIcons();
+      }));
+      const bind = (id, key, num) => $(id)?.addEventListener('change', (e) => { o[key] = num ? Number(e.target.value) : e.target.value; save(); });
+      bind('#lv-cont', 'container'); bind('#lv-vc', 'vcodec'); bind('#lv-sp', 'speed'); bind('#lv-h', 'maxH', 1); bind('#lv-fps', 'fps', 1);
+      bind('#lv-ac', 'acodec'); bind('#lv-abr', 'abr', 1); bind('#lv-hw', 'hw');
+      $('#lv-crf').addEventListener('input', (e) => { $('#lv-crfv').textContent = e.target.value; o.crf = Number(e.target.value); save(); });
+      $('#lv-ss').addEventListener('input', (e) => { o.start = e.target.value; });
+      $('#lv-to').addEventListener('input', (e) => { o.end = e.target.value; });
+      $('#lv-now')?.addEventListener('click', () => {
+        const v = $('#lv-stage video');
+        const t = fmtDur(v.currentTime) || '0:00';
+        if (!o.start) { o.start = t; $('#lv-ss').value = t; } else { o.end = t; $('#lv-to').value = t; }
+      });
+    }
+
+    // ---- Audio ----
+    function drawAudio() {
+      const o = st.aud;
+      const f = AUDIO_FMTS.find((x) => x.v === o.format) || AUDIO_FMTS[0];
+      body.innerHTML = `
+        <p class="lt-info">${icon('music')} ${groups.audio.length === 1 ? esc(groups.audio[0].n) : `${groups.audio.length} archivos`}${groups.audio.some((it) => it.k === 'video') ? ' · se extrae solo la pista de audio' : ''}</p>
+        <div class="lt-presets">
+          <button class="lt-preset" data-a="voice"><b>Voz / podcast</b><small>Opus 48 kbps mono · normalizado</small></button>
+          <button class="lt-preset" data-a="music"><b>Música</b><small>AAC 192 kbps</small></button>
+          <button class="lt-preset" data-a="mp3"><b>MP3 compatible</b><small>192 kbps</small></button>
+          <button class="lt-preset" data-a="flac"><b>Sin pérdida</b><small>FLAC</small></button>
+        </div>
+        <div class="lt-grid">
+          <label>Formato<select id="la-fmt">${AUDIO_FMTS.map((x) => `<option value="${x.v}"${x.v === o.format ? ' selected' : ''}>${x.l}</option>`).join('')}</select></label>
+          <label class="${f.br ? '' : 'hidden'}">Bitrate<select id="la-br">${[32, 48, 64, 96, 128, 160, 192, 256, 320].map((v) => `<option value="${v}"${v === o.bitrate ? ' selected' : ''}>${v} kbps</option>`).join('')}</select></label>
+        </div>
+        <div class="lt-checks">
+          <label class="lib-toggle"><input type="checkbox" id="la-mono"${o.mono ? ' checked' : ''}><span>Mono</span></label>
+          <label class="lib-toggle"><input type="checkbox" id="la-norm"${o.normalize ? ' checked' : ''}><span>Normalizar volumen (−16 LUFS)</span></label>
+        </div>
+        <div class="lt-trim">
+          <label>Recortar desde<input type="text" id="la-ss" value="${esc(o.start)}" placeholder="0:00"></label>
+          <label>hasta<input type="text" id="la-to" value="${esc(o.end)}" placeholder="final"></label>
+        </div>`;
+      const save = () => localStorage.setItem('lt-aud', JSON.stringify({ ...o, start: '', end: '' }));
+      const presets = { voice: { format: 'opus', bitrate: 48, mono: true, normalize: true }, music: { format: 'm4a', bitrate: 192, mono: false, normalize: false }, mp3: { format: 'mp3', bitrate: 192, mono: false, normalize: false }, flac: { format: 'flac', mono: false, normalize: false } };
+      body.querySelectorAll('.lt-preset').forEach((b) => b.addEventListener('click', () => { Object.assign(o, presets[b.dataset.a]); save(); drawAudio(); refreshIcons(); }));
+      $('#la-fmt').addEventListener('change', (e) => { o.format = e.target.value; o.bitrate = AUDIO_FMTS.find((x) => x.v === o.format).br || o.bitrate; save(); drawAudio(); refreshIcons(); });
+      $('#la-br').addEventListener('change', (e) => { o.bitrate = Number(e.target.value); save(); });
+      $('#la-mono').addEventListener('change', (e) => { o.mono = e.target.checked; save(); });
+      $('#la-norm').addEventListener('change', (e) => { o.normalize = e.target.checked; save(); });
+      $('#la-ss').addEventListener('input', (e) => { o.start = e.target.value; });
+      $('#la-to').addEventListener('input', (e) => { o.end = e.target.value; });
+    }
+
+    $('#lt-go').addEventListener('click', async () => {
+      const ids2 = groups[cur].map((it) => it.id);
+      let opts;
+      if (cur === 'image') {
+        const { preset, ...rest } = st.img;
+        opts = rest;
+      } else if (cur === 'video') {
+        const o = st.vid;
+        opts = o.adv
+          ? { container: o.container, vcodec: o.vcodec, crf: o.crf, speed: o.speed, maxH: o.maxH, fps: o.fps, acodec: o.acodec, abr: o.abr }
+          : { preset: o.preset };
+        Object.assign(opts, { hw: o.hw, start: secs(o.start), end: secs(o.end) });
+      } else {
+        const o = st.aud;
+        opts = { format: o.format, bitrate: o.bitrate, mono: o.mono, normalize: o.normalize, start: secs(o.start), end: secs(o.end) };
+      }
+      if (st.mode === 'replace' && !(await confirmDialog('Reemplazar originales', `${ids2.length === 1 ? 'El original va' : `Los ${ids2.length} originales van`} a la papelera de Axon y en su lugar queda la versión nueva. Se puede restaurar desde Archivos → Papelera.`, 'Reemplazar'))) return;
+      $('#lt-go').disabled = true;
+      try {
+        const r = await api('/api/library/tools/run', { method: 'POST', body: { ids: ids2, op: cur, opts, mode: st.mode, onlySmaller: st.smaller } });
+        closeModal();
+        toast(`${r.jobs.length} ${r.jobs.length === 1 ? 'trabajo' : 'trabajos'} en cola${r.skipped?.length ? ` · ${r.skipped.length} omitidos` : ''}`, 'ok', '', 2500);
+        showJobs(true);
+      } catch (err) {
+        $('#lt-go').disabled = false;
+        errToast(err);
+      }
+    });
+    drawTab();
+  }
+
+  // ---------- Jobs panel ----------
+
+  const J = { list: [], timer: null, seen: new Map(), open: false, reloadT: null };
+  const JOB_IC = { image: 'image', video: 'film', audio: 'music', transcribe: 'captions' };
+  const STAGE = { starting: 'iniciando el motor…', loading: 'cargando modelo…', downloading: 'descargando modelo (una sola vez)…', audio: 'leyendo audio…', transcribing: 'transcribiendo', encoding: 'procesando', 'encoding-gpu': 'procesando (GPU)', replacing: 'reemplazando…', queued: 'en cola' };
+
+  function showJobs(force) {
+    if (force) J.open = true;
+    pollJobs(0);
+  }
+
+  function pollJobs(delay = 1500) {
+    clearTimeout(J.timer);
+    J.timer = setTimeout(async () => {
+      let d;
+      try { d = await api('/api/library/tools/jobs'); } catch { return; }
+      J.list = d.jobs;
+      let changed = false;
+      for (const j of d.jobs) {
+        const prev = J.seen.get(j.id);
+        if (prev && prev !== j.state && ['done', 'skipped'].includes(j.state)) changed = true;
+        if (prev && prev !== j.state && j.state === 'done' && j.type === 'transcribe') onTranscribed(j);
+        J.seen.set(j.id, j.state);
+      }
+      if (d.active) J.open = true;
+      renderJobs();
+      if (changed) {
+        clearTimeout(J.reloadT);
+        J.reloadT = setTimeout(() => load(), 400);
+      }
+      if (d.active) pollJobs();
+    }, delay);
+  }
+
+  function renderJobs() {
+    const el = $('#lib-jobs');
+    if (!el) return;
+    const active = J.list.filter((j) => j.state === 'queued' || j.state === 'running').length;
+    const nav = $('#nav-count-library');
+    if (!J.open || !J.list.length) { el.classList.add('hidden'); return; }
+    el.classList.remove('hidden');
+    el.innerHTML = `<div class="lib-up-h"><b>${active ? `Procesando · ${active}` : 'Trabajos terminados'}</b>
+      <span class="lib-jobs-acts">${J.list.some((j) => !['queued', 'running'].includes(j.state)) ? `<button class="icon-btn" id="lj-clear" title="Limpiar terminados">${icon('list-x')}</button>` : ''}<button class="icon-btn" id="lj-x" title="Ocultar">${icon('x')}</button></span></div>
+      <div class="lib-up-list">${J.list.map((j) => {
+        const pct = j.state === 'done' ? 100 : j.pct || 0;
+        let sub = '';
+        if (j.state === 'running') sub = `${STAGE[j.stage] || 'procesando'}${j.pct ? ` · ${j.pct}%` : ''}`;
+        else if (j.state === 'queued') sub = 'en cola';
+        else if (j.state === 'done' && j.type !== 'transcribe') sub = `${fmtSize(j.before)} → <b>${fmtSize(j.after || 0)}</b> <em class="${j.after <= j.before ? 'ok' : 'bad'}">${j.after <= j.before ? '−' : '+'}${Math.abs(Math.round((1 - (j.after || 0) / j.before) * 100))}%</em>${j.mode === 'replace' ? ' · reemplazado' : ''}`;
+        else if (j.state === 'done') sub = esc(j.note || 'Listo');
+        else if (j.state === 'skipped') sub = esc(j.note || 'Omitido');
+        else if (j.state === 'cancelled') sub = 'Cancelado';
+        else if (j.state === 'error') sub = `<span class="bad">${esc(j.error || 'Error')}</span>`;
+        const act = ['queued', 'running'].includes(j.state)
+          ? `<button class="icon-btn" data-cancel="${j.id}" title="Cancelar">${icon('square')}</button>`
+          : j.state === 'done' && j.outId ? `<button class="icon-btn" data-open="${j.outId}" data-tr="${j.type === 'transcribe' ? 1 : ''}" title="Ver">${icon(j.type === 'transcribe' ? 'captions' : 'eye')}</button>` : '';
+        return `<div class="lj lj-${j.state}"><span class="lj-ic">${icon(JOB_IC[j.type] || 'wand-2')}</span>
+          <div class="lj-m"><b title="${esc(j.name)}">${esc(j.name)}</b><small class="lj-l">${esc(j.label)}</small><small>${sub}</small>
+          ${['queued', 'running'].includes(j.state) ? `<div class="lib-up-bar"><i style="width:${pct}%"></i></div>` : ''}</div>${act}</div>`;
+      }).join('')}</div>`;
+    $('#lj-x').addEventListener('click', () => { J.open = false; el.classList.add('hidden'); });
+    $('#lj-clear')?.addEventListener('click', async () => { await api('/api/library/tools/jobs/clear', { method: 'POST' }).catch(errToast); pollJobs(0); });
+    el.querySelectorAll('[data-cancel]').forEach((b) => b.addEventListener('click', async () => { await api(`/api/library/tools/jobs/${b.dataset.cancel}`, { method: 'DELETE' }).catch(errToast); pollJobs(200); }));
+    el.querySelectorAll('[data-open]').forEach((b) => b.addEventListener('click', () => openById(b.dataset.open, !!b.dataset.tr)));
+    if (nav && active) nav.dataset.busy = '1'; else if (nav) delete nav.dataset.busy;
+    refreshIcons();
+  }
+
+  async function openById(id, transcript) {
+    if (!L.byId.has(id)) await load();
+    const it = L.byId.get(id);
+    if (!it) return toast('El archivo ya no está en la biblioteca', 'error');
+    let i = L.list.findIndex((x) => x.id === id);
+    if (i < 0) {
+      setView({ type: 'folder', value: dirOf(it.p) });
+      i = L.list.findIndex((x) => x.id === id);
+    }
+    if (i < 0) return;
+    if (transcript) vPanel = 'tr';
+    openViewer(i);
+  }
+
+  function onTranscribed(j) {
+    const it = L.byId.get(j.outId);
+    if (it) it.tr = 1;
+    const cur = L.list[vIdx];
+    if (cur && cur.id === j.outId && !$('#lib-viewer').classList.contains('hidden')) {
+      cur.tr = 1;
+      vPanel = 'tr';
+      showItem(true);
+    }
+    toast(`Transcripción lista: ${j.name}`, 'ok', '', 3000);
+  }
+
+  // ---------- Transcription ----------
+
+  async function openTranscribe(ids) {
+    const list = ids.map((id) => L.byId.get(id)).filter((it) => it && canTranscribe(it));
+    if (!list.length) return toast('Elegí videos o audios para transcribir', 'error');
+    const caps = await getCaps(true);
+    const asr = caps.asr || {};
+    let engine = localStorage.getItem('tr-engine') || 'whisper';
+    if (engine === 'whisper' && caps.caps && caps.caps.whisper === false) engine = 'parakeet';
+    const had = list.filter((it) => it.tr).length;
+    const status = (e) => {
+      const h = asr[e];
+      if (!h) return '<em>apagado · se carga al usarlo</em>';
+      const mins = Math.max(1, Math.round((h.idleLeft || 0) / 60));
+      return `<em class="ok">${h.busy ? 'trabajando' : h.loaded ? `en memoria · se libera en ${mins} min` : 'iniciado'}${h.device ? ` · ${h.device === 'cuda' ? 'GPU' : 'CPU'}` : ''}</em>`;
+    };
+    openModal(`
+      <h3>${icon('captions')} Transcribir ${list.length === 1 ? esc(list[0].n) : `${list.length} archivos`}</h3>
+      <div class="lt-engines">
+        <button class="lt-engine" data-e="whisper"${caps.caps?.whisper === false ? ' disabled' : ''}><b>Whisper</b><small>Más preciso · 99 idiomas · traduce · ${caps.caps?.cuda ? 'GPU' : 'CPU'}</small>${status('whisper')}</button>
+        <button class="lt-engine" data-e="parakeet"><b>Parakeet v3 · NVIDIA</b><small>Muy rápido en CPU · 25 idiomas europeos</small>${status('parakeet')}</button>
+      </div>
+      <div class="lt-grid">
+        <label id="tr-model-w">Modelo<select id="tr-model">
+          <option value="turbo">turbo · rápido y preciso (recomendado)</option>
+          <option value="large-v3">large-v3 · máxima precisión</option>
+          <option value="medium">medium</option>
+          <option value="small">small · el más rápido</option></select></label>
+        <label>Idioma<select id="tr-lang">${LANGS.map(([v, l]) => `<option value="${v}"${v === (localStorage.getItem('tr-lang') ?? 'es') ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+        <label id="tr-task-w">Tarea<select id="tr-task"><option value="transcribe">Transcribir en el idioma original</option><option value="translate">Traducir al inglés</option></select></label>
+      </div>
+      <label id="tr-prompt-w">Palabras clave <small class="lt-hint">(opcional: nombres, marcas, jerga — mejora la precisión)</small><input type="text" id="tr-prompt" placeholder="Ej: Axon, Demo, ablandador"></label>
+      <p class="lib-muted">${icon('memory-stick')} El modelo se carga solo para esto y se descarga de la memoria a los ${Math.round((asr.idle || 600) / 60)} minutos sin uso.</p>
+      ${had ? `<p class="lib-muted">${icon('alert-triangle')} ${had === 1 && list.length === 1 ? 'Ya tiene' : `${had} ya tienen`} transcripción — se va a reemplazar.</p>` : ''}
+      <div class="modal-actions">${asr.whisper || asr.parakeet ? `<button class="btn-secondary" id="tr-free" title="Cerrar los motores cargados y liberar memoria">${icon('power')} Liberar memoria</button><span class="lt-sp"></span>` : ''}<button class="btn-secondary" data-close>Cancelar</button><button class="btn-primary" id="tr-go">${icon('captions')} Transcribir</button></div>`, 'lib-tr-modal');
+    const sync = () => {
+      $$('.lt-engine').forEach((b) => b.classList.toggle('on', b.dataset.e === engine));
+      $('#tr-model-w').classList.toggle('hidden', engine !== 'whisper');
+      $('#tr-task-w').classList.toggle('hidden', engine !== 'whisper');
+      $('#tr-prompt-w').classList.toggle('hidden', engine !== 'whisper');
+    };
+    $('#tr-model').value = localStorage.getItem('tr-model') || 'turbo';
+    $$('.lt-engine').forEach((b) => b.addEventListener('click', () => { engine = b.dataset.e; sync(); }));
+    sync();
+    $('#tr-free')?.addEventListener('click', async () => {
+      await Promise.all(['whisper', 'parakeet'].map((e) => api(`/api/library/asr/${e}/stop`, { method: 'POST' }).catch(() => {})));
+      toast('Memoria liberada', 'ok', '', 2000);
+      closeModal();
+    });
+    $('#tr-go').addEventListener('click', async () => {
+      localStorage.setItem('tr-engine', engine);
+      localStorage.setItem('tr-model', $('#tr-model').value);
+      localStorage.setItem('tr-lang', $('#tr-lang').value);
+      $('#tr-go').disabled = true;
+      try {
+        await api('/api/library/tools/run', {
+          method: 'POST',
+          body: { ids: list.map((it) => it.id), op: 'transcribe', opts: { engine, model: $('#tr-model').value, language: $('#tr-lang').value, task: $('#tr-task').value, prompt: $('#tr-prompt').value } },
+        });
+        closeModal();
+        showJobs(true);
+        if (list.length === 1 && L.list[vIdx]?.id === list[0].id) { vPanel = 'tr'; renderInfo(list[0]); }
+      } catch (err) {
+        $('#tr-go').disabled = false;
+        errToast(err);
+      }
+    });
+  }
+
+  const trCache = new Map();
+  async function renderTranscript(it, el) {
+    const job = J.list.find((j) => j.type === 'transcribe' && j.itemId === it.id && ['queued', 'running'].includes(j.state));
+    if (!it.tr) {
+      el.innerHTML = job
+        ? `<div class="lv-tr-empty">${icon('loader', 'spin')}<p>${esc(STAGE[job.stage] || 'Transcribiendo')}${job.pct ? ` · ${job.pct}%` : ''}</p><div class="lib-up-bar"><i style="width:${job.pct || 0}%"></i></div></div>`
+        : `<div class="lv-tr-empty">${icon('captions')}<p>Todavía no tiene transcripción.</p><button class="btn-primary" id="lv-tr-go">${icon('captions')} Transcribir</button></div>`;
+      $('#lv-tr-go')?.addEventListener('click', () => openTranscribe([it.id]));
+      if (job) setTimeout(() => { if (L.list[vIdx]?.id === it.id && vPanel === 'tr') renderTranscript(L.byId.get(it.id) || it, el); }, 1500);
+      refreshIcons();
+      return;
+    }
+    let t = trCache.get(it.tk);
+    if (!t) {
+      el.innerHTML = `<div class="lv-tr-empty">${icon('loader', 'spin')}</div>`;
+      refreshIcons();
+      try { t = (await api(`/api/library/transcript/${it.id}`)).transcript; } catch (err) { el.innerHTML = `<div class="lv-tr-empty">${esc(err.message)}</div>`; return; }
+      trCache.set(it.tk, t);
+    }
+    if (L.list[vIdx]?.id !== it.id) return;
+    const mmss = (x) => fmtDur(x) || '0:00';
+    let editing = false;
+    const draw = (q = '') => {
+      const ql = q.toLowerCase();
+      el.innerHTML = `
+        <div class="lv-tr-tools">
+          <div class="lv-tr-q">${icon('search')}<input id="lv-tr-q" placeholder="Buscar en la transcripción" value="${esc(q)}"></div>
+          <button class="lv-btn" id="lv-tr-edit" title="Editar texto">${icon(editing ? 'check' : 'pencil')}</button>
+          <button class="lv-btn" id="lv-tr-more" title="Descargar / guardar">${icon('download')}</button>
+        </div>
+        <small class="lv-tr-meta">${esc(t.engine === 'parakeet' ? 'Parakeet v3' : `Whisper ${t.model || ''}`)}${t.language ? ' · ' + esc(t.language) : ''} · ${t.segments.length} segmentos${t.edited ? ' · editada' : ''}</small>
+        <div class="lv-tr-list${editing ? ' editing' : ''}" id="lv-tr-list">${t.segments.map((s, i) => (!ql || s.text.toLowerCase().includes(ql)) ? `<div class="lv-seg" data-i="${i}" data-s="${s.start}"><time>${mmss(s.start)}</time><p${editing ? ' contenteditable="plaintext-only"' : ''}>${esc(s.text)}</p></div>` : '').join('') || '<p class="lib-muted">Sin coincidencias</p>'}</div>`;
+      $('#lv-tr-q').addEventListener('input', debounce((e) => { draw(e.target.value); $('#lv-tr-q').focus(); const v = $('#lv-tr-q'); v.setSelectionRange(v.value.length, v.value.length); }, 200));
+      $('#lv-tr-list').addEventListener('click', (e) => {
+        if (editing) return;
+        const seg = e.target.closest('.lv-seg');
+        const media = $('#lv-stage video, #lv-stage audio');
+        if (seg && media) { media.currentTime = Number(seg.dataset.s) + 0.01; media.play?.().catch(() => {}); }
+      });
+      $('#lv-tr-edit').addEventListener('click', async () => {
+        if (editing) {
+          el.querySelectorAll('.lv-seg').forEach((row) => { t.segments[Number(row.dataset.i)].text = row.querySelector('p').textContent.trim(); });
+          try {
+            await api(`/api/library/transcript/${it.id}`, { method: 'PUT', body: { segments: t.segments } });
+            t.edited = Date.now();
+            toast('Transcripción guardada', 'ok', '', 2000);
+          } catch (err) { errToast(err); }
+        }
+        editing = !editing;
+        draw(q);
+      });
+      $('#lv-tr-more').addEventListener('click', (e) => {
+        const r = e.currentTarget.getBoundingClientRect();
+        const ex = (fmt) => () => { location.href = `/api/library/transcript/${it.id}/export?fmt=${fmt}&dl=1`; };
+        showCtxMenu?.([
+          { icon: 'file-text', label: 'Descargar TXT', run: ex('txt') },
+          { icon: 'subtitles', label: 'Descargar SRT (subtítulos)', run: ex('srt') },
+          { icon: 'subtitles', label: 'Descargar VTT (web)', run: ex('vtt') },
+          { icon: 'file-type', label: 'Descargar Markdown', run: ex('md') },
+          { icon: 'braces', label: 'Descargar JSON', run: ex('json') },
+          { icon: 'copy', label: 'Copiar texto', run: async () => { const r2 = await fetch(`/api/library/transcript/${it.id}/export?fmt=txt`); const txt = await r2.text(); try { await navigator.clipboard.writeText(txt); toast('Texto copiado', 'ok', '', 2000); } catch { errToast(new Error('No se pudo copiar')); } } },
+          { icon: 'save', label: 'Guardar .srt y .txt junto al archivo', run: async () => {
+            try {
+              const r2 = await api(`/api/library/transcript/${it.id}/save`, { method: 'POST', body: { formats: ['srt', 'txt'] } });
+              toast(`Guardado: ${r2.saved.map(baseOf).join(', ')}`, 'ok', '', 3500);
+              load();
+            } catch (err) { errToast(err); }
+          } },
+          { icon: 'captions', label: 'Volver a transcribir…', run: () => openTranscribe([it.id]) },
+          { icon: 'trash-2', label: 'Eliminar transcripción', danger: true, run: async () => {
+            if (!(await confirmDialog('Eliminar transcripción', 'Se borra la transcripción guardada. El archivo no se toca.'))) return;
+            await api(`/api/library/transcript/${it.id}`, { method: 'DELETE' }).catch(errToast);
+            trCache.delete(it.tk);
+            it.tr = 0;
+            showItem(true);
+          } },
+        ], r.right - 250, r.bottom + 4);
+      });
+      refreshIcons();
+    };
+    draw();
+    // Follow playback.
+    const media = $('#lv-stage video, #lv-stage audio');
+    if (media && !media.dataset.trHook) {
+      media.dataset.trHook = '1';
+      let last = -1;
+      media.addEventListener('timeupdate', () => {
+        if (editing || vPanel !== 'tr') return;
+        const tt = media.currentTime;
+        const i = t.segments.findIndex((s) => tt >= s.start && tt < s.end + 0.25);
+        if (i === last) return;
+        last = i;
+        el.querySelectorAll('.lv-seg.on').forEach((x) => x.classList.remove('on'));
+        const row = el.querySelector(`.lv-seg[data-i="${i}"]`);
+        if (row) { row.classList.add('on'); row.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
+      });
+    }
+  }
+
   // ---------- Settings ----------
 
   function openSettings() {
@@ -1354,9 +2248,11 @@
       const nc = $('#nav-count-library');
       if (nc && s.count) nc.textContent = s.count.toLocaleString('es-AR');
     }).catch(() => {});
+    // Pick up jobs still running from before a reload.
+    pollJobs(1500);
   }
 
-  window.pmLibrary = { open: activateTab, share: openShareModal };
+  window.pmLibrary = { open: activateTab, share: openShareModal, tools: openTools, transcribe: openTranscribe };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();
 })();

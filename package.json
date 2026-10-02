@@ -8,6 +8,7 @@
     "build": "bun build src/index.ts --outdir dist --target bun"
   },
   "dependencies": {
+    "@jsquash/jpeg": "^1.6.0",
     "hono": "^4.4.8",
     "js-yaml": "^4.1.0",
     "lucide": "^1.48.0"

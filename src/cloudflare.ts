@@ -205,3 +205,21 @@ export async function syncCloudflaredRoutes(domains: DomainMapping[]): Promise<{
     return { success: false, error: String(error) };
   }
 }
+
+// Drop edge-cached copies under URL prefixes (e.g. "share.example.com/s/<id>/").
+// Prefix purge is available on every Cloudflare plan; failures are non-fatal.
+export async function purgeCachePrefixes(prefixes: string[]): Promise<{ success: boolean; error?: string }> {
+  if (!ZONE_ID || !prefixes.length) return { success: false, error: 'Cloudflare no configurado' };
+  try {
+    const response = await fetch(`https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/purge_cache`, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({ prefixes: prefixes.slice(0, 30) }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const data = (await response.json()) as { success: boolean; errors?: { message: string }[] };
+    return data.success ? { success: true } : { success: false, error: data.errors?.[0]?.message || 'purge falló' };
+  } catch (err) {
+    return { success: false, error: String(err) };
+  }
+}

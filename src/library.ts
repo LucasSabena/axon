@@ -1,11 +1,12 @@
 import type { Context, Hono, MiddlewareHandler } from 'hono';
 import { readdir, stat, readFile, writeFile, mkdir, realpath, rename as fsRename } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
-import { Readable } from 'node:stream';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import * as zlib from 'node:zlib';
 import * as path from 'node:path';
 import { hostExec, hostSpawn, hostSpawnInteractive, hostToContainer, containerToHost, HOST_USER } from './host';
+import { registerLibraryTools, hasTranscript, transcriptVtt, type LibCtx } from './library-tools';
+import { purgeCachePrefixes } from './cloudflare';
 
 // ---------------------------------------------------------------------------
 // BIBLIOTECA — media library over host folders + temporary public share links.
@@ -52,6 +53,8 @@ interface Share {
   views: number;
   downloads: number;
   lastAccess?: number;
+  msg?: string;           // note shown to the recipient
+  cdn?: boolean;          // let Cloudflare's edge cache previews/files (default on)
 }
 
 interface LibState {
@@ -130,6 +133,16 @@ const fmtSize = (b: number) => {
 const needsWeb = (it: { k: Kind; e: string; c?: string }) =>
   it.k === 'video' && (!WEB_VIDEO_EXT.has(it.e) || (!!it.c && HEVC.has(it.c.toLowerCase())));
 const viewKind = (it: { k: Kind; e: string }) => it.k === 'raw' || NEEDS_VIEW.has(it.e);
+// Browser-native but heavy photos also get a 2048px rendition for viewing —
+// the original is only fetched to zoom in or download.
+const bigImage = (it: { k: Kind; e: string; s: number; w?: number; h?: number }) =>
+  it.k === 'image' && !viewKind(it) && it.e !== 'gif' && it.e !== 'svg' &&
+  (it.s > 2_500_000 || (it.w || 0) > 2600 || (it.h || 0) > 2600);
+const hasView = (it: Item) => viewKind(it) || bigImage(it);
+// Videos worth a lighter streaming copy when shared (HEVC, odd containers,
+// or simply heavy: > 1080p or > ~12 Mbit/s).
+const heavyVideo = (it: Item) =>
+  it.k === 'video' && (needsWeb(it) || Math.min(it.w || 0, it.h || 0) > 1080 || (!!it.d && (it.s * 8) / it.d > 12e6));
 
 function fail(c: Context, status: number, error: string, extra?: Record<string, unknown>) {
   return c.json({ ok: false, error, ...extra }, status as never);
@@ -156,6 +169,7 @@ let stateTimer: ReturnType<typeof setTimeout> | null = null;
 let indexTimer: ReturnType<typeof setTimeout> | null = null;
 
 function saveState(): void {
+  rev++;
   if (stateTimer) return;
   stateTimer = setTimeout(async () => {
     stateTimer = null;
@@ -179,7 +193,12 @@ function saveIndex(): void {
   }, 5000);
 }
 
+// Bumped on every change that affects GET /api/library (ETag).
+let rev = 1;
+const touched = () => { rev++; };
+
 function putItem(it: Item): void {
+  rev++;
   items.set(it.id, it);
   byPath.set(it.p, it.id);
 }
@@ -187,6 +206,7 @@ function putItem(it: Item): void {
 function dropItem(id: string): void {
   const it = items.get(id);
   if (!it) return;
+  rev++;
   items.delete(id);
   if (byPath.get(it.p) === id) byPath.delete(it.p);
 }
@@ -519,6 +539,7 @@ function ensureThumb(it: Item, hi: boolean): Promise<boolean> {
   if (failSet.has(it.tk) || !renderScript(it)) return Promise.resolve(false);
   return enqueue(`t:${it.tk}`, async () => {
     const ok = await renderTo(it, 'thumbs', THUMB_SIZE);
+    rev++;
     if (ok) thumbSet.add(it.tk);
     else {
       failSet.add(it.tk);
@@ -597,6 +618,7 @@ async function runTranscode(it: Item, tc: Transcode): Promise<void> {
   } catch { /* stream closed */ }
   const code = await proc.exited;
   if (code === 0) {
+    rev++;
     webSet.add(it.tk);
     tc.state = 'done';
     tc.pct = 100;
@@ -655,15 +677,17 @@ async function sendFile(
   }
   const range = parseRange(c.req.header('range'), st.size);
   if (range === 'bad') return new Response(null, { status: 416, headers: { ...headers, 'Content-Range': `bytes */${st.size}` } });
+  // Bun.file bodies go out with sendfile(2) and a real Content-Length, so
+  // browsers show progress / time left and resume with Range requests
+  // (a ReadableStream body would be sent chunked, without a length).
+  const file = Bun.file(cp);
   if (range) {
-    const body = Readable.toWeb(createReadStream(cp, { start: range.start, end: range.end })) as ReadableStream;
-    return new Response(body, {
+    return new Response(file.slice(range.start, range.end + 1) as unknown as BodyInit, {
       status: 206,
       headers: { ...headers, 'Content-Range': `bytes ${range.start}-${range.end}/${st.size}`, 'Content-Length': String(range.end - range.start + 1) },
     });
   }
-  const body = Readable.toWeb(createReadStream(cp)) as ReadableStream;
-  return new Response(body, { headers: { ...headers, 'Content-Length': String(st.size) } });
+  return new Response(file as unknown as BodyInit, { headers: { ...headers, 'Content-Length': String(st.size) } });
 }
 
 async function sendCached(c: Context, hostPath: string, cache = 'private, max-age=31536000, immutable'): Promise<Response> {
@@ -921,6 +945,10 @@ async function shareFiles(s: Share): Promise<ShareFile[]> {
 
 function shareSummary(c: Context, s: Share) {
   const files = s.paths.map((p) => items.get(byPath.get(p) || '')).filter(Boolean) as Item[];
+  const preparing = files.filter((it) => {
+    const tc = transcodes.get(it.tk);
+    return tc && (tc.state === 'queued' || tc.state === 'running');
+  }).length;
   return {
     id: s.id,
     title: s.title,
@@ -930,6 +958,8 @@ function shareSummary(c: Context, s: Share) {
     alive: shareAlive(s),
     allowDownload: s.allowDownload,
     hasPassword: !!s.pass,
+    msg: s.msg || '',
+    cdn: s.cdn !== false && !s.pass,
     views: s.views,
     downloads: s.downloads,
     lastAccess: s.lastAccess,
@@ -937,7 +967,33 @@ function shareSummary(c: Context, s: Share) {
     size: files.reduce((a, f) => a + f.s, 0),
     ids: files.map((f) => f.id),
     missing: s.paths.length - files.length,
+    preparing,
   };
+}
+
+// Prepare what a visitor needs: thumbnails, light views and streaming copies.
+function prepareShare(list: Item[]): void {
+  for (const it of list) {
+    ensureThumb(it, true);
+    if (heavyVideo(it)) ensureWeb(it);
+    else if (bigImage(it) || viewKind(it)) ensureView(it).catch(() => {});
+  }
+}
+
+// Edge caching (Cloudflare) for public links: previews and files are cached
+// at the edge only while the link is alive, never for password links.
+function edgeCache(s: Share, browserMax: number): string {
+  if (s.pass || s.cdn === false) return `private, max-age=${Math.min(browserMax, 3600)}`;
+  const left = s.expires ? Math.floor((s.expires - Date.now()) / 1000) : 7 * 86400;
+  const edge = Math.max(0, Math.min(7 * 86400, left));
+  return edge > 120 ? `public, max-age=${Math.min(browserMax, edge)}, s-maxage=${edge}` : 'private, max-age=60';
+}
+
+async function purgeShare(c: Context, s: Share): Promise<void> {
+  if (s.cdn === false && !s.pass) return;
+  const host = shareBase(c).replace(/^https?:\/\//, '');
+  const r = await purgeCachePrefixes([`${host}/s/${s.id}/`]).catch((e) => ({ success: false, error: String(e) }));
+  if (!r.success) console.warn('[library] purge', s.id, r.error);
 }
 
 const unlockFails = new Map<string, number[]>();
@@ -955,49 +1011,99 @@ const fmtDate = (ms: number) =>
   new Date(ms).toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 
 const PUBLIC_CSS = `
-:root{--bg:#070b10;--panel:#0d141d;--el:#131c28;--bd:rgba(120,150,180,.18);--tx:#e6f3fb;--dim:#8ea2b5;--ac:#19dbef;--acx:#032027}
-*{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
-a{color:inherit}.wrap{max-width:1200px;margin:0 auto;padding:18px 18px 40px}
-header.top{display:flex;align-items:center;gap:12px;justify-content:space-between;padding:6px 0 18px;flex-wrap:wrap}
+:root{--bg:#070b10;--panel:#0d141d;--el:#131c28;--el2:#1a2533;--bd:rgba(120,150,180,.18);--tx:#e6f3fb;--dim:#8ea2b5;--ac:#19dbef;--acx:#032027;--ok:#4ade80}
+*{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased;-webkit-tap-highlight-color:transparent}
+a{color:inherit}button{font:inherit;color:inherit}
+.wrap{max-width:1280px;margin:0 auto;padding:16px 18px 110px}
+header.top{display:flex;align-items:center;gap:12px;justify-content:space-between;padding:4px 0 16px;flex-wrap:wrap}
 .brand{display:flex;align-items:center;gap:9px;font-weight:600;letter-spacing:.02em;color:var(--dim);font-size:13px;text-decoration:none}
 .brand img{width:22px;height:22px}
 .pill{font-size:12px;color:var(--dim);border:1px solid var(--bd);border-radius:99px;padding:4px 10px;background:var(--panel)}
-h1{font-size:clamp(20px,3vw,28px);margin:0 0 4px;font-weight:650;word-break:break-word}
+h1{font-size:clamp(21px,3vw,30px);margin:0 0 4px;font-weight:680;word-break:break-word;letter-spacing:-.01em}
 .sub{color:var(--dim);font-size:14px;margin:0}
-.btn{display:inline-flex;align-items:center;gap:8px;background:var(--ac);color:var(--acx);border:0;border-radius:10px;padding:11px 18px;font:inherit;font-weight:650;text-decoration:none;cursor:pointer;white-space:nowrap}
+.msg{margin:12px 0 0;padding:12px 14px;border-left:3px solid var(--ac);background:var(--panel);border-radius:0 10px 10px 0;white-space:pre-wrap;font-size:14px;max-width:760px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;background:var(--ac);color:var(--acx);border:0;border-radius:11px;padding:11px 18px;font-weight:650;text-decoration:none;cursor:pointer;white-space:nowrap;min-height:44px}
 .btn:hover{filter:brightness(1.08)}.btn.ghost{background:var(--el);color:var(--tx);border:1px solid var(--bd)}
-.btn svg{width:18px;height:18px}
-.head{display:flex;gap:16px;align-items:flex-end;justify-content:space-between;flex-wrap:wrap;margin-bottom:18px}
-.stage{background:#000;border:1px solid var(--bd);border-radius:14px;overflow:hidden;display:grid;place-items:center;min-height:200px;max-height:78vh}
+.btn svg,.ib svg{width:18px;height:18px;flex-shrink:0}
+.head{display:flex;gap:16px;align-items:flex-end;justify-content:space-between;flex-wrap:wrap;margin-bottom:16px}
+.acts{display:flex;gap:8px;flex-wrap:wrap}
+.bar{display:flex;align-items:center;gap:8px;margin:0 0 12px;color:var(--dim);font-size:13px;flex-wrap:wrap}
+.bar .sp{flex:1}
+.seg{display:inline-flex;border:1px solid var(--bd);border-radius:9px;overflow:hidden}
+.seg button{background:var(--el);border:0;padding:7px 10px;cursor:pointer;color:var(--dim);display:grid;place-items:center}
+.seg button.on{background:var(--el2);color:var(--tx)}
+.seg svg{width:16px;height:16px}
+.ib{background:var(--el);border:1px solid var(--bd);border-radius:9px;padding:7px 11px;cursor:pointer;font-size:13px;text-decoration:none;display:inline-flex;gap:6px;align-items:center;min-height:36px;white-space:nowrap}
+.ib:hover{background:var(--el2)}
+.stage{background:#000;border:1px solid var(--bd);border-radius:16px;overflow:hidden;display:grid;place-items:center;min-height:220px;max-height:78vh;position:relative}
 .stage img,.stage video{max-width:100%;max-height:78vh;display:block}
 .stage video{width:100%;background:#000}.stage iframe{width:100%;height:78vh;border:0;background:#fff}
 .stage audio{width:min(560px,92%);margin:20px auto}
+.stage .zoomable{cursor:zoom-in}
 .ficon{display:grid;place-items:center;gap:10px;padding:60px 20px;color:var(--dim);text-align:center}
 .ficon b{font-size:42px;color:var(--ac);font-weight:700;letter-spacing:.04em}
-.note{color:var(--dim);font-size:13px;margin-top:10px}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px}
-.tile{position:relative;aspect-ratio:1;border-radius:12px;overflow:hidden;background:var(--el);border:1px solid var(--bd);cursor:pointer;display:grid;place-items:center}
-.tile img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .25s}.tile:hover img{transform:scale(1.04)}
+.note{color:var(--dim);font-size:13px;margin-top:10px;min-height:1em}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}
+.tile{position:relative;border-radius:13px;overflow:hidden;background:var(--el);border:1px solid var(--bd);cursor:pointer;display:flex;flex-direction:column;user-select:none;-webkit-user-select:none}
+.tile .th{aspect-ratio:1;display:grid;place-items:center;overflow:hidden;background:var(--panel)}
+.tile img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .25s;background:var(--el)}
+@media(hover:hover){.tile:hover img{transform:scale(1.04)}}
 .tile .ext{font-weight:700;color:var(--ac);font-size:20px;letter-spacing:.05em}
-.tile .cap{position:absolute;inset:auto 0 0 0;padding:20px 9px 7px;background:linear-gradient(transparent,rgba(0,0,0,.75));font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tile .badge{position:absolute;top:7px;right:7px;background:rgba(0,0,0,.65);border-radius:6px;padding:2px 6px;font-size:11px;font-weight:600}
-.lb{position:fixed;inset:0;background:rgba(3,6,9,.96);display:none;flex-direction:column;z-index:10}
-.lb.on{display:flex}.lb-bar{display:flex;align-items:center;gap:10px;padding:10px 14px;color:var(--dim);font-size:14px}
-.lb-bar .nm{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--tx)}
-.lb-body{flex:1;min-height:0;display:grid;place-items:center;position:relative;padding:0 8px 12px}
-.lb-body img,.lb-body video{max-width:100%;max-height:100%;object-fit:contain}
-.lb-body video{width:100%;height:100%}.lb-body iframe{width:100%;height:100%;border:0;background:#fff;border-radius:8px}
-.nav{position:absolute;top:50%;transform:translateY(-50%);background:rgba(20,28,40,.7);border:1px solid var(--bd);color:var(--tx);width:46px;height:46px;border-radius:99px;cursor:pointer;font-size:22px;display:grid;place-items:center}
-.nav.prev{left:12px}.nav.next{right:12px}.ib{background:var(--el);border:1px solid var(--bd);color:var(--tx);border-radius:9px;padding:7px 11px;cursor:pointer;font:inherit;font-size:13px;text-decoration:none;display:inline-flex;gap:6px;align-items:center}
-.ib svg{width:16px;height:16px}
-.center{min-height:80vh;display:grid;place-items:center;text-align:center}
-.card{background:var(--panel);border:1px solid var(--bd);border-radius:16px;padding:28px;width:min(400px,100%)}
-input[type=password]{width:100%;background:var(--bg);border:1px solid var(--bd);color:var(--tx);border-radius:10px;padding:12px;font:inherit;margin:14px 0}
+.tile .cap{padding:7px 9px 8px;font-size:12.5px;line-height:1.3;display:flex;flex-direction:column;min-width:0}
+.tile .cap b{font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile .cap small{color:var(--dim);font-size:11.5px}
+.tile .badge{position:absolute;top:8px;left:8px;background:rgba(0,0,0,.66);color:#fff;border-radius:6px;padding:2px 7px;font-size:11px;font-weight:650;display:flex;gap:4px;align-items:center}
+.tile .ck{position:absolute;top:8px;right:8px;width:26px;height:26px;border-radius:99px;background:rgba(0,0,0,.45);box-shadow:inset 0 0 0 2px rgba(255,255,255,.9);display:none;place-items:center;color:var(--acx)}
+.tile .ck svg{width:15px;height:15px;opacity:0}
+.selecting .tile .ck{display:grid}
+.tile.sel{outline:3px solid var(--ac);outline-offset:-3px}.tile.sel .ck{background:var(--ac);box-shadow:none}.tile.sel .ck svg{opacity:1}
+.list{display:flex;flex-direction:column;gap:6px}
+.row{display:flex;align-items:center;gap:12px;padding:8px;border-radius:12px;background:var(--el);border:1px solid var(--bd);cursor:pointer}
+.row .rt{width:52px;height:52px;border-radius:9px;overflow:hidden;flex-shrink:0;display:grid;place-items:center;background:var(--panel);color:var(--ac);font-weight:700;font-size:12px}
+.row .rt img{width:100%;height:100%;object-fit:cover}
+.row .rm{flex:1;min-width:0}.row .rm b{display:block;font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.row .rm small{color:var(--dim);font-size:12px}
+.row.sel{outline:2px solid var(--ac);outline-offset:-2px}
+.selbar{position:fixed;left:50%;bottom:max(14px,env(safe-area-inset-bottom));transform:translate(-50%,140%);transition:transform .2s;z-index:5;display:flex;gap:8px;align-items:center;background:var(--el2);border:1px solid var(--bd);border-radius:16px;padding:8px 8px 8px 16px;box-shadow:0 14px 40px rgba(0,0,0,.5);max-width:calc(100% - 20px)}
+.selbar.on{transform:translate(-50%,0)}.selbar span{font-size:14px;white-space:nowrap}
+.lb{position:fixed;inset:0;background:#030609;display:none;flex-direction:column;z-index:10}
+.lb.on{display:flex}.lb-bar{display:flex;align-items:center;gap:8px;padding:10px 12px;padding-top:max(10px,env(safe-area-inset-top));color:var(--dim);font-size:14px}
+.lb-bar .nm{flex:1;min-width:0;display:flex;flex-direction:column}.lb-bar .nm b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--tx);font-weight:600}.lb-bar .nm small{font-size:12px}
+.lb-body{flex:1;min-height:0;display:grid;place-items:center;position:relative;overflow:hidden}
+.lb-body>img,.lb-body .zw img{max-width:100%;max-height:100%;object-fit:contain;user-select:none;-webkit-user-drag:none}
+.zw{width:100%;display:grid;place-items:center;transform-origin:0 0;will-change:transform}.lb-body .zw{height:100%;touch-action:none}
+.lb-body .ph{position:absolute;inset:0;margin:auto;filter:blur(10px);opacity:.55}
+.lb-body video{width:100%;height:100%}.lb-body iframe{width:100%;height:100%;border:0;background:#fff}
+.lb-body audio{width:min(560px,92%)}
+.nav{position:absolute;top:50%;transform:translateY(-50%);background:rgba(20,28,40,.72);border:1px solid var(--bd);width:48px;height:48px;border-radius:99px;cursor:pointer;font-size:24px;display:grid;place-items:center;z-index:2}
+.nav.prev{left:12px}.nav.next{right:12px}
+.spin{width:28px;height:28px;border:3px solid rgba(255,255,255,.15);border-top-color:var(--ac);border-radius:50%;animation:sp 1s linear infinite;position:absolute}
+@keyframes sp{to{transform:rotate(360deg)}}
+.center{min-height:80vh;display:grid;place-items:center;text-align:center;padding:20px}
+.card{background:var(--panel);border:1px solid var(--bd);border-radius:18px;padding:28px;width:min(400px,100%)}
+input[type=password]{width:100%;background:var(--bg);border:1px solid var(--bd);color:var(--tx);border-radius:10px;padding:13px;font:inherit;margin:14px 0;font-size:16px}
 .err{color:#f87171;font-size:13px}footer{color:var(--dim);font-size:12px;text-align:center;margin-top:28px;opacity:.75}
-@media(max-width:600px){.grid{grid-template-columns:repeat(3,1fr);gap:5px}.tile{border-radius:8px}.tile .cap{display:none}.nav{display:none}.head .btn{width:100%;justify-content:center}}
+.hide{display:none!important}
+@media(max-width:640px){
+ .wrap{padding:12px 10px 110px}.grid{grid-template-columns:repeat(3,1fr);gap:4px}.tile{border-radius:8px;border:0}.tile .cap{display:none}
+ .tile .badge{top:5px;left:5px;font-size:10px;padding:1px 5px}.tile .ck{top:5px;right:5px;width:24px;height:24px}
+ .nav{display:none}.head .acts{width:100%}.head .acts .btn{flex:1}.lb-bar .ib span{display:none}
+ .stage{border-radius:12px;max-height:70vh}.stage img,.stage video{max-height:70vh}
+}
 `;
 
-const DL_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+const SVG = (d: string) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+const DL_SVG = SVG('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>');
+const ICONS = {
+  dl: DL_SVG,
+  check: SVG('<polyline points="20 6 9 17 4 12"/>'),
+  grid: SVG('<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>'),
+  list: SVG('<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>'),
+  sel: SVG('<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>'),
+  x: SVG('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'),
+  play: SVG('<polygon points="6 3 20 12 6 21 6 3" fill="currentColor"/>'),
+  save: SVG('<path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/>'),
+  zoom: SVG('<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/>'),
+};
 
 function pageShell(title: string, body: string, head = ''): string {
   return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -1013,7 +1119,7 @@ function passwordPage(c: Context, s: Share, error = ''): Response {
   return c.html(pageShell('Contenido protegido', `<div class="center"><form class="card" method="post" action="/s/${s.id}/unlock">
 <h1 style="font-size:20px">🔒 ${esc(s.title)}</h1><p class="sub">Este contenido está protegido con contraseña.</p>
 <input type="password" name="password" placeholder="Contraseña" autofocus autocomplete="current-password" required>
-${error ? `<p class="err">${esc(error)}</p>` : ''}<button class="btn" style="width:100%;justify-content:center">Ver contenido</button></form></div>`), error ? 401 : 200);
+${error ? `<p class="err">${esc(error)}</p>` : ''}<button class="btn" style="width:100%">Ver contenido</button></form></div>`), error ? 401 : 200);
 }
 
 function fileDesc(f: ShareFile): string {
@@ -1024,83 +1130,162 @@ function fileDesc(f: ShareFile): string {
   return parts.join(' · ');
 }
 
+// Name segment for file URLs — gives the CDN an extension to key caching on
+// and download managers a sensible filename.
+const urlName = (n: string) => encodeURIComponent(n.replace(/[/\\?#%]/g, '_'));
+
 function sharePage(c: Context, s: Share, files: ShareFile[]): Response {
   const base = `/s/${s.id}`;
   const abs = shareUrl(c, s);
-  const data = files.map((f) => ({
-    i: f.i,
-    n: f.n,
-    e: f.e,
-    k: f.k,
-    s: f.s,
-    sz: fmtSize(f.s),
-    desc: fileDesc(f),
-    th: f.it ? thumbState(f.it) !== -1 : false,
-    v: f.it ? viewKind(f.it) : false,
-    w: f.it ? webSet.has(f.it.tk) : false,
-    nw: f.it ? needsWeb(f.it) : false,
-  }));
+  const data = files.map((f) => {
+    const it = f.it;
+    const dur = it?.d ? `${Math.floor(it.d / 60)}:${String(Math.round(it.d % 60)).padStart(2, '0')}` : '';
+    return {
+      i: f.i,
+      n: f.n,
+      u: urlName(f.n),
+      e: f.e,
+      k: f.k,
+      s: f.s,
+      sz: fmtSize(f.s),
+      desc: fileDesc(f),
+      dur,
+      v: it?.tk || '',
+      th: it ? thumbState(it) !== -1 : false,
+      vw: it ? hasView(it) : false,
+      w: it ? webSet.has(it.tk) : false,
+      nw: it ? needsWeb(it) && !webSet.has(it.tk) : false,
+      tr: it ? hasTranscript(it.tk) : false,
+    };
+  });
   const total = files.reduce((a, f) => a + f.s, 0);
   const expTxt = s.expires ? `Disponible hasta el ${fmtDate(s.expires)}` : 'Link sin vencimiento';
   const summary = files.length === 1 ? fileDesc(files[0]) : `${files.length} archivos · ${fmtSize(total)}`;
-  const first = data[0];
-  const og = !s.pass && first?.th
-    ? `<meta property="og:image" content="${esc(`${abs}/t/${first.i}`)}"><meta name="twitter:card" content="summary_large_image">`
+  const first = data.find((d) => d.th);
+  const og = !s.pass && first
+    ? `<meta property="og:image" content="${esc(`${abs}/t/${first.i}.jpg?v=${first.v}`)}"><meta name="twitter:card" content="summary_large_image">`
     : '';
   const head = `<meta property="og:title" content="${esc(s.title)}"><meta property="og:description" content="${esc(summary + ' · ' + expTxt)}">
 <meta property="og:type" content="website"><meta property="og:url" content="${esc(abs)}">${og}`;
-
-  const dlAll = s.allowDownload
-    ? files.length > 1
-      ? `<a class="btn" href="${base}/zip">${DL_SVG} Descargar todo (${fmtSize(total)})</a>`
-      : files.length ? `<a class="btn" href="${base}/f/${files[0].i}?dl=1">${DL_SVG} Descargar (${fmtSize(files[0].s)})</a>` : ''
-    : '';
   const single = files.length === 1;
+  const dlAll = s.allowDownload && files.length
+    ? single
+      ? `<a class="btn" href="${base}/f/${files[0].i}/${urlName(files[0].n)}?dl=1">${DL_SVG} Descargar · ${fmtSize(files[0].s)}</a>`
+      : `<a class="btn" href="${base}/zip">${DL_SVG} Descargar todo · ${fmtSize(total)}</a>`
+    : '';
+  const saveBtn = single && s.allowDownload && ['image', 'video'].includes(files[0].k) && files[0].s < 250e6
+    ? `<button class="btn ghost hide" id="save1">${ICONS.save} Guardar en el teléfono</button>` : '';
+  const multiBar = !single && files.length
+    ? `<div class="bar"><span>${files.length} archivos</span><span class="sp"></span>
+${s.allowDownload ? `<button class="ib" id="selt">${ICONS.sel}<span>Seleccionar</span></button>` : ''}
+<div class="seg"><button id="vg" title="Cuadrícula">${ICONS.grid}</button><button id="vl" title="Lista">${ICONS.list}</button></div></div>` : '';
   const body = `<div class="wrap">
 <header class="top"><span class="brand"><img src="/marca/favicon.svg" alt="">Compartido con Axon</span><span class="pill" id="exp">${esc(expTxt)}</span></header>
-<div class="head"><div><h1>${esc(s.title)}</h1><p class="sub">${esc(summary)}</p></div>${dlAll}</div>
-${files.length === 0 ? '<p class="sub">Los archivos de este link ya no están disponibles.</p>' : single ? '<div class="stage" id="single"></div><p class="note" id="snote"></p>' : '<div class="grid" id="grid"></div>'}
+<div class="head"><div><h1>${esc(s.title)}</h1><p class="sub">${esc(summary)}</p>${s.msg ? `<p class="msg">${esc(s.msg)}</p>` : ''}</div><div class="acts">${saveBtn}${dlAll}</div></div>
+${multiBar}
+${files.length === 0 ? '<p class="sub">Los archivos de este link ya no están disponibles.</p>' : single ? '<div class="stage" id="single"></div><p class="note" id="snote"></p>' : '<div id="items"></div>'}
 <footer>${esc(expTxt)}${s.allowDownload ? '' : ' · Solo visualización'}</footer></div>
-<div class="lb" id="lb"><div class="lb-bar"><span class="nm" id="lbn"></span><span id="lbc"></span><span id="lbd"></span><button class="ib" id="lbx">✕</button></div>
+<div class="selbar" id="selbar"><span id="seln"></span><button class="ib" id="selall">Todo</button><a class="btn" id="seldl" href="#">${DL_SVG} Descargar</a><button class="ib" id="selx" title="Cancelar">${ICONS.x}</button></div>
+<div class="lb" id="lb"><div class="lb-bar"><div class="nm"><b id="lbn"></b><small id="lbc"></small></div><span id="lbd"></span><button class="ib" id="lbx" title="Cerrar">${ICONS.x}</button></div>
 <div class="lb-body" id="lbb"></div><button class="nav prev" id="lbp">‹</button><button class="nav next" id="lbnx">›</button></div>
 <script>
 (function(){
 var B=${JSON.stringify(base)},F=${JSON.stringify(data).replace(/</g, '\\u003c')},DL=${s.allowDownload ? 1 : 0},EXP=${s.expires || 0};
-var DLI=${JSON.stringify(DL_SVG)};
+var IC=${JSON.stringify(ICONS).replace(/</g, '\\u003c')};
+function $(id){return document.getElementById(id)}
 function h(s){return String(s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
-function src(f){return B+'/f/'+f.i}
-function media(f,big){
+function fmt(b){if(b<1024)return b+' B';var u=['KB','MB','GB','TB'],v=b,i=-1;do{v/=1024;i++}while(v>=1024&&i<3);return (v<10?v.toFixed(1):Math.round(v))+' '+u[i]}
+function orig(f){return B+'/f/'+f.i+'/'+f.u}
+function thumb(f){return f.k==='vector'&&f.e==='svg'?orig(f):B+'/t/'+f.i+'.jpg?v='+f.v}
+function view(f){return f.vw?B+'/v/'+f.i+'.jpg?v='+f.v:orig(f)}
+function isImg(f){return f.k==='image'||f.k==='raw'||f.k==='vector'||(f.k==='design'&&f.vw)}
+function media(f){
   var k=f.k;
-  if((k==='image'||k==='raw'||k==='vector'||(k==='design'&&f.v))){var u=f.v?B+'/v/'+f.i:src(f);return '<img src="'+u+'" alt="'+h(f.n)+'">'}
-  if(k==='video'){var u=f.w?B+'/w/'+f.i:src(f);return '<video controls playsinline autoplay preload="metadata" '+(f.th?'poster="'+B+'/t/'+f.i+'" ':'')+(DL?'':'controlslist="nodownload" ')+'src="'+u+'" data-nw="'+(f.nw&&!f.w?1:0)+'"></video>'}
-  if(k==='audio')return (f.th?'<img src="'+B+'/t/'+f.i+'" style="max-height:50vh">':'')+'<audio controls autoplay src="'+src(f)+'"></audio>';
-  if(k==='pdf'||f.e==='txt'||f.e==='md'||f.e==='csv')return '<iframe src="'+src(f)+'"></iframe>';
-  return '<div class="ficon"><b>'+h((f.e||'file').toUpperCase())+'</b><span>'+h(f.n)+'</span><span>'+h(f.desc)+'</span>'+(DL?'<a class="btn" href="'+src(f)+'?dl=1">'+DLI+' Descargar</a>':'')+'</div>';
+  if(isImg(f))return '<div class="zw"><img class="main" src="'+view(f)+'" alt="'+h(f.n)+'" draggable="false"></div>';
+  if(k==='video'){var u=f.w?B+'/w/'+f.i+'.mp4?v='+f.v:orig(f);return '<video controls playsinline autoplay preload="metadata" crossorigin="anonymous" '+(f.th?'poster="'+thumb(f)+'" ':'')+(DL?'':'controlslist="nodownload" ')+'src="'+u+'">'+(f.tr?'<track kind="subtitles" label="Subtítulos" src="'+B+'/c/'+f.i+'.vtt?v='+f.v+'" default>':'')+'</video>'}
+  if(k==='audio')return (f.th?'<img src="'+thumb(f)+'" style="max-height:45vh;border-radius:12px">':'')+'<audio controls autoplay src="'+orig(f)+'"></audio>';
+  if(k==='pdf'||f.e==='txt'||f.e==='md'||f.e==='csv')return '<iframe src="'+orig(f)+'"></iframe>';
+  return '<div class="ficon"><b>'+h((f.e||'file').toUpperCase())+'</b><span>'+h(f.n)+'</span><span>'+h(f.desc)+'</span>'+(DL?'<a class="btn" href="'+orig(f)+'?dl=1">'+IC.dl+' Descargar</a>':'')+'</div>';
 }
-function hookVideo(root,noteEl){
+function hookVideo(root,noteEl,f){
   var v=root.querySelector('video');if(!v)return;
-  v.addEventListener('error',function(){var m='Tu navegador no puede reproducir este formato.'+(DL?' Descargalo para verlo.':'');if(noteEl)noteEl.textContent=m;else alert(m)});
-  if(v.dataset.nw==='1'&&noteEl)noteEl.textContent='Si el video no se reproduce, se está preparando una versión compatible — recargá en unos minutos.';
+  v.addEventListener('error',function(){var m='Tu navegador no puede reproducir este formato.'+(DL?' Descargalo para verlo.':'');if(noteEl)noteEl.textContent=m});
+  if(f.nw&&noteEl){noteEl.textContent='Preparando una versión compatible con tu navegador…';waitWeb(f,function(){var t=v.currentTime;v.src=B+'/w/'+f.i+'.mp4?v='+f.v;v.currentTime=t;noteEl.textContent=''})}
 }
-if(EXP){var el=document.getElementById('exp');var d=EXP-Date.now();if(d>0){var hrs=d/36e5;el.textContent=hrs<1?'Vence en '+Math.max(1,Math.round(d/6e4))+' min':hrs<48?'Vence en '+Math.round(hrs)+' h':'Vence en '+Math.round(hrs/24)+' días';el.title=${JSON.stringify(expTxt)}}}
-var single=document.getElementById('single');
-if(single){single.innerHTML=media(F[0],1);hookVideo(single,document.getElementById('snote'));if(F[0].k==='pdf'){document.getElementById('snote').innerHTML='¿No se ve? <a href="'+src(F[0])+'" target="_blank">Abrir el PDF</a>'}return}
-var g=document.getElementById('grid');if(!g)return;
-g.innerHTML=F.map(function(f,ix){
-  var dur='';
-  return '<div class="tile" data-ix="'+ix+'">'+(f.th?'<img loading="lazy" src="'+(f.k==='vector'&&f.e==='svg'?src(f):B+'/t/'+f.i)+'" alt="">':'<span class="ext">'+h((f.e||'?').toUpperCase())+'</span>')+(f.k==='video'?'<span class="badge">▶</span>':'')+'<span class="cap">'+h(f.n)+'</span></div>'
-}).join('');
-var lb=document.getElementById('lb'),lbb=document.getElementById('lbb'),cur=0;
-function show(ix){cur=(ix+F.length)%F.length;var f=F[cur];lbb.innerHTML=media(f,1);hookVideo(lbb,null);
-  document.getElementById('lbn').textContent=f.n;document.getElementById('lbc').textContent=(cur+1)+' / '+F.length+' · '+f.sz;
-  document.getElementById('lbd').innerHTML=DL?'<a class="ib" href="'+src(f)+'?dl=1">'+DLI+' Descargar</a>':'';
-  lb.classList.add('on');document.body.style.overflow='hidden'}
-function close(){lb.classList.remove('on');lbb.innerHTML='';document.body.style.overflow=''}
-g.addEventListener('click',function(e){var t=e.target.closest('.tile');if(t)show(+t.dataset.ix)});
-document.getElementById('lbx').onclick=close;document.getElementById('lbp').onclick=function(){show(cur-1)};document.getElementById('lbnx').onclick=function(){show(cur+1)};
+var waiting=null;
+function waitWeb(f,cb){clearTimeout(waiting);waiting=setTimeout(function(){fetch(B+'/st',{cache:'no-store'}).then(function(r){return r.json()}).then(function(d){var x=d.files&&d.files[f.i];if(x&&x.w){f.w=true;f.nw=false;cb()}else waitWeb(f,cb)}).catch(function(){waitWeb(f,cb)})},5000)}
+// Pinch / double-tap / wheel zoom; zooming in swaps the light view for the original.
+function zoomer(wrap,f,inline){
+  var img=wrap.querySelector('img'),s=1,x=0,y=0,pts={},pinch=null,pan=null,lastTap=0,full=false;
+  if(inline)wrap.style.touchAction='pan-y';
+  function apply(){wrap.style.transform='translate('+x+'px,'+y+'px) scale('+s+')';wrap.parentNode.style.cursor=s>1?'grab':'';if(inline)wrap.style.touchAction=s>1?'none':'pan-y'}
+  function setZoom(ns,cx,cy){var r=wrap.parentNode.getBoundingClientRect();cx-=r.left;cy-=r.top;ns=Math.max(1,Math.min(8,ns));x=cx-(cx-x)*(ns/s);y=cy-(cy-y)*(ns/s);s=ns;if(s===1){x=0;y=0}apply();if(s>1.3&&f.vw&&!full){full=true;var o=new Image();o.onload=function(){img.src=o.src};o.src=orig(f)}}
+  wrap.parentNode.addEventListener('wheel',function(e){if(inline&&s===1&&!e.ctrlKey)return;e.preventDefault();setZoom(s*(e.deltaY<0?1.2:1/1.2),e.clientX,e.clientY)},{passive:false});
+  wrap.addEventListener('dblclick',function(e){setZoom(s>1?1:2.5,e.clientX,e.clientY)});
+  wrap.addEventListener('pointerdown',function(e){pts[e.pointerId]={x:e.clientX,y:e.clientY};var k=Object.keys(pts);if(k.length===2){var a=pts[k[0]],b=pts[k[1]];pinch={d:Math.hypot(a.x-b.x,a.y-b.y),s:s}}else if(s>1){pan={x:e.clientX-x,y:e.clientY-y}}
+    var now=Date.now();if(e.pointerType==='touch'&&k.length===1){if(now-lastTap<300){setZoom(s>1?1:2.5,e.clientX,e.clientY);lastTap=0}else lastTap=now}});
+  wrap.addEventListener('pointermove',function(e){if(!pts[e.pointerId])return;pts[e.pointerId]={x:e.clientX,y:e.clientY};var k=Object.keys(pts);
+    if(pinch&&k.length===2){var a=pts[k[0]],b=pts[k[1]];setZoom(pinch.s*Math.hypot(a.x-b.x,a.y-b.y)/pinch.d,(a.x+b.x)/2,(a.y+b.y)/2)}
+    else if(pan){x=e.clientX-pan.x;y=e.clientY-pan.y;apply()}});
+  function up(e){delete pts[e.pointerId];if(Object.keys(pts).length<2)pinch=null;if(!Object.keys(pts).length)pan=null}
+  wrap.addEventListener('pointerup',up);wrap.addEventListener('pointercancel',up);
+  return {zoomed:function(){return s>1}};
+}
+if(EXP){var el=$('exp'),d=EXP-Date.now();if(d>0){var hrs=d/36e5;el.textContent=hrs<1?'Vence en '+Math.max(1,Math.round(d/6e4))+' min':hrs<48?'Vence en '+Math.round(hrs)+' h':'Vence en '+Math.round(hrs/24)+' días';el.title=${JSON.stringify(expTxt)}}}
+// Save to the phone's gallery through the share sheet (iOS / Android).
+function saveFile(f,btn){var t=btn.innerHTML;btn.textContent='Preparando…';fetch(orig(f)).then(function(r){return r.blob()}).then(function(b){var file=new File([b],f.n,{type:b.type});return navigator.share({files:[file]})}).catch(function(){}).then(function(){btn.innerHTML=t})}
+function canSave(f){try{return DL&&navigator.canShare&&/Mobi|Android|iPhone|iPad/.test(navigator.userAgent)&&navigator.canShare({files:[new File([''],f.n,{type:f.k==='video'?'video/mp4':'image/jpeg'})]})&&f.s<250e6}catch(e){return false}}
+var single=$('single');
+if(single){var f0=F[0];single.innerHTML=media(f0);var zw=single.querySelector('.zw');if(zw)zoomer(zw,f0,true);
+  hookVideo(single,$('snote'),f0);if(f0.k==='pdf')$('snote').innerHTML='¿No se ve? <a href="'+orig(f0)+'" target="_blank">Abrir el PDF</a>';
+  if(f0.vw&&isImg(f0))$('snote').textContent='Doble toque (o Ctrl + rueda) para hacer zoom en la resolución original.';
+  var sb=$('save1');if(sb&&canSave(f0)){sb.classList.remove('hide');sb.onclick=function(){saveFile(f0,sb)}}
+  return}
+var box=$('items');if(!box)return;
+var layout='grid';try{layout=localStorage.getItem('axs-layout')||(F.filter(function(f){return f.th}).length<F.length/2?'list':'grid')}catch(e){}
+var sel={},selecting=false;
+function selSize(){var n=0,b=0;for(var k in sel){n++;b+=F[k].s}return [n,b]}
+function syncSel(){var r=selSize();$('selbar').classList.toggle('on',selecting);$('seln').textContent=r[0]?r[0]+' · '+fmt(r[1]):'Tocá para elegir';
+  $('seldl').style.opacity=r[0]?1:.5;var ix=Object.keys(sel).map(function(k){return F[k].i});
+  $('seldl').href=r[0]===1?orig(F[Object.keys(sel)[0]])+'?dl=1':B+'/zip?i='+ix.join(',');
+  box.classList.toggle('selecting',selecting);[].forEach.call(box.querySelectorAll('[data-ix]'),function(t){t.classList.toggle('sel',!!sel[t.dataset.ix])})}
+function draw(){
+  if(layout==='list'){box.className='list';box.innerHTML=F.map(function(f,ix){return '<div class="row" data-ix="'+ix+'"><span class="rt">'+(f.th?'<img loading="lazy" src="'+thumb(f)+'" alt="">':h((f.e||'?').toUpperCase()))+'</span><span class="rm"><b>'+h(f.n)+'</b><small>'+h(f.desc)+'</small></span>'+(DL?'<a class="ib" href="'+orig(f)+'?dl=1" data-dl="1" title="Descargar">'+IC.dl+'</a>':'')+'</div>'}).join('')}
+  else{box.className='grid';box.innerHTML=F.map(function(f,ix){return '<div class="tile" data-ix="'+ix+'"><div class="th">'+(f.th?'<img loading="'+(ix<12?'eager':'lazy')+'" decoding="async" src="'+thumb(f)+'" alt="">':'<span class="ext">'+h((f.e||'?').toUpperCase())+'</span>')+'</div>'+(f.k==='video'?'<span class="badge">'+IC.play+(f.dur||'')+'</span>':'')+'<span class="ck">'+IC.check+'</span><span class="cap"><b>'+h(f.n)+'</b><small>'+h(f.sz)+'</small></span></div>'}).join('')}
+  if($('vg')){$('vg').classList.toggle('on',layout==='grid');$('vl').classList.toggle('on',layout==='list')}
+  syncSel();
+}
+draw();
+if($('vg')){$('vg').onclick=function(){layout='grid';try{localStorage.setItem('axs-layout',layout)}catch(e){}draw()};$('vl').onclick=function(){layout='list';try{localStorage.setItem('axs-layout',layout)}catch(e){}draw()}}
+if($('selt'))$('selt').onclick=function(){selecting=!selecting;if(!selecting)sel={};syncSel()};
+$('selx').onclick=function(){selecting=false;sel={};syncSel()};
+$('selall').onclick=function(){var all=Object.keys(sel).length===F.length;sel={};if(!all)F.forEach(function(f,ix){sel[ix]=1});syncSel()};
+$('seldl').addEventListener('click',function(e){if(!Object.keys(sel).length)e.preventDefault()});
+// Long-press starts selecting (mobile).
+var lpT=null,lpFired=false;
+box.addEventListener('pointerdown',function(e){var t=e.target.closest('[data-ix]');if(!t||!DL)return;lpFired=false;lpT=setTimeout(function(){lpFired=true;selecting=true;sel[t.dataset.ix]=1;syncSel();if(navigator.vibrate)navigator.vibrate(15)},480)});
+['pointerup','pointercancel','pointerleave','scroll'].forEach(function(ev){box.addEventListener(ev,function(){clearTimeout(lpT)},{passive:true})});
+box.addEventListener('contextmenu',function(e){if(e.target.closest('[data-ix]')&&DL)e.preventDefault()});
+box.addEventListener('click',function(e){if(e.target.closest('[data-dl]'))return;var t=e.target.closest('[data-ix]');if(!t)return;if(lpFired){lpFired=false;return}
+  var ix=t.dataset.ix;if(selecting){if(sel[ix])delete sel[ix];else sel[ix]=1;syncSel();return}show(+ix)});
+var lb=$('lb'),lbb=$('lbb'),cur=0,zm=null;
+function preload(ix){var f=F[(ix+F.length)%F.length];if(f&&isImg(f)){var i=new Image();i.src=view(f)}}
+function show(ix){cur=(ix+F.length)%F.length;var f=F[cur];
+  lbb.innerHTML=(isImg(f)&&f.th?'<img class="ph" src="'+thumb(f)+'" alt="">':'')+(isImg(f)?'<span class="spin"></span>':'')+media(f);zm=null;
+  var main=lbb.querySelector('img.main');if(main){var done=function(){var p=lbb.querySelector('.ph'),sp=lbb.querySelector('.spin');if(p)p.remove();if(sp)sp.remove()};if(main.complete)done();else{main.onload=done;main.onerror=done}zm=zoomer(lbb.querySelector('.zw'),f)}
+  hookVideo(lbb,null,f);
+  $('lbn').textContent=f.n;$('lbc').textContent=(cur+1)+' / '+F.length+' · '+f.desc;
+  var acts='';if(f.vw&&isImg(f))acts+='<a class="ib" href="'+orig(f)+'" target="_blank" title="Original">'+IC.zoom+'<span>Original</span></a> ';
+  if(DL){if(canSave(f))acts+='<button class="ib" id="lbs">'+IC.save+'<span>Guardar</span></button> ';acts+='<a class="ib" href="'+orig(f)+'?dl=1">'+IC.dl+'<span>Descargar</span></a>'}
+  $('lbd').innerHTML=acts;var sb=$('lbs');if(sb)sb.onclick=function(){saveFile(f,sb)};
+  lb.classList.add('on');document.body.style.overflow='hidden';preload(cur+1);preload(cur-1);
+  if(history.state!=='lb')history.pushState('lb','')}
+function close(back){lb.classList.remove('on');lbb.innerHTML='';document.body.style.overflow='';if(back!==false&&history.state==='lb')history.back()}
+window.addEventListener('popstate',function(){if(lb.classList.contains('on'))close(false)});
+$('lbx').onclick=function(){close()};$('lbp').onclick=function(){show(cur-1)};$('lbnx').onclick=function(){show(cur+1)};
 document.addEventListener('keydown',function(e){if(!lb.classList.contains('on'))return;if(e.key==='Escape')close();if(e.key==='ArrowLeft')show(cur-1);if(e.key==='ArrowRight')show(cur+1)});
-var sx=null;lbb.addEventListener('touchstart',function(e){sx=e.touches[0].clientX},{passive:true});
-lbb.addEventListener('touchend',function(e){if(sx===null)return;var dx=e.changedTouches[0].clientX-sx;if(Math.abs(dx)>60)show(cur+(dx<0?1:-1));sx=null});
+var sx=null,sy=null;lbb.addEventListener('touchstart',function(e){if(e.touches.length!==1||(zm&&zm.zoomed())){sx=null;return}sx=e.touches[0].clientX;sy=e.touches[0].clientY},{passive:true});
+lbb.addEventListener('touchend',function(e){if(sx===null)return;var dx=e.changedTouches[0].clientX-sx,dy=e.changedTouches[0].clientY-sy;if(Math.abs(dx)>60&&Math.abs(dx)>Math.abs(dy))show(cur+(dx<0?1:-1));else if(dy>120&&Math.abs(dy)>Math.abs(dx))close();sx=null});
 })();
 </script>`;
   return c.html(pageShell(s.title, body, head), 200, { 'X-Robots-Tag': 'noindex', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
@@ -1154,10 +1339,11 @@ async function appendToHost(part: string, body: ReadableStream<Uint8Array> | nul
   return code === 0 ? { ok: true, n } : { ok: false, n, error: err.trim() || `exit ${code}` };
 }
 
-async function addPathToIndex(hp: string): Promise<Item | null> {
+async function addPathToIndex(hp: string, carry?: Partial<Item>): Promise<Item | null> {
   const inUpload = under(hp, state.uploadRoot);
   const it = await statItem(hp, inUpload ? 'other' : undefined);
   if (!it) return null;
+  if (carry?.t) it.t = carry.t;
   putItem(it);
   saveIndex();
   if (['image', 'raw', 'video', 'audio'].includes(it.k)) exifBatch([it]).then(() => saveIndex()).catch(() => {});
@@ -1180,6 +1366,7 @@ function publicItem(it: Item) {
     id: it.id, p: it.p, n: it.n, e: it.e, k: it.k, s: it.s, m: it.m, tk: it.tk,
     t: it.t, w: it.w, h: it.h, d: it.d, c: it.c,
     th: thumbState(it), wv: webSet.has(it.tk) ? 1 : 0, nw: needsWeb(it) ? 1 : 0, vw: viewKind(it) ? 1 : 0,
+    bv: bigImage(it) ? 1 : 0, tr: hasTranscript(it.tk) ? 1 : 0,
   };
 }
 
@@ -1206,9 +1393,38 @@ export function registerLibraryRoutes(app: Hono): void {
     }
   }, 10 * 60_000).unref();
 
+  const ctx: LibCtx = {
+    ready: ensureReady,
+    item: (id) => items.get(id),
+    cacheHost: () => cacheHost,
+    libDir: LIB_DIR,
+    addPath: (hp, carry) => addPathToIndex(hp, carry as Partial<Item>),
+    dropPath: (hp) => { const id = byPath.get(hp); if (id) dropItem(id); saveIndex(); },
+    repath,
+    publicItem: (it) => publicItem(it as Item),
+    freeName,
+    trash: async (cookie, paths) => {
+      const res = await app.request('/api/files/trash', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie },
+        body: JSON.stringify({ paths }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { items?: { orig: string }[] };
+      return (data.items || []).map((x) => x.orig);
+    },
+    touched,
+  };
+  registerLibraryTools(app, ctx);
+
   // ---- Index ----
+  // The full index is a few MB for a big library — clients revalidate with
+  // If-None-Match and get a 304 unless something actually changed.
   app.get('/api/library', async (c) => {
     await ensureReady();
+    const etag = `W/"lib-${rev}-${scannedAt}-${scanning ? 1 : 0}"`;
+    if (c.req.header('if-none-match') === etag) return new Response(null, { status: 304, headers: { ETag: etag, 'Cache-Control': 'private, no-cache' } });
+    c.header('ETag', etag);
+    c.header('Cache-Control', 'private, no-cache');
     const favs = new Set(state.favorites);
     const list = [...items.values()];
     return c.json({
@@ -1294,7 +1510,7 @@ export function registerLibraryRoutes(app: Hono): void {
   app.get('/api/library/view/:id', async (c) => {
     const it = itemOr404(c);
     if (!it) return c.text('No encontrado', 404);
-    if (!viewKind(it)) return sendFile(c, it.p, { name: it.n });
+    if (!hasView(it)) return sendFile(c, it.p, { name: it.n });
     const ok = await ensureView(it);
     if (!ok) return c.text('No se pudo generar la vista', 415);
     return sendCached(c, `${cacheHost}/views/${it.tk}`);
@@ -1539,7 +1755,7 @@ export function registerLibraryRoutes(app: Hono): void {
 
   app.post('/api/library/shares', async (c) => {
     await ensureReady();
-    const b = await c.req.json<{ ids: string[]; title?: string; ttl?: number; allowDownload?: boolean; password?: string }>().catch(() => ({ ids: [] } as never));
+    const b = await c.req.json<{ ids: string[]; title?: string; ttl?: number; allowDownload?: boolean; password?: string; msg?: string; cdn?: boolean }>().catch(() => ({ ids: [] } as never));
     const list = (b.ids || []).map((id) => items.get(id)).filter(Boolean) as Item[];
     if (!list.length) return fail(c, 400, 'Elegí al menos un archivo');
     if (list.length > 2000) return fail(c, 400, 'Demasiados archivos para un solo link');
@@ -1553,45 +1769,68 @@ export function registerLibraryRoutes(app: Hono): void {
       allowDownload: b.allowDownload !== false,
       views: 0,
       downloads: 0,
+      cdn: b.cdn !== false,
     };
+    const msg = String(b.msg || '').trim().slice(0, 1000);
+    if (msg) s.msg = msg;
     if (b.password && String(b.password).length) s.pass = await Bun.password.hash(String(b.password));
     state.shares.push(s);
     saveState();
-    // Prepare what the visitor will need: thumbnails + H.264 versions.
-    for (const it of list) {
-      ensureThumb(it, true);
-      if (needsWeb(it)) ensureWeb(it);
-    }
+    prepareShare(list);
     return c.json({ ok: true, share: shareSummary(c, s) });
   });
 
   app.patch('/api/library/shares/:sid', async (c) => {
     const s = state.shares.find((x) => x.id === c.req.param('sid'));
     if (!s) return fail(c, 404, 'Link no encontrado');
-    const b = await c.req.json<{ title?: string; ttl?: number | null; extend?: number; allowDownload?: boolean; password?: string | null }>().catch(() => ({} as never));
+    const b = await c.req.json<{
+      title?: string; ttl?: number | null; extend?: number; allowDownload?: boolean; password?: string | null;
+      msg?: string; cdn?: boolean; add?: string[]; remove?: string[]; order?: string[];
+    }>().catch(() => ({} as never));
+    // Anything that changes who may see what invalidates the edge copies.
+    let purge = false;
     if (typeof b.title === 'string' && b.title.trim()) s.title = b.title.trim().slice(0, 120);
+    if (typeof b.msg === 'string') { const m = b.msg.trim().slice(0, 1000); if (m) s.msg = m; else delete s.msg; }
     if (b.ttl === null || b.ttl === 0) s.expires = null;
     else if (typeof b.ttl === 'number' && b.ttl > 0) s.expires = Date.now() + Math.min(b.ttl, 366 * 86400) * 1000;
     if (typeof b.extend === 'number' && b.extend > 0) s.expires = Math.max(Date.now(), s.expires ?? Date.now()) + b.extend * 1000;
-    if (typeof b.allowDownload === 'boolean') s.allowDownload = b.allowDownload;
-    if (b.password === null || b.password === '') delete s.pass;
-    else if (typeof b.password === 'string') s.pass = await Bun.password.hash(b.password);
+    if (typeof b.allowDownload === 'boolean' && b.allowDownload !== s.allowDownload) { s.allowDownload = b.allowDownload; purge = true; }
+    if (typeof b.cdn === 'boolean' && b.cdn !== (s.cdn !== false)) { s.cdn = b.cdn; purge = true; }
+    if (b.password === null || b.password === '') { if (s.pass) purge = true; delete s.pass; }
+    else if (typeof b.password === 'string') { s.pass = await Bun.password.hash(b.password); purge = true; }
+    const toPaths = (ids?: string[]) => (ids || []).map((id) => items.get(id)?.p).filter(Boolean) as string[];
+    if (b.remove?.length) {
+      // Removing shifts file indexes, so cached /f/<i> URLs must go.
+      const rm = new Set(toPaths(b.remove));
+      s.paths = s.paths.filter((p) => !rm.has(p));
+      purge = true;
+    }
+    if (b.add?.length) {
+      const added = toPaths(b.add).filter((p) => !s.paths.includes(p));
+      s.paths.push(...added);
+      prepareShare(added.map((p) => items.get(byPath.get(p) || '')).filter(Boolean) as Item[]);
+    }
+    if (!s.paths.length) return fail(c, 400, 'El link tiene que tener al menos un archivo');
     saveState();
+    if (purge) purgeShare(c, s);
     return c.json({ ok: true, share: shareSummary(c, s) });
   });
 
   app.delete('/api/library/shares/:sid', (c) => {
-    const before = state.shares.length;
-    state.shares = state.shares.filter((x) => x.id !== c.req.param('sid'));
+    const s = state.shares.find((x) => x.id === c.req.param('sid'));
+    if (!s) return c.json({ ok: false });
+    state.shares = state.shares.filter((x) => x !== s);
     saveState();
-    return c.json({ ok: before !== state.shares.length });
+    purgeShare(c, s);
+    return c.json({ ok: true });
   });
 
   app.post('/api/library/shares/cleanup', (c) => {
-    const before = state.shares.length;
+    const dead = state.shares.filter((s) => !shareAlive(s));
     state.shares = state.shares.filter(shareAlive);
     saveState();
-    return c.json({ ok: true, removed: before - state.shares.length });
+    for (const s of dead) purgeShare(c, s);
+    return c.json({ ok: true, removed: dead.length });
   });
 
   // ---- Public share pages (no cookie) ----
@@ -1604,13 +1843,29 @@ export function registerLibraryRoutes(app: Hono): void {
     return s;
   };
 
+  // "3", "3.jpg" → 3
+  const idxOf = (c: Context) => {
+    const m = /^(\d+)(?:\.[a-z0-9]+)?$/i.exec(c.req.param('i') || '');
+    return m ? Number(m[1]) : -1;
+  };
+
   const fileOf = async (c: Context, s: Share): Promise<ShareFile | null> => {
-    const i = Number(c.req.param('i'));
+    const i = idxOf(c);
     if (!Number.isInteger(i) || i < 0 || i >= s.paths.length) return null;
     const p = s.paths[i];
     const id = byPath.get(p);
     const it = (id ? items.get(id) : undefined) || (await statItem(p, 'other')) || undefined;
     return it ? { i, p, n: it.n, e: it.e, k: it.k, s: it.s, it } : null;
+  };
+
+  // Common guard for every public asset route.
+  const shareAsset = async (c: Context): Promise<{ s: Share; f: ShareFile } | Response> => {
+    const s = await getShare(c);
+    if (s instanceof Response) return s;
+    if (!isUnlocked(c, s)) return c.text('Protegido', 401);
+    const f = await fileOf(c, s);
+    if (!f) return c.text('No encontrado', 404);
+    return { s, f };
   };
 
   app.get('/s/:sid', async (c) => {
@@ -1646,12 +1901,23 @@ export function registerLibraryRoutes(app: Hono): void {
     return c.redirect(`/s/${s.id}`, 303);
   });
 
-  app.get('/s/:sid/f/:i', async (c) => {
+  // Live state for the page (streaming copies finishing while it's open).
+  app.get('/s/:sid/st', async (c) => {
     const s = await getShare(c);
     if (s instanceof Response) return s;
-    if (!isUnlocked(c, s)) return c.text('Protegido', 401);
-    const f = await fileOf(c, s);
-    if (!f) return c.text('No encontrado', 404);
+    if (!isUnlocked(c, s)) return c.json({ ok: false }, 401);
+    const files: Record<number, { w: boolean; pct: number }> = {};
+    s.paths.forEach((p, i) => {
+      const it = items.get(byPath.get(p) || '');
+      if (it?.k === 'video') files[i] = { w: webSet.has(it.tk), pct: transcodes.get(it.tk)?.pct || 0 };
+    });
+    return c.json({ ok: true, files }, 200, { 'Cache-Control': 'no-store' });
+  });
+
+  const original = async (c: Context) => {
+    const r = await shareAsset(c);
+    if (r instanceof Response) return r;
+    const { s, f } = r;
     const dl = c.req.query('dl') === '1';
     if (dl && !s.allowDownload) return c.text('La descarga está deshabilitada para este link', 403);
     if (dl && !/^bytes=[1-9]/.test(c.req.header('range') || '')) {
@@ -1659,49 +1925,66 @@ export function registerLibraryRoutes(app: Hono): void {
       s.lastAccess = Date.now();
       saveState();
     }
-    return sendFile(c, f.p, { name: f.n, download: dl, cache: 'private, no-store' });
-  });
+    return sendFile(c, f.p, { name: f.n, download: dl, cache: edgeCache(s, 3600) });
+  };
+  app.get('/s/:sid/f/:i', original);
+  app.get('/s/:sid/f/:i/:name', original);
 
   app.get('/s/:sid/t/:i', async (c) => {
-    const s = await getShare(c);
-    if (s instanceof Response) return s;
-    if (!isUnlocked(c, s)) return c.text('Protegido', 401);
-    const f = await fileOf(c, s);
-    if (!f?.it) return c.text('No encontrado', 404);
-    if (f.it.k === 'vector' && f.it.e === 'svg') return sendFile(c, f.p, { name: f.n });
+    const r = await shareAsset(c);
+    if (r instanceof Response) return r;
+    const { s, f } = r;
+    if (!f.it) return c.text('No encontrado', 404);
+    if (f.it.k === 'vector' && f.it.e === 'svg') return sendFile(c, f.p, { name: f.n, cache: edgeCache(s, 86400) });
     const ok = await Promise.race([ensureThumb(f.it, true), Bun.sleep(45_000).then(() => false)]);
     if (!ok) return c.text('Sin miniatura', 404);
-    return sendCached(c, `${cacheHost}/thumbs/${f.it.tk}`, 'public, max-age=3600');
+    return sendCached(c, `${cacheHost}/thumbs/${f.it.tk}`, edgeCache(s, 7 * 86400));
   });
 
   app.get('/s/:sid/v/:i', async (c) => {
-    const s = await getShare(c);
-    if (s instanceof Response) return s;
-    if (!isUnlocked(c, s)) return c.text('Protegido', 401);
-    const f = await fileOf(c, s);
-    if (!f?.it) return c.text('No encontrado', 404);
-    if (!viewKind(f.it)) return sendFile(c, f.p, { name: f.n });
-    if (!(await ensureView(f.it))) return c.text('No se pudo generar la vista', 415);
-    return sendCached(c, `${cacheHost}/views/${f.it.tk}`, 'private, max-age=3600');
+    const r = await shareAsset(c);
+    if (r instanceof Response) return r;
+    const { s, f } = r;
+    if (!f.it) return c.text('No encontrado', 404);
+    if (!hasView(f.it)) return sendFile(c, f.p, { name: f.n, cache: edgeCache(s, 86400) });
+    if (!(await ensureView(f.it))) return sendFile(c, f.p, { name: f.n, cache: edgeCache(s, 3600) });
+    return sendCached(c, `${cacheHost}/views/${f.it.tk}`, edgeCache(s, 7 * 86400));
   });
 
   app.get('/s/:sid/w/:i', async (c) => {
-    const s = await getShare(c);
-    if (s instanceof Response) return s;
-    if (!isUnlocked(c, s)) return c.text('Protegido', 401);
-    const f = await fileOf(c, s);
-    if (!f?.it || !webSet.has(f.it.tk)) return c.text('No encontrado', 404);
-    return sendFile(c, `${cacheHost}/web/${f.it.tk}.mp4`, { name: f.n.replace(/\.[^.]+$/, '') + '.mp4', mime: 'video/mp4', cache: 'private, no-store' });
+    const r = await shareAsset(c);
+    if (r instanceof Response) return r;
+    const { s, f } = r;
+    if (!f.it || !webSet.has(f.it.tk)) return c.text('No encontrado', 404);
+    return sendFile(c, `${cacheHost}/web/${f.it.tk}.mp4`, { name: f.n.replace(/\.[^.]+$/, '') + '.mp4', mime: 'video/mp4', cache: edgeCache(s, 86400) });
   });
 
+  // Subtitles from the transcript (if one was made).
+  app.get('/s/:sid/c/:i', async (c) => {
+    const r = await shareAsset(c);
+    if (r instanceof Response) return r;
+    const vtt = r.f.it ? await transcriptVtt(r.f.it.tk) : null;
+    if (!vtt) return c.text('Sin subtítulos', 404);
+    return c.body(vtt, 200, { 'Content-Type': 'text/vtt; charset=utf-8', 'Cache-Control': edgeCache(r.s, 3600) });
+  });
+
+  // ZIP of everything, or of a subset: /zip?i=0,3,7
   app.get('/s/:sid/zip', async (c) => {
     const s = await getShare(c);
     if (s instanceof Response) return s;
     if (!isUnlocked(c, s)) return c.text('Protegido', 401);
     if (!s.allowDownload) return c.text('La descarga está deshabilitada para este link', 403);
+    let paths = s.paths;
+    const pick = String(c.req.query('i') || '');
+    if (pick) {
+      const want = new Set(pick.split(',').map(Number).filter((n) => Number.isInteger(n) && n >= 0 && n < s.paths.length));
+      paths = s.paths.filter((_, i) => want.has(i));
+      if (!paths.length) return c.text('Nada seleccionado', 400);
+    }
     s.downloads++;
     s.lastAccess = Date.now();
     saveState();
-    return zipResponse(s.paths, `${sanitizeName(s.title) || 'compartido'}.zip`);
+    const name = sanitizeName(s.title) || 'compartido';
+    return zipResponse(paths, `${name}${pick ? ` (${paths.length})` : ''}.zip`);
   });
 }
