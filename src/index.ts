@@ -1,7 +1,9 @@
 import { Hono } from 'hono';
 import { serveStatic } from 'hono/bun';
-import { readFile } from 'fs/promises';
+import { compress } from 'hono/compress';
+import { readFile, writeFile, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
+import * as path from 'path';
 import {
   requireAuth,
   verifyPassword,
@@ -24,7 +26,9 @@ import {
 } from './ports';
 import { getJob, listJobs, runJob } from './jobs';
 import {
-  detectPrograms,
+  getPrograms,
+  invalidateProgramsCache,
+  warmProgramsCache,
   installedPackagesSummary,
   listDesktopApps,
   programById,
@@ -61,6 +65,7 @@ import {
 } from './cloudflare';
 import type { DomainMapping, DomainStatus, Project } from './types';
 import { notify, setNotifyUrl } from './notify';
+import { generateTotpSecret, verifyTotp, totpUri } from './totp';
 import { loadHeartbeats, recordHeartbeat, lastState, allHeartbeats, uptimePct, pruneHeartbeats } from './heartbeats';
 import { registerFilesRoutes } from './files';
 import { registerEventRoutes, loadEvents, recordEvent } from './events';
@@ -70,11 +75,12 @@ import { parseLogsSrc, startLogsSocket, stopLogsSocket, registerLogsRoutes } fro
 import type { LogsWsData } from './logs';
 import { registerMetricsRoutes } from './metrics';
 import { registerDropRoutes, startDropSweeper } from './drop';
+import { registerLibraryRoutes, libraryHostGuard } from './library';
 import { registerSessionRoutes, recordSession, sessionIdForToken, isRevoked, touchSession, revokeSession } from './sessions';
 import { registerOpsRoutes } from './ops';
 import { registerDockerOpsRoutes } from './docker-ops';
 import { registerComposeRoutes } from './compose';
-import { registerAgentRoutes } from './agents';
+import { registerAgentRoutes, listAgents, invalidateAgentsCache } from './agents';
 
 const PORT = parseInt(process.env.PORT || '3457', 10);
 const BASE_DOMAIN = process.env.BASE_DOMAIN || 'example.com';
@@ -129,6 +135,13 @@ heartbeatTick().catch(() => {});
 
 const app = new Hono();
 
+// gzip text responses (JS/CSS/HTML/JSON ~500KB → ~150KB). Skips
+// already-encoded bodies, downloads, and SSE (excluded by content-type).
+app.use(compress());
+
+// Dedicated share hostname only serves the public /s/* pages.
+app.use('*', libraryHostGuard);
+
 function fail(c: any, status: number, error: string, extra?: Record<string, unknown>) {
   return c.json({ ok: false, error, ...extra }, status);
 }
@@ -139,10 +152,114 @@ function escapeRegExp(str: string): string {
 
 // ---------- Auth ----------
 
+// Brute-force guard: per-source failure counters with a lockout, plus a global
+// counter so rotating IPs can't bypass it. In-memory is fine — an attacker
+// can't force a restart to reset it. Failures feed the event log; lockouts
+// push a notification via notify.ts.
+const LOGIN_WINDOW_MS = 10 * 60 * 1000;
+const LOGIN_MAX_FAILS = 5;
+const LOGIN_LOCKOUT_MS = 15 * 60 * 1000;
+const GLOBAL_MAX_FAILS = 30;
+const GLOBAL_LOCKOUT_MS = 10 * 60 * 1000;
+const LOGIN_GUARD_MAX_ENTRIES = 2000;
+
+interface LoginGuardState { fails: number[]; lockedUntil: number }
+const loginGuard = new Map<string, LoginGuardState>();
+const globalLoginFails: number[] = [];
+let globalLockUntil = 0;
+
+function clientIp(c: any): string {
+  return (
+    c.req.header('cf-connecting-ip') ||
+    c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ||
+    'unknown'
+  );
+}
+
+function loginLockRemaining(c: any): number {
+  const now = Date.now();
+  if (globalLockUntil > now) return globalLockUntil - now;
+  const st = loginGuard.get(clientIp(c));
+  if (st && st.lockedUntil > now) return st.lockedUntil - now;
+  return 0;
+}
+
+function noteLoginFail(c: any, username: string): void {
+  const ip = clientIp(c);
+  const now = Date.now();
+  const cut = now - LOGIN_WINDOW_MS;
+
+  let st = loginGuard.get(ip);
+  if (!st) {
+    st = { fails: [], lockedUntil: 0 };
+    loginGuard.set(ip, st);
+  }
+  st.fails = st.fails.filter((t) => t > cut);
+  st.fails.push(now);
+
+  for (let i = globalLoginFails.length - 1; i >= 0; i--) {
+    if (globalLoginFails[i] <= cut) globalLoginFails.splice(i, 1);
+  }
+  globalLoginFails.push(now);
+
+  recordEvent('auth', `Login fallido — ${username || 'desconocido'} desde ${ip}`);
+
+  if (st.fails.length >= LOGIN_MAX_FAILS && st.lockedUntil <= now) {
+    st.lockedUntil = now + LOGIN_LOCKOUT_MS;
+    recordEvent('auth', `Login bloqueado — ${ip} superó ${LOGIN_MAX_FAILS} intentos fallidos`);
+    notify(
+      'Posible brute force — login bloqueado',
+      `${st.fails.length} intentos fallidos desde ${ip}. Bloqueado por ${LOGIN_LOCKOUT_MS / 60000} min.`,
+      4
+    ).catch(() => {});
+  }
+  if (globalLoginFails.length >= GLOBAL_MAX_FAILS && globalLockUntil <= now) {
+    globalLockUntil = now + GLOBAL_LOCKOUT_MS;
+    recordEvent('auth', `Bloqueo global de login — ${globalLoginFails.length} intentos en 10 min (posible rotación de IPs)`);
+    notify(
+      'Brute force distribuido — logins pausados',
+      `${globalLoginFails.length} intentos fallidos en 10 min desde varias IPs. Todos los logins bloqueados por ${GLOBAL_LOCKOUT_MS / 60000} min.`,
+      5
+    ).catch(() => {});
+  }
+
+  // Cap the map so IP rotation can't grow memory unboundedly.
+  if (loginGuard.size > LOGIN_GUARD_MAX_ENTRIES) {
+    for (const [k, v] of loginGuard) {
+      if (v.lockedUntil <= now && (v.fails.length === 0 || v.fails[v.fails.length - 1] <= cut)) loginGuard.delete(k);
+    }
+    if (loginGuard.size > LOGIN_GUARD_MAX_ENTRIES) {
+      loginGuard.delete(loginGuard.keys().next().value as string);
+    }
+  }
+}
+
 app.post('/api/login', async (c) => {
-  const { username, password } = await c.req.json<{ username: string; password: string }>().catch(() => ({ username: '', password: '' }));
-  const valid = username === config.auth.username && (await verifyPassword(password, config.auth.passwordHash));
-  if (!valid) return fail(c, 401, 'Credenciales inválidas');
+  const lockMs = loginLockRemaining(c);
+  if (lockMs > 0) {
+    const sec = Math.ceil(lockMs / 1000);
+    c.header('Retry-After', String(sec));
+    return fail(c, 429, `Demasiados intentos fallidos — probá en ${Math.max(1, Math.ceil(sec / 60))} min`);
+  }
+  const { username, password, code } = await c.req.json<{ username: string; password: string; code?: string }>().catch(() => ({ username: '', password: '' }));
+  // Always run PBKDF2 — short-circuiting on a wrong username would leak via
+  // timing which usernames exist.
+  const passOk = await verifyPassword(password, config.auth.passwordHash);
+  let valid = passOk && username === config.auth.username;
+  if (valid && config.auth.totpSecret) {
+    // Second factor — a wrong/missing code counts as a failed login too, so
+    // an attacker holding the password can't grind 6-digit codes freely.
+    valid = verifyTotp(config.auth.totpSecret, code || '');
+  }
+  if (!valid) {
+    noteLoginFail(c, username);
+    const msg = passOk && username === config.auth.username && config.auth.totpSecret
+      ? 'Código de verificación inválido'
+      : 'Credenciales inválidas';
+    return fail(c, 401, msg);
+  }
+  loginGuard.delete(clientIp(c));
+  recordEvent('auth', `Login exitoso desde ${clientIp(c)}`);
   const token = await createSession(username);
   setSessionCookie(c, token);
   recordSession(token, username, c.req.header('user-agent') || '');
@@ -152,7 +269,7 @@ app.post('/api/login', async (c) => {
 app.post('/api/logout', async (c) => {
   // Revoke server-side too — the cookie is stateless, so clearing it alone
   // leaves the signed token valid for the rest of its TTL.
-  const token = c.req.header('cookie')?.match(/(?:^|;\s*)ports_session=([^;]+)/)?.[1];
+  const token = c.req.header('cookie')?.match(/(?:^|;\s*)axon_session=([^;]+)/)?.[1];
   if (token) revokeSession(token);
   clearSessionCookie(c);
   return c.json({ ok: true });
@@ -160,17 +277,60 @@ app.post('/api/logout', async (c) => {
 
 app.get('/api/me', async (c) => {
   const session = await getSession(c);
-  if (!session) return c.json({ authenticated: false, username: null });
+  if (!session) return c.json({ authenticated: false, username: null, totpEnabled: !!config.auth.totpSecret });
   // A revoked token must report as logged out, not half-authenticated.
-  const token = c.req.header('cookie')?.match(/(?:^|;\s*)ports_session=([^;]+)/)?.[1];
+  const token = c.req.header('cookie')?.match(/(?:^|;\s*)axon_session=([^;]+)/)?.[1];
   if (token && isRevoked(sessionIdForToken(token))) {
-    return c.json({ authenticated: false, username: null });
+    return c.json({ authenticated: false, username: null, totpEnabled: !!config.auth.totpSecret });
   }
-  return c.json({ authenticated: true, username: session.username });
+  return c.json({ authenticated: true, username: session.username, totpEnabled: !!config.auth.totpSecret });
 });
 
 app.use('/api/*', requireAuth);
 app.use('/p/*', requireAuth);
+
+// ---------- TOTP (2FA) management — authed ----------
+// Enrollment: setup issues a pending secret held in memory (10 min, keyed by
+// the logged-in user); it only becomes config.auth.totpSecret once the user
+// confirms with a valid code — can't lock yourself out with a bad scan.
+const totpPending = new Map<string, { secret: string; exp: number }>();
+const TOTP_PENDING_TTL_MS = 10 * 60 * 1000;
+
+app.post('/api/auth/totp/setup', (c) => {
+  const user = String(c.get('user') || 'user');
+  const secret = generateTotpSecret();
+  totpPending.set(user, { secret, exp: Date.now() + TOTP_PENDING_TTL_MS });
+  return c.json({ ok: true, secret, uri: totpUri(secret, user) });
+});
+
+app.post('/api/auth/totp/enable', async (c) => {
+  const user = String(c.get('user') || 'user');
+  const { code } = await c.req.json<{ code?: string }>().catch(() => ({ code: '' }));
+  const pending = totpPending.get(user);
+  if (!pending || pending.exp < Date.now()) {
+    totpPending.delete(user);
+    return fail(c, 400, 'El setup venció — generá un QR nuevo');
+  }
+  if (!verifyTotp(pending.secret, code || '')) return fail(c, 401, 'Código inválido');
+  config.auth.totpSecret = pending.secret;
+  totpPending.delete(user);
+  await saveConfig(config);
+  recordEvent('auth', '2FA activado');
+  notify('2FA activado', 'Los próximos logins van a pedir el código del autenticador.', 3).catch(() => {});
+  return c.json({ ok: true });
+});
+
+app.post('/api/auth/totp/disable', async (c) => {
+  const user = String(c.get('user') || 'user');
+  const { code } = await c.req.json<{ code?: string }>().catch(() => ({ code: '' }));
+  if (!config.auth.totpSecret) return fail(c, 400, '2FA no está activado');
+  if (!verifyTotp(config.auth.totpSecret, code || '')) return fail(c, 401, 'Código inválido');
+  delete config.auth.totpSecret;
+  await saveConfig(config);
+  recordEvent('auth', `2FA desactivado por ${user}`);
+  notify('2FA desactivado', 'El login vuelve a pedir solo usuario y contraseña.', 4).catch(() => {});
+  return c.json({ ok: true });
+});
 
 // ---------- Device pairing (QR login) ----------
 // Short-lived one-time tokens issued by an authed session; scanning the QR
@@ -302,7 +462,7 @@ app.get('/api/ports/health', async (c) => {
 // ---------- Programs / updater ----------
 
 app.get('/api/programs', async (c) => {
-  const programs = await detectPrograms();
+  const programs = await getPrograms(c.req.query('fresh') === '1');
   return c.json({ ok: true, programs });
 });
 
@@ -331,6 +491,10 @@ app.post('/api/programs/:id/update', async (c) => {
   if (!def) return fail(c, 404, 'Programa desconocido');
   const running = listJobs().find((j) => j.status === 'running' && j.title === def.name);
   if (running) return c.json({ ok: true, job: running, already: true });
+  // Versions/pending counts change under the job — drop the cached snapshots
+  // so the next read recomputes instead of serving pre-update state.
+  invalidateProgramsCache();
+  invalidateAgentsCache();
   const job = runJob(def.name, def.steps.map((s) => ({ ...s, group: def.name })));
   return c.json({ ok: true, job });
 });
@@ -350,13 +514,15 @@ app.post('/api/programs/:id/logout', async (c) => {
 });
 
 app.post('/api/programs/update-all', async (c) => {
-  const programs = await detectPrograms();
+  const programs = await getPrograms();
   // Only programs with a known pending update — don't reinstall everything.
   const pending = programs.filter((p) => p.installed && (p.latestVersion || p.pendingUpdates));
   const steps = pending.flatMap((p) =>
     (programById(p.id)?.steps || []).map((s) => ({ ...s, label: `${p.name} — ${s.label}`, group: p.name }))
   );
   if (!steps.length) return fail(c, 400, 'Todo está al día — no hay actualizaciones pendientes');
+  invalidateProgramsCache();
+  invalidateAgentsCache();
   const job = runJob('Actualización completa', steps);
   return c.json({ ok: true, job });
 });
@@ -381,6 +547,111 @@ app.get('/api/icons/:name', async (c) => {
   } catch {
     return fail(c, 404, 'Icono no encontrado');
   }
+});
+
+// ---------- Brand icon resolver ----------
+// Generic logo lookup so arbitrary installed tools get an icon without us
+// vendoring one per product. Order per candidate slug:
+//   1. public/icons/<slug>.svg (vendored, always wins)
+//   2. data/icons/<slug>.svg (previously fetched from the CDN)
+//   3. host icon theme via resolveIcon() (.desktop Icon= names, e.g.
+//      'com.visualstudio.code' → VS Code's pixmap)
+//   4. cdn.simpleicons.org/<slug> → cached into data/icons/ for offline use
+//   5. generated initials tile (never 404 — cards always render something)
+
+const ICON_CACHE_DIR = path.join(
+  path.dirname(process.env.CONFIG_PATH || '/app/data/config.json'),
+  'icons'
+);
+
+// key → extra slugs to try first (name differs from the brand slug)
+const BRAND_ALIASES: Record<string, string[]> = {
+  'claude-code': ['claudecode', 'claude'],
+  'claude-desktop': ['claude'],
+  codex: ['openai'],
+  gemini: ['googlegemini'],
+  copilot: ['githubcopilot'],
+  vscode: ['com.visualstudio.code', 'code'],
+  zed: ['zedindustries'],
+  kimi: ['kimi'],
+  'kimi-code': ['kimi'],
+  node: ['nodedotjs'],
+};
+
+// Slugs where cdn.simpleicons.org resolves to a *different* brand's logo
+// (fashion house Hermès, AMP the web framework, π …) — skip the CDN for these.
+const WRONG_SLUGS = new Set([
+  'hermes', 'amp', 'pi', 'factory', 'slate', 'grok', 'goose', 'aider',
+  'commandcode', 'openclaude', 'openclaw', 'continue', 'zed',
+]);
+
+const brandIconNegCache = new Map<string, number>(); // slug → last 404 ts
+
+const iconMime = (f: string) =>
+  f.endsWith('.svg') ? 'image/svg+xml'
+    : f.endsWith('.xpm') ? 'image/x-xpixmap'
+    : f.endsWith('.webp') ? 'image/webp'
+    : f.endsWith('.ico') ? 'image/x-icon'
+    : /\.jpe?g$/.test(f) ? 'image/jpeg'
+    : 'image/png';
+
+app.get('/api/brandicon/:key', async (c) => {
+  const key = c.req.param('key').replace(/^custom-/, '').toLowerCase();
+  const slugs = [...(BRAND_ALIASES[key] ?? []), key];
+  for (const raw of slugs) {
+    const slug = raw.toLowerCase().replace(/[^a-z0-9.-]/g, '');
+    if (!slug || slug.includes('..')) continue;
+    // 1. vendored asset — redirect so it flows through the static handler
+    if (existsSync(`public/icons/${slug}.svg`)) return c.redirect(`/icons/${slug}.svg`);
+    // 2. CDN cache
+    const cached = path.join(ICON_CACHE_DIR, `${slug}.svg`);
+    try {
+      if (existsSync(cached)) {
+        return new Response(await readFile(cached), {
+          headers: { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=86400' },
+        });
+      }
+    } catch { /* fall through */ }
+    // 3. host icon theme / .desktop icon name
+    const host = await resolveIcon(slug);
+    if (host) {
+      try {
+        return new Response(await readFile(host), {
+          headers: { 'Content-Type': iconMime(host), 'Cache-Control': 'public, max-age=86400' },
+        });
+      } catch { /* fall through */ }
+    }
+    // 4. Simple Icons CDN (negative-cached for a day, skipped for wrong brands)
+    if (!WRONG_SLUGS.has(slug) && (brandIconNegCache.get(slug) ?? 0) < Date.now() - 86_400_000) {
+      try {
+        const r = await fetch(`https://cdn.simpleicons.org/${slug}`, { signal: AbortSignal.timeout(5000) });
+        if (r.ok) {
+          const svg = await r.text();
+          if (svg.trimStart().startsWith('<svg')) {
+            await mkdir(ICON_CACHE_DIR, { recursive: true });
+            await writeFile(cached, svg, 'utf-8');
+            return new Response(svg, {
+              headers: { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=86400' },
+            });
+          }
+        }
+        if (r.status === 404) brandIconNegCache.set(slug, Date.now());
+      } catch { /* offline — fall through to initials */ }
+    }
+  }
+
+  // 5. initials tile — deterministic hue from the key, so it never 404s
+  const words = key.replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
+  const initials = (words.map((w) => w[0]).slice(0, 2).join('') || '?').toUpperCase();
+  const hue = [...key].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) % 360, 0);
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">` +
+    `<rect width="64" height="64" rx="14" fill="hsl(${hue},45%,22%)"/>` +
+    `<text x="32" y="42" text-anchor="middle" font-family="ui-sans-serif,system-ui,sans-serif" ` +
+    `font-size="26" font-weight="600" fill="hsl(${hue},80%,80%)">${initials}</text></svg>`;
+  return new Response(svg, {
+    headers: { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=3600' },
+  });
 });
 
 // ---------- Projects ----------
@@ -513,7 +784,14 @@ app.get('/api/domains', async (c) => c.json({ ok: true, domains: config.domains 
 
 // Probe every domain publicly and, when it's down, diagnose why: stopped
 // process, deleted project, stopped container, or a tunnel routing problem.
-app.get('/api/domains/status', async (c) => {
+// Each probe is a public HTTPS fetch (up to 7s), so results are cached
+// briefly — a stale hit returns instantly and recomputes in the background.
+let domainStatusCache: { at: number; statuses: Record<string, DomainStatus> } | null = null;
+let domainStatusInflight: Promise<Record<string, DomainStatus>> | null = null;
+const DOMAIN_STATUS_TTL_MS = 30_000;
+const DOMAIN_STATUS_STALE_MS = 5 * 60_000;
+
+async function computeDomainStatuses(): Promise<Record<string, DomainStatus>> {
   const portProcs = await listPortProcesses();
   const listening = new Set<number>();
   for (const p of portProcs) for (const l of p.listeners ?? []) listening.add(l.port);
@@ -526,7 +804,35 @@ app.get('/api/domains/status', async (c) => {
   const statuses = await Promise.all(
     config.domains.map(async (d) => [d.id, await probeDomain(d, listening, dockerPorts, projects)] as const)
   );
-  return c.json({ ok: true, statuses: Object.fromEntries(statuses) });
+  return Object.fromEntries(statuses);
+}
+
+function refreshDomainStatuses(): Promise<Record<string, DomainStatus>> {
+  if (!domainStatusInflight) {
+    domainStatusInflight = computeDomainStatuses()
+      .then((statuses) => {
+        domainStatusCache = { at: Date.now(), statuses };
+        return statuses;
+      })
+      .finally(() => {
+        domainStatusInflight = null;
+      });
+  }
+  return domainStatusInflight;
+}
+
+app.get('/api/domains/status', async (c) => {
+  const fresh = c.req.query('fresh') === '1';
+  if (!fresh && domainStatusCache) {
+    const age = Date.now() - domainStatusCache.at;
+    if (age < DOMAIN_STATUS_TTL_MS) return c.json({ ok: true, statuses: domainStatusCache.statuses });
+    if (age < DOMAIN_STATUS_STALE_MS) {
+      refreshDomainStatuses().catch(() => {});
+      return c.json({ ok: true, statuses: domainStatusCache.statuses });
+    }
+  }
+  const statuses = await refreshDomainStatuses();
+  return c.json({ ok: true, statuses });
 });
 
 async function probeDomain(
@@ -624,6 +930,7 @@ app.post('/api/domains/import', async (c) => {
     imported.push(domain);
   }
   await saveConfig(config);
+  domainStatusCache = null;
   return c.json({ ok: true, imported, skipped, blocked });
 });
 
@@ -668,6 +975,7 @@ app.post('/api/domains', async (c) => {
     await saveConfig(config);
     return fail(c, 500, 'Falló sincronizar el túnel', { detail: sync.error });
   }
+  domainStatusCache = null;
   return c.json({ ok: true, domain });
 });
 
@@ -717,6 +1025,7 @@ app.put('/api/domains/:id', async (c) => {
     if (created.recordId) await deleteDnsRecord(created.recordId);
     return fail(c, 500, 'Falló sincronizar el túnel', { detail: sync.error });
   }
+  domainStatusCache = null;
   return c.json({ ok: true, domain });
 });
 
@@ -732,6 +1041,7 @@ app.delete('/api/domains/:id', async (c) => {
   await saveConfig(config);
   const sync = await syncCloudflaredRoutes(config.domains);
   if (!sync.success) return fail(c, 500, 'Dominio borrado pero falló sync del túnel', { detail: sync.error });
+  domainStatusCache = null;
   return c.json({ ok: true });
 });
 
@@ -758,6 +1068,7 @@ app.post('/api/domains/bulk-delete', async (c) => {
   ];
   await saveConfig(config);
   const sync = await syncCloudflaredRoutes(config.domains);
+  domainStatusCache = null;
   return c.json({
     ok: true,
     removed: removed.length,
@@ -772,7 +1083,7 @@ app.post('/api/domains/bulk-delete', async (c) => {
 
 app.get('/api/config', async (c) => {
   const { auth, ...rest } = config;
-  return c.json({ ok: true, config: { ...rest, auth: { username: auth.username } } });
+  return c.json({ ok: true, config: { ...rest, auth: { username: auth.username, totpEnabled: !!auth.totpSecret } } });
 });
 
 app.put('/api/config', async (c) => {
@@ -941,7 +1252,7 @@ app.post('/api/system/power', async (c) => {
   // Schedule a few seconds out so the HTTP response reaches the client.
   const cmd = action === 'reboot' ? 'reboot' : 'poweroff';
   await hostExec(`nohup bash -c 'sleep 3; systemctl ${cmd}' >/dev/null 2>&1 &`, { user: 'root', timeoutMs: 5000 });
-  notify('Ports Manager — Servidor', `Se programó ${action === 'reboot' ? 'un reinicio' : 'un apagado'} en 3 segundos`, 5).catch(() => {});
+  notify('AXON — Servidor', `Se programó ${action === 'reboot' ? 'un reinicio' : 'un apagado'} en 3 segundos`, 5).catch(() => {});
   return c.json({ ok: true });
 });
 
@@ -958,7 +1269,7 @@ function sdQuote(s: string): string {
 }
 function buildUnit(name: string, argv: string[], cwd: string): string {
   return `[Unit]
-Description=pm-${name} (creado desde Ports Manager)
+Description=axon-${name} (creado desde AXON)
 After=network-online.target
 Wants=network-online.target
 
@@ -1034,6 +1345,7 @@ registerScriptRoutes(app);
 registerLogsRoutes(app);
 registerMetricsRoutes(app);
 registerDropRoutes(app);
+registerLibraryRoutes(app);
 registerSessionRoutes(app);
 registerOpsRoutes(app);
 registerDockerOpsRoutes(app);
@@ -1089,6 +1401,11 @@ startAlertLoop();
 startScriptScheduler();
 startDropSweeper();
 
+// Warm the expensive caches in the background so the first Programs/Agents
+// page load doesn't pay the full host-scan cost.
+warmProgramsCache();
+listAgents().catch(() => {});
+
 app.get('/*', serveStatic({ root: './public' }));
 
 app.onError((err, c) => {
@@ -1098,7 +1415,7 @@ app.onError((err, c) => {
 
 // ---------- Embedded terminal ----------
 // /ws/term — authenticated WebSocket that bridges to a host tmux session via
-// `script` (provides the PTY). The tmux session 'pm-term' persists across
+// `script` (provides the PTY). The tmux session 'axon-term' persists across
 // browser refreshes and reconnects.
 interface WsProxyData { kind: 'proxy'; upstream: WebSocket; pendingClient: unknown[]; pendingServer: unknown[]; ws: Bun.ServerWebSocket<WsData> | null }
 interface WsTermData { kind: 'term'; proc?: ReturnType<typeof Bun.spawn>; session?: string; exec?: string; cols?: number; rows?: number }
@@ -1108,7 +1425,7 @@ function startTermSocket(ws: Bun.ServerWebSocket<WsData>): void {
   const t = ws.data as WsTermData;
   const cols = t.cols || 120;
   const rows = t.rows || 40;
-  const session = t.session || 'pm-term';
+  const session = t.session || 'axon-term';
   // exec mode: `docker exec -it` into a container instead of a tmux session.
   // No persistence — the shell dies with the WS. `script` still provides the
   // local PTY (docker -t allocates the container-side one); COLUMNS/LINES are
@@ -1144,7 +1461,7 @@ export default {
     const isWs = req.headers.get('upgrade')?.toLowerCase() === 'websocket';
     const wsMatch = url.pathname.match(/^\/p\/(\d+)(\/.*)?$/);
     if (wsMatch && isWs) {
-      const token = req.headers.get('cookie')?.match(/(?:^|;\s*)ports_session=([^;]+)/)?.[1];
+      const token = req.headers.get('cookie')?.match(/(?:^|;\s*)axon_session=([^;]+)/)?.[1];
       if (!token || !(await verifySessionToken(token)) || isRevoked(sessionIdForToken(token))) return new Response('Unauthorized', { status: 401 });
       touchSession(sessionIdForToken(token));
       // Forward the client's subprotocol list (noVNC requires 'binary').
@@ -1193,7 +1510,7 @@ export default {
       return new Response('WS upgrade failed', { status: 500 });
     }
     if (isWs && url.pathname === '/ws/term') {
-      const token = req.headers.get('cookie')?.match(/(?:^|;\s*)ports_session=([^;]+)/)?.[1];
+      const token = req.headers.get('cookie')?.match(/(?:^|;\s*)axon_session=([^;]+)/)?.[1];
       if (!token || !(await verifySessionToken(token)) || isRevoked(sessionIdForToken(token))) return new Response('Unauthorized', { status: 401 });
       touchSession(sessionIdForToken(token));
       // ?exec=<container id|name> → interactive docker exec instead of tmux.
@@ -1203,7 +1520,7 @@ export default {
       }
       const data: WsData = {
         kind: 'term',
-        session: (url.searchParams.get('s') || 'pm-term').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32) || 'pm-term',
+        session: (url.searchParams.get('s') || 'axon-term').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32) || 'axon-term',
         exec: exec || undefined,
         cols: parseInt(url.searchParams.get('c') || '120', 10),
         rows: parseInt(url.searchParams.get('r') || '40', 10),
@@ -1212,7 +1529,7 @@ export default {
       return new Response('WS upgrade failed', { status: 500 });
     }
     if (isWs && url.pathname === '/ws/logs') {
-      const token = req.headers.get('cookie')?.match(/(?:^|;\s*)ports_session=([^;]+)/)?.[1];
+      const token = req.headers.get('cookie')?.match(/(?:^|;\s*)axon_session=([^;]+)/)?.[1];
       if (!token || !(await verifySessionToken(token))) return new Response('Unauthorized', { status: 401 });
       if (isRevoked(sessionIdForToken(token))) return new Response('Unauthorized', { status: 401 });
       touchSession(sessionIdForToken(token));
@@ -1247,7 +1564,7 @@ export default {
               // docker exec sessions can't be resized server-side — initial
               // size only; ignore the message.
               if (t.exec) return;
-              const sess = t.session || 'pm-term';
+              const sess = t.session || 'axon-term';
               const c = Math.max(2, Math.min(j.c, 500)), r = Math.max(2, Math.min(j.r, 200));
               hostExec(`tmux resize-window -t ${sess} -x ${c} -y ${r} 2>/dev/null; tmux refresh-client -t ${sess} -C ${c},${r} 2>/dev/null; true`, { user: 'user', timeoutMs: 4000 }).catch(() => {});
               return;
@@ -1274,7 +1591,7 @@ export default {
         // the tmux client first so the whole chain exits cleanly, then kill.
         // (exec sessions aren't tmux-backed — just kill the process.)
         if (!ws.data.exec) {
-          const sess = ws.data.session || 'pm-term';
+          const sess = ws.data.session || 'axon-term';
           hostExec(`tmux detach-client -s ${sess} 2>/dev/null; true`, { user: 'user', timeoutMs: 3000 }).catch(() => {});
         }
         try { (ws.data.proc as { kill(s?: string): void } | undefined)?.kill('SIGKILL'); } catch { /* gone */ }

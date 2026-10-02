@@ -144,9 +144,10 @@ async function dockerCmd(cmd: string): Promise<{ ok: boolean; stdout: string; st
 interface ComposeService {
   name: string;
   container: string;
+  containerId?: string;
   status: string;
   statusText?: string;
-  // Live memory from `docker stats` — absent for stopped/disk services.
+  // Live memory — absent for stopped/disk services.
   mem?: string;
   memBytes?: number;
 }
@@ -219,6 +220,25 @@ function parseMemUsage(usage: string): { text: string; bytes: number } | null {
   return { text: `${m[1]} ${m[2]}`, bytes: Math.round(parseFloat(m[1]) * mult) };
 }
 
+// `docker stats --no-stream` blocks ~2s on the daemon. The panel only needs
+// memory, which lives in the cgroup filesystem — reading it directly is ~ms.
+// Returns container-id → bytes (cgroup v2 systemd scopes + v1 fallback).
+async function containerMemById(): Promise<Map<string, number>> {
+  const map = new Map<string, number>();
+  const res = await hostExec(
+    'for f in /sys/fs/cgroup/system.slice/docker-*.scope/memory.current /sys/fs/cgroup/memory/docker/*/memory.usage_in_bytes; do ' +
+    '[ -f "$f" ] || continue; echo "$(basename "${f%/*}") $(cat "$f")"; done',
+    { user: 'root', timeoutMs: 10_000 }
+  );
+  for (const line of res.stdout.split('\n')) {
+    const [dir, bytesRaw] = line.trim().split(/\s+/);
+    const id = (dir || '').replace(/^docker-/, '').replace(/\.scope$/, '');
+    const bytes = parseInt(bytesRaw || '', 10);
+    if (/^[0-9a-f]{12,64}$/i.test(id) && Number.isFinite(bytes)) map.set(id, bytes);
+  }
+  return map;
+}
+
 function fmtBytes(bytes: number): string {
   if (bytes >= 1 << 30) return `${(bytes / (1 << 30)).toFixed(1)} GiB`;
   if (bytes >= 1 << 20) return `${(bytes / (1 << 20)).toFixed(1)} MiB`;
@@ -254,14 +274,27 @@ export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
     let dockerError: string | undefined;
     const notes = deps.getNotes?.() || {};
 
+    // The three data sources are independent — run them in parallel.
+    // `docker stats` was the slowest by far (~2s on the daemon); cgroup reads
+    // replace it with a fallback below if the layout isn't recognized.
+    const [ps, findRes, memById] = await Promise.all([
+      dockerCmd(`ps -a --format '{{json .}}'`),
+      homeDir().then((home) =>
+        hostExec(
+          `find ${shq(home)} /opt -maxdepth 3 \\( -name node_modules -o -name .git \\) -prune -o -type f \\( -name 'docker-compose.y*ml' -o -name 'compose.y*ml' \\) -print 2>/dev/null | head -40`,
+          { user: 'user', timeoutMs: 15_000 }
+        )
+      ),
+      containerMemById(),
+    ]);
+
     // 1) Running/stopped containers grouped by com.docker.compose.project.
-    const ps = await dockerCmd(`ps -a --format '{{json .}}'`);
     if (!ps.ok) {
       dockerError = (ps.stderr || ps.stdout || 'docker no disponible').slice(0, 1000);
     } else {
       for (const line of ps.stdout.split('\n').filter(Boolean)) {
         try {
-          const row = JSON.parse(line) as { Names?: string; State?: string; Status?: string; Labels?: string };
+          const row = JSON.parse(line) as { ID?: string; Names?: string; State?: string; Status?: string; Labels?: string };
           const labels = row.Labels || '';
           const project = labelVal(labels, 'com.docker.compose.project');
           if (!project) continue;
@@ -285,6 +318,7 @@ export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
           g.services.push({
             name: service || row.Names || '',
             container: row.Names || '',
+            containerId: row.ID || '',
             status: row.State || '',
             statusText: row.Status || '',
           });
@@ -293,13 +327,9 @@ export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
       }
     }
 
-    // 2) Dormant stacks: compose files on disk with no containers. Searched one
-    // level deep under $HOME and /opt (find -maxdepth 3), capped at 40 hits.
-    const home = await homeDir();
-    const findRes = await hostExec(
-      `find ${shq(home)} /opt -maxdepth 3 -type f \\( -name 'docker-compose.y*ml' -o -name 'compose.y*ml' \\) 2>/dev/null | head -40`,
-      { user: 'user', timeoutMs: 15_000 }
-    );
+    // 2) Dormant stacks: compose files on disk with no containers. Searched
+    // under $HOME and /opt (find -maxdepth 3, node_modules/.git pruned),
+    // capped at 40 hits.
     const found = findRes.ok ? findRes.stdout.split('\n').map((s) => s.trim()).filter(Boolean).slice(0, 40) : [];
 
     for (const f of found) {
@@ -337,15 +367,29 @@ export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
     }
 
     // 3) Decorate: live memory per container + file-derived descriptions.
-    const stats = await dockerCmd(`stats --no-stream --format '{{json .}}'`);
-    const memByName = new Map<string, { text: string; bytes: number }>();
-    if (stats.ok) {
-      for (const line of stats.stdout.split('\n').filter(Boolean)) {
-        try {
-          const row = JSON.parse(line) as { Name?: string; MemUsage?: string };
-          const mem = row.MemUsage ? parseMemUsage(row.MemUsage) : null;
-          if (row.Name && mem) memByName.set(row.Name, mem);
-        } catch { /* malformed line */ }
+    // cgroup gives full ids; `docker ps` shows the 12-char prefix — match by
+    // prefix. Fall back to `docker stats` when the cgroup layout is unknown.
+    let memByName = new Map<string, { text: string; bytes: number }>();
+    if (memById.size) {
+      for (const p of projects.values()) {
+        for (const s of p.services) {
+          if (!s.containerId) continue;
+          const bytes = memById.get(s.containerId)
+            ?? [...memById.entries()].find(([id]) => id.startsWith(s.containerId!))?.[1];
+          if (bytes !== undefined) memByName.set(s.container, { text: fmtBytes(bytes), bytes });
+        }
+      }
+    }
+    if (!memByName.size) {
+      const stats = await dockerCmd(`stats --no-stream --format '{{json .}}'`);
+      if (stats.ok) {
+        for (const line of stats.stdout.split('\n').filter(Boolean)) {
+          try {
+            const row = JSON.parse(line) as { Name?: string; MemUsage?: string };
+            const mem = row.MemUsage ? parseMemUsage(row.MemUsage) : null;
+            if (row.Name && mem) memByName.set(row.Name, mem);
+          } catch { /* malformed line */ }
+        }
       }
     }
     for (const p of projects.values()) {

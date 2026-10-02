@@ -1,4 +1,4 @@
-/* Ports Manager — feature: Scripts (library + scheduler + inbound webhooks)
+/* AXON — feature: Scripts (library + scheduler + inbound webhooks)
    Self-contained: injects its own nav item + tab section, reuses app.js
    globals ($ $$ api esc icon toast errToast confirmDialog refreshIcons
    relTime loaders openJobModal). */

@@ -1,6 +1,6 @@
 import type { Context, MiddlewareHandler } from 'hono';
 
-const COOKIE_NAME = 'ports_session';
+const COOKIE_NAME = 'axon_session';
 const SESSION_SECRET = process.env.SESSION_SECRET;
 
 if (!SESSION_SECRET) {
@@ -90,7 +90,17 @@ export async function verifyPassword(password: string, stored: string): Promise<
     256
   );
   const computed = btoa(String.fromCharCode(...new Uint8Array(bits)));
-  return computed === hash;
+  return timingSafeEqual(computed, hash);
+}
+
+// Constant-time string compare — avoids leaking the hash prefix via timing.
+function timingSafeEqual(a: string, b: string): boolean {
+  const ea = new TextEncoder().encode(a);
+  const eb = new TextEncoder().encode(b);
+  if (ea.length !== eb.length) return false;
+  let diff = 0;
+  for (let i = 0; i < ea.length; i++) diff |= ea[i] ^ eb[i];
+  return diff === 0;
 }
 
 export async function createSession(username: string): Promise<string> {
@@ -110,7 +120,16 @@ export async function getSession(c: Context): Promise<SessionPayload | null> {
 }
 
 export function setSessionCookie(c: Context, token: string): void {
-  const secure = c.req.url.startsWith('https://') ? '; Secure' : '';
+  // Behind cloudflared the origin sees http://localhost — the real scheme lives
+  // in X-Forwarded-Proto / CF-Visitor. Only mark Secure when the client-facing
+  // scheme is https so direct http access (Tailscale/LAN) keeps working.
+  const fwd = c.req.header('x-forwarded-proto')?.toLowerCase();
+  const cfScheme = c.req.header('cf-visitor') || '';
+  const isHttps =
+    fwd === 'https' ||
+    cfScheme.includes('"scheme":"https"') ||
+    c.req.url.startsWith('https://');
+  const secure = isHttps ? '; Secure' : '';
   c.header(
     'set-cookie',
     `${COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${60 * 60 * 24 * 7}${secure}`

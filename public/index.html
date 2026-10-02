@@ -1,33 +1,36 @@
 <!DOCTYPE html>
-<html lang="es" data-theme="linear">
+<html lang="es" data-theme="axon">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-  <meta name="theme-color" content="#0a0a0c">
+  <meta name="theme-color" content="#080c10">
   <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="icon" type="image/svg+xml" href="/icons/app.svg">
-  <link rel="apple-touch-icon" href="/icons/app.svg">
+  <link rel="icon" type="image/svg+xml" href="/marca/favicon.svg">
+  <link rel="apple-touch-icon" href="/marca/app%20icon.svg">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <title>Ports Manager</title>
-  <link rel="stylesheet" href="/app.css?v=17">
-  <link rel="stylesheet" href="/feat-files.css?v=17">
-  <link rel="stylesheet" href="/feat-scripts.css?v=17">
-  <link rel="stylesheet" href="/feat-metrics.css?v=17">
-  <link rel="stylesheet" href="/feat-drop.css?v=17">
-  <link rel="stylesheet" href="/feat-ops.css?v=17">
-  <link rel="stylesheet" href="/feat-notify.css?v=17">
-  <link rel="stylesheet" href="/feat-compose.css?v=17">
+  <title>AXON</title>
+  <link rel="stylesheet" href="/app.css?v=18">
+  <link rel="stylesheet" href="/feat-files.css?v=21">
+  <link rel="stylesheet" href="/feat-scripts.css?v=18">
+  <link rel="stylesheet" href="/feat-metrics.css?v=18">
+  <link rel="stylesheet" href="/feat-drop.css?v=18">
+  <link rel="stylesheet" href="/feat-ops.css?v=18">
+  <link rel="stylesheet" href="/feat-notify.css?v=18">
+  <link rel="stylesheet" href="/feat-compose.css?v=18">
+  <link rel="stylesheet" href="/feat-agents.css?v=18">
+  <link rel="stylesheet" href="/feat-library.css?v=1">
 </head>
 <body>
   <div id="app">
     <div id="login-screen" class="login-screen hidden">
       <div class="login-box">
-        <div class="brand"><span class="brand-mark"><i data-lucide="network" class="lucide-icon"></i></span> Ports Manager</div>
+        <div class="brand"><img src="/marca/isologotipo.svg" alt="AXON" class="brand-logo"></div>
         <form id="login-form">
           <input type="text" id="username" placeholder="Usuario" autocomplete="username" required>
           <input type="password" id="password" placeholder="Contraseña" autocomplete="current-password" required>
+          <input type="text" id="login-code" class="hidden" placeholder="Código de verificación" autocomplete="one-time-code" inputmode="numeric" maxlength="6">
           <button type="submit" class="btn-primary">Ingresar</button>
           <div id="login-error" class="error"></div>
         </form>
@@ -38,8 +41,8 @@
       <div class="app-shell">
         <aside class="sidebar">
           <div class="sidebar-brand">
-            <span class="brand-mark"><i data-lucide="network" class="lucide-icon"></i></span>
-            <span class="brand-text">Ports Manager</span>
+            <img src="/marca/isologotipo.svg" alt="AXON" class="brand-logo-full">
+            <img src="/marca/Isotipo.svg" alt="AXON" class="brand-logo-icon">
           </div>
 
           <nav class="sidebar-nav">
@@ -92,7 +95,10 @@
           <div class="sidebar-footer">
             <div class="nav-section-label"><span>Tema</span></div>
             <div class="theme-picker">
-              <button class="theme-option active" data-theme="linear">
+              <button class="theme-option active" data-theme="axon">
+                <span class="theme-swatch axon"></span><span class="nav-label">Axon</span>
+              </button>
+              <button class="theme-option" data-theme="linear">
                 <span class="theme-swatch linear"></span><span class="nav-label">Linear</span>
               </button>
               <button class="theme-option" data-theme="netdata">
@@ -103,7 +109,6 @@
               </button>
             </div>
             <div class="sidebar-toggle-row">
-              <span class="nav-label" id="user-name"></span>
               <button class="sidebar-toggle" id="sidebar-collapse" title="Colapsar">
                 <i data-lucide="panel-left-close" class="lucide-icon"></i>
               </button>
@@ -478,6 +483,12 @@
           <input type="url" id="settings-notify-url" placeholder="https://ntfy.sh/mi-topic o webhook de Discord">
         </label>
         <div class="settings-power">
+          <span class="settings-power-label">Verificación en dos pasos (2FA)</span>
+          <span id="totp-status" class="totp-status">…</span>
+          <button type="button" id="totp-enable-btn" class="btn-secondary hidden"><i data-lucide="shield-check" class="lucide-icon"></i> Activar</button>
+          <button type="button" id="totp-disable-btn" class="btn-secondary hidden"><i data-lucide="shield-off" class="lucide-icon"></i> Desactivar</button>
+        </div>
+        <div class="settings-power">
           <span class="settings-power-label">Energía del servidor</span>
           <button type="button" id="power-reboot" class="btn-secondary" title="Reinicia el servidor — el dashboard se desconecta"><i data-lucide="rotate-cw" class="lucide-icon"></i> Reiniciar</button>
           <button type="button" id="power-off" class="btn-danger" title="Apaga el servidor — el dashboard se desconecta"><i data-lucide="power" class="lucide-icon"></i> Apagar</button>
@@ -516,6 +527,25 @@
     </div>
   </div>
 
+  <!-- TOTP (2FA) modal — setup shows QR + manual key; disable only asks the code -->
+  <div id="totp-modal" class="modal hidden">
+    <div class="modal-content pair-modal-content">
+      <h3 id="totp-title">Activar verificación en dos pasos</h3>
+      <p class="listener-note" id="totp-desc">Escaneá el QR con tu app autenticadora (Google Authenticator, Aegis, 1Password…) e ingresá el código de 6 dígitos para confirmar.</p>
+      <div id="totp-qr"></div>
+      <div id="totp-secret-wrap">
+        <span class="listener-note">Clave manual:</span>
+        <div id="totp-secret" class="pair-url"></div>
+      </div>
+      <input type="text" id="totp-code" placeholder="Código de 6 dígitos" autocomplete="one-time-code" inputmode="numeric" maxlength="6">
+      <div id="totp-error" class="error"></div>
+      <div class="modal-actions">
+        <button id="totp-cancel" class="btn-secondary">Cancelar</button>
+        <button id="totp-confirm" class="btn-primary">Confirmar</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Make-service modal -->
   <div id="service-modal" class="modal hidden">
     <div class="modal-content">
@@ -542,16 +572,18 @@
   <script src="/vendor/xterm.js"></script>
   <script src="/vendor/xterm-addon-fit.js"></script>
   <script src="/vendor/qrcode.js"></script>
-  <script src="/vendor/lucide.min.js?v=17"></script>
-  <script src="/app.js?v=17"></script>
-  <script src="/feat-files.js?v=17"></script>
-  <script src="/feat-scripts.js?v=17"></script>
-  <script src="/feat-logs.js?v=17"></script>
-  <script src="/feat-metrics.js?v=17"></script>
-  <script src="/feat-drop.js?v=17"></script>
-  <script src="/feat-ops.js?v=17"></script>
-  <script src="/feat-notify.js?v=17"></script>
-  <script src="/feat-compose.js?v=17"></script>
-  <script src="/mobile.js?v=17"></script>
+  <script src="/vendor/lucide.min.js?v=18"></script>
+  <script src="/app.js?v=18"></script>
+  <script src="/feat-files.js?v=21"></script>
+  <script src="/feat-scripts.js?v=18"></script>
+  <script src="/feat-logs.js?v=18"></script>
+  <script src="/feat-metrics.js?v=18"></script>
+  <script src="/feat-drop.js?v=18"></script>
+  <script src="/feat-ops.js?v=18"></script>
+  <script src="/feat-notify.js?v=18"></script>
+  <script src="/feat-compose.js?v=18"></script>
+  <script src="/feat-agents.js?v=18"></script>
+  <script src="/feat-library.js?v=1"></script>
+  <script src="/mobile.js?v=18"></script>
 </body>
 </html>

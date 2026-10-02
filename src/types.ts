@@ -203,6 +203,7 @@ export interface AppConfig {
   auth: {
     username: string;
     passwordHash: string;
+    totpSecret?: string;
   };
   domains: DomainMapping[];
   // Domains the user deliberately deleted — import never brings them back.

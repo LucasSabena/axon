@@ -1,5 +1,5 @@
 /* ============================================================
-   Ports Manager — mobile UX (viewports ≤ 768px)
+   AXON — mobile UX (viewports ≤ 768px)
    Wires the hamburger button to an off-canvas sidebar drawer:
    - toggles body.sidebar-open
    - closes on nav-item click, Escape, and backdrop (outside) click

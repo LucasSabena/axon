@@ -1,4 +1,4 @@
-/* Ports Manager — feat: Drop (pair-drop) + sesiones/dispositivos
+/* AXON — feat: Drop (pair-drop) + sesiones/dispositivos
    IIFE. Usa los globales de app.js: $, $$, api, esc, icon, toast, errToast,
    confirmDialog, refreshIcons, relTime, loaders, unloadBrowser, activeTabName.
    QR: window.qrcode (kazuhiko, vendored) con fallback a window.QRCode.

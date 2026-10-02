@@ -1,4 +1,4 @@
-/* Ports Manager — notification center (bell + dropdown + active alerts)
+/* AXON — notification center (bell + dropdown + active alerts)
  *
  * The integrator adds this button to the topbar:
  *   <button id="notif-bell" class="icon-btn"><i data-lucide="bell"></i><span id="notif-badge" class="hidden"></span></button>

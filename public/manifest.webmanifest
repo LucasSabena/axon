@@ -1,12 +1,12 @@
 {
-  "name": "Ports Manager",
-  "short_name": "Ports",
+  "name": "AXON",
+  "short_name": "AXON",
   "description": "Server operations dashboard — ports, processes, projects, updates",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0a0a0c",
-  "theme_color": "#0a0a0c",
+  "background_color": "#080c10",
+  "theme_color": "#080c10",
   "icons": [
-    { "src": "/icons/app.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+    { "src": "/marca/app%20icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
   ]
 }

@@ -1,4 +1,4 @@
-/* Ports Manager — feature: Métricas históricas
+/* AXON — feature: Métricas históricas
    Tab "Métricas": gráficos canvas 2D (sin librerías) alimentados por
    /api/metrics + tabla "Top procesos" de /api/metrics/procs.
    Se auto-contiene: inyecta su <section>, su botón de nav y el <link> a

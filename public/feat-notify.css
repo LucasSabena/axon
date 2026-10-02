@@ -1,4 +1,4 @@
-/* Ports Manager — notification center styles
+/* AXON — notification center styles
  * Scoped under #notif-panel / #notif-badge / .notif-* so it can't leak into
  * the rest of the app. Uses the theme CSS vars from app.css.
  */

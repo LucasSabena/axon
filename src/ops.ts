@@ -409,7 +409,7 @@ export function registerOpsRoutes(app: Hono): void {
     const minutes = Math.max(1, Math.round(delaySec / 60));
     const flag = action === 'reboot' ? '-r' : '-h';
     const res = await hostExec(
-      `shutdown ${flag} +${minutes} "Ports Manager: ${action === 'reboot' ? 'reinicio' : 'apagado'} programado"`,
+      `shutdown ${flag} +${minutes} "AXON: ${action === 'reboot' ? 'reinicio' : 'apagado'} programado"`,
       { user: 'root', timeoutMs: 10_000 }
     );
     if (!res.ok) {

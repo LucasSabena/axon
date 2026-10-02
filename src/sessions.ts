@@ -97,11 +97,11 @@ export function sessionIdForToken(token: string): string | null {
   return `tok-${tokenHash(token)}`;
 }
 
-// Read the ports_session cookie off a Hono context (or the auth.ts cookie name)
+// Read the axon_session cookie off a Hono context (or the auth.ts cookie name)
 // and return its session id — one-liner for the integrator's middleware.
 export function sessionIdFromRequest(c: Context): string | null {
   const cookie = c.req.header('cookie') || '';
-  const m = cookie.match(/(?:^|;\s*)ports_session=([^;]+)/);
+  const m = cookie.match(/(?:^|;\s*)axon_session=([^;]+)/);
   if (!m) return null;
   try {
     return sessionIdForToken(decodeURIComponent(m[1]));

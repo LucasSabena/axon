@@ -1,4 +1,4 @@
-/* Ports Manager — feature: Salud (ops) tab
+/* AXON — feature: Salud (ops) tab
  * Injects #tab-ops + its nav button; wires loaders['ops'].
  * Depends on app.js globals: $, $$, api, esc, icon, toast, errToast,
  * confirmDialog, refreshIcons, gotoTab, loaders (all top-level in app.js).

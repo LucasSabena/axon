@@ -402,14 +402,86 @@ function newerThan(a: string, b: string): boolean {
   return false;
 }
 
+// --- pnpm minimumReleaseAge ---
+// pnpm ≥11 defaults to a 24h minimum release age (anti supply-chain): a bare
+// `pkg@latest` resolves to the newest version OLDER than that window, not the
+// registry's dist-tag. `npm view` ignores the policy, so the card used to show
+// "current → latest" for a version pnpm refused to install — updates looked
+// green but nothing changed. We mirror the policy: read the resolved setting
+// inside the global pnpm workspace (where minimumReleaseAgeExclude lives) and
+// pick the newest version whose publish time clears the window.
+interface ReleasePolicy { minutes: number; excludes: string[] }
+let policyCache: { at: number; pol: ReleasePolicy } | null = null;
+
+async function pnpmReleasePolicy(): Promise<ReleasePolicy> {
+  if (policyCache && Date.now() - policyCache.at < 10 * 60_000) return policyCache.pol;
+  const pol: ReleasePolicy = { minutes: 0, excludes: [] };
+  const r = await hostExec(
+    'v=$(pnpm --version 2>/dev/null); ' +
+    'g=$(ls -d "$PNPM_HOME"/global/*/ 2>/dev/null | head -1); m=""; e=""; ' +
+    'if [ -n "$g" ]; then m=$(cd "$g" && pnpm config get minimumReleaseAge 2>/dev/null); ' +
+    'e=$(cd "$g" && pnpm config get minimumReleaseAgeExclude 2>/dev/null); fi; ' +
+    "printf '%s\\n--POLICY--\\n%s\\n--POLICY--\\n%s\\n' \"$v\" \"$m\" \"$e\"",
+    { user: 'user', timeoutMs: 25_000 }
+  );
+  const [ver, cfg, exRaw] = r.stdout.split('\n--POLICY--\n');
+  if (parseInt((ver || '').trim().split('.')[0], 10) >= 11) pol.minutes = 1440;
+  const cfgN = parseFloat((cfg || '').trim());
+  if (Number.isFinite(cfgN)) pol.minutes = cfgN;
+  for (const m of (exRaw || '').matchAll(/"([^"\n]+)"/g)) pol.excludes.push(m[1]);
+  for (const m of (exRaw || '').matchAll(/^\s*-\s*(\S+)\s*$/gm)) pol.excludes.push(m[1]);
+  policyCache = { at: Date.now(), pol };
+  return pol;
+}
+
+// The version `pnpm add -g <pkg>@latest` would actually install right now.
+async function npmLatestInstallable(pkg: string, pol: ReleasePolicy): Promise<string | null> {
+  if (!/^[@a-zA-Z0-9._/-]+$/.test(pkg)) return null;
+  if (pol.minutes <= 0 || pol.excludes.includes(pkg)) {
+    const r = await hostExec(`npm view ${pkg} version 2>/dev/null`, { user: 'user', timeoutMs: 30_000 });
+    return semverOf(r.stdout.trim());
+  }
+  const r = await hostExec(`npm view ${pkg} time --json 2>/dev/null`, { user: 'user', timeoutMs: 30_000 });
+  let times: Record<string, string>;
+  try { times = JSON.parse(r.stdout); } catch { return null; }
+  const cutoff = Date.now() - pol.minutes * 60_000;
+  let best: string | null = null;
+  for (const [ver, iso] of Object.entries(times)) {
+    if (ver === 'created' || ver === 'modified' || ver.includes('-')) continue; // dist-tag targets are stable
+    const allowed = pol.excludes.includes(`${pkg}@${ver}`) || Date.parse(iso) <= cutoff;
+    if (allowed && (!best || newerThan(ver, best))) best = ver;
+  }
+  return best;
+}
+
 export async function detectPrograms(): Promise<ProgramView[]> {
+  // Kick off the pnpm policy probe in parallel with the per-program scans —
+  // it's only needed for npmLatestInstallable below.
+  const policyP = pnpmReleasePolicy().catch(() => ({ minutes: 0, excludes: [] as string[] }));
   const views = await Promise.all(
     PROGRAMS.map(async (p) => {
-      let installed = true;
-      for (const d of p.detect) {
-        const res = await hostExec(d.cmd, { user: d.user, timeoutMs: 15_000 });
-        if (!res.ok) { installed = false; break; }
-      }
+      // Every probe for a program is independent, so fire them concurrently —
+      // each hostExec is a separate nsenter+login-shell spawn (~50ms), and
+      // awaiting them serially used to add ~200ms+ per program for no reason.
+      // Failed commands are harmless: they're only read when `installed`.
+      const detectP = (async () => {
+        for (const d of p.detect) {
+          const res = await hostExec(d.cmd, { user: d.user, timeoutMs: 15_000 });
+          if (!res.ok) return false;
+        }
+        return true;
+      })();
+      const versionP = p.version
+        ? hostExec(p.version.cmd, { user: p.version.user, timeoutMs: 15_000 })
+        : Promise.resolve(null);
+      const updatesP = p.updatesCheck
+        ? hostExec(p.updatesCheck.cmd, { user: p.updatesCheck.user, timeoutMs: 60_000 })
+        : Promise.resolve(null);
+      const authP = p.auth
+        ? hostExec(p.auth.check.cmd, { user: p.auth.check.user, timeoutMs: 15_000 })
+        : Promise.resolve(null);
+
+      const installed = await detectP;
       const view: ProgramView = {
         id: p.id,
         name: p.name,
@@ -420,32 +492,28 @@ export async function detectPrograms(): Promise<ProgramView[]> {
         installed,
         steps: p.steps.map((s) => ({ label: s.label, cmd: s.cmd, user: s.user })),
       };
-      if (installed && p.version) {
-        const v = await hostExec(p.version.cmd, { user: p.version.user, timeoutMs: 15_000 });
-        if (v.ok) view.version = v.stdout.trim().split('\n')[0] || undefined;
-      }
-      if (installed && p.updatesCheck) {
-        const u = await hostExec(p.updatesCheck.cmd, { user: p.updatesCheck.user, timeoutMs: 60_000 });
-        if (u.ok) {
-          const n = parseInt(u.stdout.trim(), 10);
-          if (!Number.isNaN(n) && n > 0) view.pendingUpdates = String(n);
-        }
+      const v = await versionP;
+      if (installed && v?.ok) view.version = v.stdout.trim().split('\n')[0] || undefined;
+      const u = await updatesP;
+      if (installed && u?.ok) {
+        const n = parseInt(u.stdout.trim(), 10);
+        if (!Number.isNaN(n) && n > 0) view.pendingUpdates = String(n);
       }
       // Account/session state for account-backed CLIs
+      const a = await authP;
       if (installed && p.auth) {
-        const a = await hostExec(p.auth.check.cmd, { user: p.auth.check.user, timeoutMs: 15_000 });
         view.auth = {
-          loggedIn: a.ok && a.stdout.trim().length > 0,
-          account: a.ok ? a.stdout.trim().split('\n')[0] || undefined : undefined,
+          loggedIn: !!(a?.ok && a.stdout.trim().length > 0),
+          account: a?.ok ? a.stdout.trim().split('\n')[0] || undefined : undefined,
           canLogin: !!p.auth.login,
           canLogout: !!p.auth.logout,
           loginHint: p.auth.loginHint,
         };
       }
-      // npm-registry-backed tools: compare installed semver vs registry latest
+      // npm-registry-backed tools: compare installed semver vs the version
+      // pnpm would actually install (respects minimumReleaseAge).
       if (installed && p.npmPkg) {
-        const latest = await hostExec(`npm view ${p.npmPkg} version 2>/dev/null`, { user: 'user', timeoutMs: 30_000 });
-        const latestV = semverOf(latest.stdout.trim());
+        const latestV = await npmLatestInstallable(p.npmPkg, await policyP);
         const currentV = view.version ? semverOf(view.version) : null;
         if (latestV && currentV && newerThan(latestV, currentV)) {
           view.latestVersion = latestV;
@@ -457,6 +525,53 @@ export async function detectPrograms(): Promise<ProgramView[]> {
   return views;
 }
 
+// --- Shared stale-while-revalidate cache ---
+// detectPrograms() is expensive (~30 programs × several hostExec + npm view
+// calls each). Both /api/programs and the agents rail need the result, so it
+// lives here in one place: fresh hits are instant, stale hits return the last
+// data immediately and recompute in the background.
+let progCache: { at: number; data: ProgramView[] } | null = null;
+let progInflight: Promise<ProgramView[]> | null = null;
+const PROG_TTL_MS = 60_000;
+const PROG_STALE_MS = 10 * 60_000;
+
+export function invalidateProgramsCache(): void {
+  progCache = null;
+}
+
+function refreshPrograms(): Promise<ProgramView[]> {
+  if (!progInflight) {
+    progInflight = detectPrograms()
+      .then((data) => {
+        progCache = { at: Date.now(), data };
+        return data;
+      })
+      .finally(() => {
+        progInflight = null;
+      });
+  }
+  return progInflight;
+}
+
+export async function getPrograms(force = false): Promise<ProgramView[]> {
+  if (!force && progCache) {
+    const age = Date.now() - progCache.at;
+    if (age < PROG_TTL_MS) return progCache.data;
+    if (age < PROG_STALE_MS) {
+      // Serve stale instantly; refresh for the next caller.
+      refreshPrograms().catch(() => {});
+      return progCache.data;
+    }
+  }
+  return refreshPrograms();
+}
+
+// Warm the cache at server start so the first Programs/Agents page load
+// doesn't pay the full detection cost.
+export function warmProgramsCache(): void {
+  refreshPrograms().catch(() => {});
+}
+
 // --- Installed programs inventory ---
 
 export async function listDesktopApps(): Promise<DesktopApp[]> {
@@ -464,7 +579,9 @@ export async function listDesktopApps(): Promise<DesktopApp[]> {
   const dirs = [
     `${HOST_FS}/usr/share/applications`,
     `${HOST_FS}/var/lib/snapd/desktop/applications`,
+    `${HOST_FS}/var/lib/flatpak/exports/share/applications`,
     `${HOST_FS}/home/${process.env.HOST_USER || 'root'}/.local/share/applications`,
+    `${HOST_FS}/home/${process.env.HOST_USER || 'root'}/.local/share/flatpak/exports/share/applications`,
   ];
   const seen = new Set<string>();
   for (const dir of dirs) {
@@ -600,15 +717,23 @@ export async function searchAptPackages(filter: string): Promise<{ name: string;
 }
 
 // Resolve a .desktop Icon= name/path to a servable file under /hostfs.
+// Apps install icons into <icon-root>/<theme>/<size>/apps — 'hicolor' is the
+// fallback theme every theme inherits, so covering it (system + flatpak +
+// user-local roots) resolves virtually every packaged icon.
 const ICON_EXTS = ['.png', '.svg', '.xpm'];
+const ICON_HOST_USER = process.env.HOST_USER || 'root';
+const ICON_SIZES = ['scalable', '256x256', '128x128', '96x96', '64x64', '48x48', '32x32', '24x24', '16x16'];
+const ICON_ROOTS = [
+  '/usr/share/icons',
+  '/usr/local/share/icons',
+  '/var/lib/flatpak/exports/share/icons',
+  `/home/${ICON_HOST_USER}/.local/share/icons`,
+];
 const ICON_DIRS = [
   '/usr/share/pixmaps',
-  '/usr/share/icons/hicolor/48x48/apps',
-  '/usr/share/icons/hicolor/scalable/apps',
-  '/usr/share/icons/hicolor/64x64/apps',
-  '/usr/share/icons/hicolor/128x128/apps',
-  '/usr/share/icons/hicolor/256x256/apps',
-  '/usr/share/icons/hicolor/32x32/apps',
+  '/usr/local/share/pixmaps',
+  `/home/${ICON_HOST_USER}/.local/share/pixmaps`,
+  ...ICON_ROOTS.flatMap((r) => ICON_SIZES.map((s) => `${r}/hicolor/${s}/apps`)),
   '/var/lib/snapd/desktop/icons',
   '/snap/icons',
 ];

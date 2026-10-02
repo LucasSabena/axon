@@ -1,4 +1,4 @@
-/* Ports Manager — frontend */
+/* AXON — frontend */
 'use strict';
 
 const $ = (sel) => document.querySelector(sel);
@@ -83,10 +83,10 @@ function fmtUptime(sec) {
 async function initAuth() {
   try {
     const me = await api('/api/me');
+    $('#login-code').classList.toggle('hidden', !me.totpEnabled);
     if (me.authenticated) {
       $('#login-screen').classList.add('hidden');
       $('#main-screen').classList.remove('hidden');
-      $('#user-name').textContent = me.username;
       bootMain();
       return;
     }
@@ -100,11 +100,13 @@ $('#login-form').addEventListener('submit', async (e) => {
   try {
     await api('/api/login', {
       method: 'POST',
-      body: { username: $('#username').value, password: $('#password').value },
+      body: { username: $('#username').value, password: $('#password').value, code: $('#login-code').value.trim() },
     });
     location.reload();
   } catch (err) {
     $('#login-error').textContent = err.message;
+    // Server says the 2FA code is wrong/required — make sure the field is visible.
+    if ((err.message || '').toLowerCase().includes('código')) $('#login-code').classList.remove('hidden');
   }
 });
 
@@ -613,9 +615,9 @@ let jobPollTimer = null;
 let currentJobId = null;
 let programsData = [];
 
-async function loadPrograms() {
+async function loadPrograms(fresh = false) {
   try {
-    const { programs } = await api('/api/programs');
+    const { programs } = await api(fresh ? '/api/programs?fresh=1' : '/api/programs');
     programsData = programs || [];
     $('#programs-updated').textContent = `Actualizado ${new Date().toLocaleTimeString()}`;
     renderPrograms(programsData);
@@ -712,7 +714,7 @@ $('#update-all-btn').addEventListener('click', async () => {
   }
 });
 
-$('#programs-refresh').addEventListener('click', loadPrograms);
+$('#programs-refresh').addEventListener('click', () => loadPrograms(true));
 
 $('#installed-load').addEventListener('click', loadInstalled);
 $('#installed-filter').addEventListener('input', () => renderInstalledFilter());
@@ -1378,6 +1380,7 @@ $('#settings-btn').addEventListener('click', async () => {
       .map(([port, svc]) => `${port}:${svc.name}:${svc.icon || ''}`)
       .join('\n');
     $('#settings-notify-url').value = s.notifyUrl || '';
+    updateTotpStatus(!!config.auth?.totpEnabled);
     $('#settings-error').textContent = '';
     $('#settings-modal').classList.remove('hidden');
   } catch (err) { errToast(err); }
@@ -1414,6 +1417,64 @@ $('#settings-form').addEventListener('submit', async (e) => {
   }
 });
 
+// ---------- TOTP (2FA) ----------
+// The settings row mirrors config.auth.totpEnabled; the modal is reused for
+// enable (QR + manual key) and disable (code only).
+
+function updateTotpStatus(enabled) {
+  $('#totp-status').textContent = enabled ? 'Activada' : 'Desactivada';
+  $('#totp-enable-btn').classList.toggle('hidden', enabled);
+  $('#totp-disable-btn').classList.toggle('hidden', !enabled);
+}
+
+let totpMode = 'enable';
+
+function openTotpModal(mode) {
+  totpMode = mode;
+  const enabling = mode === 'enable';
+  $('#totp-title').textContent = enabling ? 'Activar verificación en dos pasos' : 'Desactivar verificación en dos pasos';
+  $('#totp-desc').textContent = enabling
+    ? 'Escaneá el QR con tu app autenticadora (Google Authenticator, Aegis, 1Password…) e ingresá el código de 6 dígitos para confirmar.'
+    : 'Ingresá el código actual de tu app autenticadora para desactivar el 2FA.';
+  $('#totp-qr').innerHTML = '';
+  $('#totp-secret').textContent = '';
+  $('#totp-qr').classList.toggle('hidden', !enabling);
+  $('#totp-secret-wrap').classList.toggle('hidden', !enabling);
+  $('#totp-code').value = '';
+  $('#totp-error').textContent = '';
+  $('#totp-modal').classList.remove('hidden');
+  if (enabling) {
+    api('/api/auth/totp/setup', { method: 'POST' })
+      .then((res) => {
+        const qr = qrcode(0, 'M');
+        qr.addData(res.uri);
+        qr.make();
+        $('#totp-qr').innerHTML = qr.createSvgTag(6, 8);
+        $('#totp-secret').textContent = res.secret;
+      })
+      .catch((err) => { $('#totp-error').textContent = err.message; });
+  }
+  setTimeout(() => $('#totp-code').focus(), 50);
+}
+
+$('#totp-enable-btn').addEventListener('click', () => openTotpModal('enable'));
+$('#totp-disable-btn').addEventListener('click', () => openTotpModal('disable'));
+$('#totp-cancel').addEventListener('click', () => $('#totp-modal').classList.add('hidden'));
+$('#totp-confirm').addEventListener('click', async () => {
+  $('#totp-error').textContent = '';
+  try {
+    await api(`/api/auth/totp/${totpMode}`, { method: 'POST', body: { code: $('#totp-code').value.trim() } });
+    $('#totp-modal').classList.add('hidden');
+    updateTotpStatus(totpMode === 'enable');
+    toast(totpMode === 'enable' ? '2FA activado — el próximo login pide el código' : '2FA desactivado', 'ok');
+  } catch (err) {
+    $('#totp-error').textContent = err.message;
+  }
+});
+$('#totp-code').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); $('#totp-confirm').click(); }
+});
+
 // ---------- Boot ----------
 
 let portsTimer = null;
@@ -1446,7 +1507,7 @@ function setTheme(t) {
   drawSpark('spark-ram', sparkHist.ram);
 }
 $$('.theme-option').forEach((b) => b.addEventListener('click', () => setTheme(b.dataset.theme)));
-setTheme(localStorage.getItem(THEME_KEY) || 'linear');
+setTheme(localStorage.getItem(THEME_KEY) || 'axon');
 
 $('#sidebar-collapse').addEventListener('click', () => {
   document.body.classList.toggle('sidebar-collapsed');
@@ -1476,6 +1537,12 @@ function cmdkCommands() {
     { icon: 'package', label: 'Ir a Programas', hint: 'sección', run: () => gotoTab('programs') },
     { icon: 'container', label: 'Ir a Docker', hint: 'sección', run: () => gotoTab('docker') },
     { icon: 'globe', label: 'Ir a Dominios', hint: 'sección', run: () => gotoTab('domains') },
+    { icon: 'bot', label: 'Ir a Agents', hint: 'sección', run: () => document.querySelector('.tab-btn[data-tab="agents"]')?.click() },
+    { icon: 'layout-grid', label: 'Agents: matriz de MCPs', hint: 'sección', run: () => window.pmGotoAgent?.('__matrix') },
+    { icon: 'file-text', label: 'Agents: documentos', hint: 'sección', run: () => window.pmGotoAgent?.('__docs') },
+    ...(window.__pmAgents || []).filter((a) => a.installed).map((a) => ({
+      icon: 'bot', label: `Agente: ${a.name}`, hint: `${a.counts?.skills || 0} skills · ${a.counts?.mcps || 0} mcp`, run: () => window.pmGotoAgent?.(a.id),
+    })),
     { icon: 'settings', label: 'Abrir configuración', hint: 'acción', run: () => $('#settings-btn').click() },
     { icon: 'refresh-cw', label: 'Recargar puertos', hint: 'acción', run: () => loadPorts() },
     { icon: 'arrow-up-circle', label: 'Actualizar todo', hint: 'job', run: () => { gotoTab('programs'); $('#update-all-btn').click(); } },
@@ -1800,10 +1867,10 @@ function openTerm(cwd) {
   document.querySelector('.tab-btn[data-tab="terminal"]')?.click();
   if (cwd) {
     termCounter++;
-    openTermTab(`pm-term-${termCounter}`, cwd);
+    openTermTab(`axon-term-${termCounter}`, cwd);
   } else if (!termSessions.size) {
     termCounter++;
-    openTermTab('pm-term');
+    openTermTab('axon-term');
   }
 }
 
@@ -1816,7 +1883,7 @@ $('#term-pages').addEventListener('click', () => {
 $('#term-btn').addEventListener('click', () => openTerm());
 $('#term-new-tab').addEventListener('click', () => {
   termCounter++;
-  openTermTab(`pm-term-${termCounter}`);
+  openTermTab(`axon-term-${termCounter}`);
 });
 window.addEventListener('resize', () => { if (activeTerm) termSessions.get(activeTerm)?.fit.fit(); });
 
@@ -1825,7 +1892,7 @@ window.addEventListener('resize', () => { if (activeTerm) termSessions.get(activ
 function openTermCmd(cmd) {
   document.querySelector('.tab-btn[data-tab="terminal"]')?.click();
   termCounter++;
-  const sess = openTermTab(`pm-term-${termCounter}`);
+  const sess = openTermTab(`axon-term-${termCounter}`);
   const t = setInterval(() => {
     if (sess.ws?.readyState === 1) {
       clearInterval(t);
@@ -1850,7 +1917,7 @@ loaders.terminal = () => {
     const saved = savedTermSessions();
     termCounter = saved.length;
     for (const name of saved) openTermTab(name);
-    if (!termSessions.size) openTermTab('pm-term');
+    if (!termSessions.size) openTermTab('axon-term');
   } else if (activeTerm) {
     termSessions.get(activeTerm)?.fit.fit();
   }

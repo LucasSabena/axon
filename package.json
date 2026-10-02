@@ -1,7 +1,7 @@
 {
-  "name": "ports-manager",
+  "name": "axon",
   "version": "1.0.0",
-  "description": "Panel visual para gestionar proyectos de desarrollo, puertos y subdominios",
+  "description": "Panel de control web self-hosted para administrar un servidor completo: puertos, proyectos, Docker, dominios y más",
   "scripts": {
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",

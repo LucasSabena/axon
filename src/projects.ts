@@ -70,8 +70,8 @@ export async function detectProjectsOnDisk(): Promise<Project[]> {
   for (const dir of dirs) {
     await scanDir(dir, found, 0);
   }
-  // Self-exclusion: never offer ports-manager itself as a startable project.
-  return found.filter((p) => !p.cwd.endsWith('/ports-manager'));
+  // Self-exclusion: never offer axon itself as a startable project.
+  return found.filter((p) => !p.cwd.endsWith('/axon'));
 }
 
 async function scanDir(dir: string, found: Project[], depth: number) {
@@ -194,7 +194,9 @@ function cwdMatches(procCwd: string, projectCwd: string): boolean {
 
 export async function refreshRunning(): Promise<Project[]> {
   const processes = await listPortProcesses().catch(() => []);
-  for (const p of projects) {
+  // The kill -0 probes are independent — run them all at once instead of
+  // serially (each hostExec is a ~50ms spawn).
+  await Promise.all(projects.map(async (p) => {
     const match = processes.find(
       (proc) => proc.pid > 0 && cwdMatches(proc.cwd, p.cwd)
     );
@@ -205,7 +207,7 @@ export async function refreshRunning(): Promise<Project[]> {
       const alive = p.running.pid > 0 && (await hostExec(`kill -0 ${p.running.pid}`, { timeoutMs: 5000 })).ok;
       if (!alive) p.running = undefined;
     }
-  }
+  }));
   return projects;
 }
 

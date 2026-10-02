@@ -1,4 +1,4 @@
-# Ports Manager
+# AXON
 
 > Panel visual para gestionar **puertos activos**, **programas instalados** (con actualización en un click), proyectos de desarrollo, contenedores Docker y subdominios de Cloudflare — todo desde una interfaz web.
 >
@@ -16,7 +16,7 @@
 
 ```text
 ┌──────────────┬──────────────────────────────────────────────────────────────┐
-│ Ports Manager│  ⌘K Buscar…        CPU▁▂▅ RAM▃▅ DISK 69%  LOAD 0.9   ⚙  ⏻  │
+│ AXON         │  ⌘K Buscar…        CPU▁▂▅ RAM▃▅ DISK 69%  LOAD 0.9   ⚙  ⏻  │
 │              │                                                              │
 │ MONITOR      │  Puertos abiertos              [Todos][Proyectos][Servicios] │
 │ ▸ Puertos 52 │                                                              │
@@ -62,6 +62,15 @@
 - 🔧 **Configuración editable** desde la UI.
 - 🔗 **Links local y network** para cada servicio.
 - 🌐 **Dominio genérico**: funciona con cualquier dominio mediante `BASE_DOMAIN`.
+- 🤖 **Agents de IA**: detecta los agentes instalados (Codex, Claude Code, Devin, OpenCode, Gemini, Antigravity, OpenChamber, Cursor, Windsurf) y las skills compartidas (`~/.agents`). Vista master-detail con skills, MCP servers, plugins y cuentas de cada agente: activar/desactivar con el mecanismo nativo de cada uno (`enabled` en `config.toml`, `enabledPlugins`, prefijo `-`, parking a `_disabledMcpServers`, rename `SKILL.md.off`), borrar, agregar skills/MCPs nuevos (con propagación a otros agentes), login/logout y update vía jobs. Toda escritura deja backup `.axonbak`.
+  - **Búsqueda global**: el input del rail filtra agentes y encuentra items en TODOS los agentes (salta al agente + pestaña + item resaltado).
+  - **Matriz MCP×agente**: pseudo-vista que muestra qué MCP está activo en cada agente, con toggles por celda.
+  - **Item drawer**: click en una fila → panel con config completa, archivo fuente y acciones.
+  - **Health check**: los MCPs remotos (URL http) se pueden verificar con curl desde la fila o el drawer.
+  - **Config visual**: pestaña Config con labels/descripciones estilo VS Code Settings (bool→toggle, textos→input, objetos gestionados en su pestaña), sección **Credenciales** que expone secrets anidados (`provider.x.apiKey`, headers de MCPs) enmascarados con reemplazo, y lista de **backups `.axonbak`** con restauración.
+  - **Tab Doc**: el archivo de instrucciones global de cada agente (AGENTS.md, CLAUDE.md…) se ve/edita/crea desde su detalle.
+  - **Documentos**: pseudo-vista que descubre AGENTS.md/CLAUDE.md/reglas globales y de proyecto (barrido de `~/Proyectos`, `~/server-stack` y proyectos registrados), agrupados por proyecto, con lectura renderizada y edición; además lista **proyectos sin doc** con botón "Crear AGENTS.md".
+  - **⌘K**: comandos `Agente: <nombre>`, `Agents: matriz de MCPs` y `Agents: documentos` en la paleta.
 
 ---
 
@@ -79,7 +88,7 @@ flowchart TB
     end
 
     subgraph Servidor
-        PM[Ports Manager<br/>Bun + Hono :3457]
+        PM[AXON<br/>Bun + Hono :3457]
         Cloudflared[cloudflared]
         DockerSock[/var/run/docker.sock]
         ProcFs[/proc]
@@ -109,8 +118,8 @@ flowchart TB
 ### 1. Clonar el repositorio
 
 ```bash
-git clone https://github.com/LucasSabena/ports-manager.git
-cd ports-manager
+git clone https://github.com/LucasSabena/axon.git
+cd axon
 ```
 
 ### 2. Crear el archivo de entorno
@@ -135,7 +144,7 @@ BASE_DOMAIN=tu-dominio.com
 SESSION_SECRET=una-clave-larga-y-aleatoria
 ```
 
-> **Nota:** La API Key global de Cloudflare tiene más permisos que un token; Ports Manager prioriza `CLOUDFLARE_EMAIL` + `CLOUDFLARE_API_KEY`.
+> **Nota:** La API Key global de Cloudflare tiene más permisos que un token; AXON prioriza `CLOUDFLARE_EMAIL` + `CLOUDFLARE_API_KEY`.
 
 ### 3. Crear la configuración inicial
 
@@ -153,15 +162,15 @@ Usá este servicio como ejemplo dentro de tu `docker-compose.yml`:
 
 ```yaml
 services:
-  ports-manager:
-    build: ./ports-manager
-    container_name: ports-manager
+  axon:
+    build: ./axon
+    container_name: axon
     restart: unless-stopped
     pid: host
     network_mode: host
     privileged: true
     env_file:
-      - ./ports-manager/.env
+      - ./axon/.env
     environment:
       PORT: 3457
       CONFIG_PATH: /app/data/config.json
@@ -172,15 +181,15 @@ services:
       HOST_USER: tu-usuario-del-host        # usuario para comandos a nivel de usuario (pnpm, bun, systemctl --user)
       PROJECT_SCAN_DIRS: /home/tu-usuario/Proyectos
     volumes:
-      - ./ports-manager/data:/app/data
-      - ./ports-manager/public:/app/public:ro
+      - ./axon/data:/app/data
+      - ./axon/public:/app/public:ro
       - ./cloudflared/config.yml:/app/cloudflared-config.yml
       - /var/run/docker.sock:/var/run/docker.sock
       - /:/hostfs:ro                        # filesystem del host (read-only) para rutas reales
 ```
 
 ```bash
-docker compose up -d --build ports-manager
+docker compose up -d --build axon
 ```
 
 ### 5. Acceder
@@ -194,10 +203,10 @@ docker compose up -d --build ports-manager
 ## 🔄 Actualización
 
 ```bash
-cd ports-manager
+cd axon
 git pull origin main
 cd ..
-docker compose up -d --build ports-manager
+docker compose up -d --build axon
 ```
 
 Tus dominios y configuración se guardan en `data/config.json`, que persiste fuera de la imagen.
@@ -270,7 +279,7 @@ La pestaña **Proyectos** descubre automáticamente directorios con `package.jso
 - Nunca commitees `data/config.json` ni `.env`.
 - Las variables de entorno sensibles se ocultan automáticamente en la UI.
 - El contenedor requiere `privileged: true`, `pid: host` y `network_mode: host` para poder leer `/proc`, usar `ss` y el socket de Docker.
-- Ejecutá Ports Manager solo en redes privadas de confianza.
+- Ejecutá AXON solo en redes privadas de confianza.
 
 ---
 

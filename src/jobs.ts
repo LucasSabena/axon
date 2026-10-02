@@ -190,7 +190,7 @@ async function execute(job: Job, steps: JobStep[]) {
     anyFailed ? `Fallaron ${job.steps.filter((s) => s.status === 'failed').length} paso(s)` : 'Completado'
   );
   notify(
-    `Ports Manager — ${job.title}`,
+    `AXON — ${job.title}`,
     anyFailed
       ? `Terminó con ${job.steps.filter((s) => s.status === 'failed').length} paso(s) fallidos`
       : 'Completado correctamente',

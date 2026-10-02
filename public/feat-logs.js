@@ -1,4 +1,4 @@
-/* Ports Manager — feature: Logs en vivo
+/* AXON — feature: Logs en vivo
    Tab "Logs": tail -f / journalctl / docker logs sobre /ws/logs, renderizado
    en un pane xterm (mismo vendor que la terminal). Se auto-contiene: inyecta
    su <section>, su botón de nav y su CSS. Cierra el WS al salir del tab y lo

@@ -1,4 +1,4 @@
-/* Ports Manager — feature: Compose (editor visual de docker-compose)
+/* AXON — feature: Compose (editor visual de docker-compose)
    Self-contained: injects its own nav item + tab section, reuses app.js
    globals ($ $$ api esc icon toast errToast confirmDialog refreshIcons
    loaders openJobModal unloadBrowser activeTabName). */
