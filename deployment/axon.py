@@ -117,6 +117,7 @@ def checkout(root, state, ref):
     repo = root / 'repository.git'
     if not repo.exists():
         run(['git', 'clone', '--bare', state['repository'], repo])
+    run(['git', '--git-dir', repo, 'remote', 'set-url', 'origin', state['repository']])
     # Fetch exactly the requested branch/tag/revision; no working tree is reset.
     run(['git', '--git-dir', repo, 'fetch', '--force', 'origin', ref])
     revision = run(['git', '--git-dir', repo, 'rev-parse', 'FETCH_HEAD'], capture_output=True, text=True).stdout.strip()
@@ -285,14 +286,15 @@ def install(args):
     user = pwd.getpwnam(args.host_user)
     origin = args.origin or f'http://localhost:{args.port}'
     if not re.fullmatch(r'https?://[^/\s]+', origin): raise RuntimeError('Usá un origen completo sin ruta final, por ejemplo https://axon.example.com.')
+    if args.existing_data and not args.existing_data.is_dir(): raise RuntimeError('La carpeta --existing-data no existe.')
+    if args.existing_data and ',' in str(args.existing_data): raise RuntimeError('La ruta de datos no puede contener comas.')
+    cloudflared = str(args.cloudflared_config.resolve(strict=True)) if args.cloudflared_config else None
+    env = args.env_file.read_text() if args.env_file else ''
+    if not re.search(r'^SESSION_SECRET=.+$', env, re.M): env += '\nSESSION_SECRET=' + secrets.token_urlsafe(48) + '\n'
     root.mkdir(parents=True, mode=0o700, exist_ok=True)
     os.chmod(root, 0o700)
     data = root / 'data'
-    if args.existing_data and not args.existing_data.is_dir(): raise RuntimeError('La carpeta --existing-data no existe.')
-    if args.existing_data and ',' in str(args.existing_data): raise RuntimeError('La ruta de datos no puede contener comas.')
     data.mkdir(mode=0o700)
-    env = args.env_file.read_text() if args.env_file else ''
-    if not re.search(r'^SESSION_SECRET=.+$', env, re.M): env += '\nSESSION_SECRET=' + secrets.token_urlsafe(48) + '\n'
     atomic(root / '.env', env)
     password = None
     if not args.existing_data:
@@ -306,7 +308,7 @@ def install(args):
     state = {'schema': 1, 'repository': args.repository, 'name': args.name, 'port': args.port, 'bind': args.bind,
              'origin': origin, 'hostUser': user.pw_name, 'current': None, 'previous': None, 'operation': 'new'}
     if args.existing_data: state['pendingMigration'] = str(args.existing_data.resolve())
-    if args.cloudflared_config: state['cloudflaredConfig'] = str(args.cloudflared_config.resolve(strict=True))
+    if cloudflared: state['cloudflaredConfig'] = cloudflared
     save_state(root, state)
     atomic(root / 'manager.py', Path(__file__).read_text(), 0o700)
     atomic(root / 'axon', '#!/bin/sh\nexec python3 ' + shlex.quote(str(root / 'manager.py')) + ' --root ' + shlex.quote(str(root)) + ' \"$@\"\n', 0o700)
