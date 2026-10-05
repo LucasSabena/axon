@@ -164,6 +164,31 @@ def backup(root, old):
     return str(dest)
 
 
+def migrate_data(root, state, release):
+    source = state.get('pendingMigration')
+    if not source: return
+    # Older AXON containers own private files as root. Copy in an isolated
+    # container instead of weakening permissions or requiring sudo on the host.
+    worker = """import base64,json,shutil
+from pathlib import Path
+source=Path('/source'); target=Path('/target')
+config=json.loads((source/'config.json').read_text())
+auth=config.get('auth',{})
+password=auth.get('passwordHash','')
+if not isinstance(auth.get('username'),str) or not auth['username'] or ':' not in password:
+    raise RuntimeError('La configuración original no tiene un login válido.')
+salt,hashed=password.split(':',1)
+if not salt or len(base64.b64decode(hashed,validate=True))!=32:
+    raise RuntimeError('El hash del login original es inválido.')
+shutil.copytree(source,target,symlinks=True,dirs_exist_ok=True)
+"""
+    run(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'python3',
+        '--mount', f'type=bind,source={source},target=/source,readonly',
+        '--mount', f'type=bind,source={root / "data"},target=/target', release['image'], '-c', worker])
+    state['migratedFrom'] = state.pop('pendingMigration')
+    save_state(root, state)
+
+
 def verify(state, release):
     # Exact revision check also detects an occupied port or stale frontend/backend.
     with urllib.request.urlopen(f'http://127.0.0.1:{state["port"]}/api/health', timeout=10) as response:
@@ -236,6 +261,7 @@ def update(root, ref, rollback=False):
                     save_state(root, state)
                     print('Ya tenés la última versión solicitada.'); return
                 build(release, source)
+                if not state.get("current"): migrate_data(root, state, release)
             activate(root, state, release, source)
         except BaseException as error:
             if state.get('operation') not in ['rolled-back', 'recovery-required', 'failed']:
@@ -262,11 +288,9 @@ def install(args):
     root.mkdir(parents=True, mode=0o700, exist_ok=True)
     os.chmod(root, 0o700)
     data = root / 'data'
-    if args.existing_data:
-        if not (args.existing_data / 'config.json').is_file(): raise RuntimeError('No hay config.json en --existing-data.')
-        shutil.copytree(args.existing_data, data, symlinks=True)
-    else:
-        data.mkdir(mode=0o700)
+    if args.existing_data and not args.existing_data.is_dir(): raise RuntimeError('La carpeta --existing-data no existe.')
+    if args.existing_data and ',' in str(args.existing_data): raise RuntimeError('La ruta de datos no puede contener comas.')
+    data.mkdir(mode=0o700)
     env = args.env_file.read_text() if args.env_file else ''
     if not re.search(r'^SESSION_SECRET=.+$', env, re.M): env += '\nSESSION_SECRET=' + secrets.token_urlsafe(48) + '\n'
     atomic(root / '.env', env)
@@ -281,6 +305,7 @@ def install(args):
         atomic(root / 'initial-password.txt', password + '\n')
     state = {'schema': 1, 'repository': args.repository, 'name': args.name, 'port': args.port, 'bind': args.bind,
              'origin': origin, 'hostUser': user.pw_name, 'current': None, 'previous': None, 'operation': 'new'}
+    if args.existing_data: state['pendingMigration'] = str(args.existing_data.resolve())
     if args.cloudflared_config: state['cloudflaredConfig'] = str(args.cloudflared_config.resolve(strict=True))
     save_state(root, state)
     atomic(root / 'manager.py', Path(__file__).read_text(), 0o700)

@@ -61,6 +61,6 @@ No se hace limpieza automática de imágenes, versiones ni respaldos. El volumen
 
 El instalador no adopta automáticamente un contenedor llamado `axon`. El nombre predeterminado nuevo es `axon-managed` y su etiqueta `io.axon.installation` identifica qué CLI puede administrarlo. Si el nombre está ocupado por otro despliegue, la instalación se rechaza antes de reemplazarlo.
 
-La migración desde Compose requiere `--existing-data` y, si corresponde, `--env-file`, `--origin` y `--cloudflared-config`. Detené primero la instancia anterior para que la copia sea consistente. El origen debe coincidir con la URL del navegador para que funcionen las operaciones protegidas contra solicitudes de otro sitio.
+La migración desde Compose requiere `--existing-data` y, si corresponde, `--env-file`, `--origin` y `--cloudflared-config`. Detené primero la instancia anterior para que la copia sea consistente. La copia se realiza en un contenedor aislado, con el origen montado en lectura, para conservar también archivos privados creados por root sin cambiar sus permisos. El origen debe coincidir con la URL del navegador para que funcionen las operaciones protegidas contra solicitudes de otro sitio.
 
 Las autorizaciones específicas del optimizador pertenecen a `data/optimizer-audited-databases.json`, no al repositorio. Una instalación nueva no autoriza ninguna base de datos. Si migrás una instalación con autorizaciones previamente revisadas, copiá ese archivo junto con sus datos; cambiar el ID, imagen, creación o puertos de un contenedor invalida la coincidencia.
