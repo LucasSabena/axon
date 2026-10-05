@@ -29,13 +29,16 @@
   if (!menuBtn) return; // no hamburger in markup — nothing else to do
 
   const syncBtn = () => {
-    menuBtn.setAttribute('aria-expanded', body.classList.contains('sidebar-open') ? 'true' : 'false');
+    const open=body.classList.contains('sidebar-open');
+    menuBtn.setAttribute('aria-expanded',open?'true':'false');
+    const sidebar=document.querySelector('.sidebar');if(sidebar)sidebar.inert=mq.matches&&!open;
   };
   const close = () => { body.classList.remove('sidebar-open'); syncBtn(); };
   const toggle = () => {
     if (!mq.matches) return;
     body.classList.toggle('sidebar-open');
     syncBtn();
+    if(body.classList.contains('sidebar-open'))document.querySelector('.sidebar .nav-item')?.focus();
   };
 
   // Backdrop created here (styles in app.css); clicking it = outside click → close.
@@ -45,7 +48,7 @@
   body.appendChild(backdrop);
   backdrop.addEventListener('click', close);
 
-  menuBtn.setAttribute('aria-expanded', 'false');
+  syncBtn();
   menuBtn.addEventListener('click', (e) => { e.stopPropagation(); toggle(); });
 
   // Close the drawer once a destination is picked.
@@ -63,10 +66,18 @@
       close();
       menuBtn.focus();
     }
+    if(e.key==='Tab'&&mq.matches&&body.classList.contains('sidebar-open')){
+      const controls=[menuBtn,...document.querySelectorAll('.sidebar a[href], .sidebar button')].filter(n=>!n.disabled&&n.getClientRects().length);
+      const first=controls[0],last=controls.at(-1);
+      if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}
+      else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}
+    }
   });
+  document.addEventListener('axon:section',close);
+  new MutationObserver(syncBtn).observe(body,{attributes:true,attributeFilter:['class']});
 
   // Always reset the drawer when leaving the mobile breakpoint.
-  const onBreakpoint = () => { if (!mq.matches) close(); };
+  const onBreakpoint = () => { if (!mq.matches) close(); else syncBtn(); };
   if (mq.addEventListener) mq.addEventListener('change', onBreakpoint);
   else if (mq.addListener) mq.addListener(onBreakpoint); // Safari < 14
 })();

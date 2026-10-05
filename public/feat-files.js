@@ -23,11 +23,19 @@
           <button id="fm-hidden-btn" class="btn-secondary" title="Mostrar/ocultar archivos ocultos (Ctrl+H)">${icon('eye-off')}</button>
           <button id="fm-upload-btn" class="btn-secondary" title="Subir archivos">${icon('upload')} Subir</button>
           <button id="fm-upload-dir-btn" class="btn-secondary" title="Subir una carpeta completa">${icon('folder-up')} Carpeta</button>
+          <button id="fm-new-file-btn" class="btn-secondary" title="Crear un archivo (Ctrl+Alt+N)">${icon('file-plus')} Nuevo archivo</button>
           <button id="fm-mkdir-btn" class="btn-secondary">${icon('folder-plus')} Nueva carpeta</button>
           <button id="fm-refresh-btn" class="btn-secondary" title="Actualizar">${icon('refresh-cw')}</button>
         </div>
       </div>
       <div class="fm-breadcrumb" id="fm-breadcrumb"></div>
+      <div class="location-bar"><div class="page-history">
+        <button class="icon-btn" data-axon-back title="Atrás" aria-label="Atrás">${icon('arrow-left')}</button>
+        <button class="icon-btn" data-axon-forward title="Adelante" aria-label="Adelante">${icon('arrow-right')}</button>
+        <button class="icon-btn" id="fm-parent" title="Carpeta superior (Alt+↑)" aria-label="Carpeta superior">${icon('arrow-up')}</button>
+      </div><form id="fm-location-form"><input id="fm-location" aria-label="Carpeta actual" placeholder="Ir a una carpeta…" autocomplete="off" spellcheck="false"></form>
+      <button class="icon-btn" data-axon-copy title="Copiar enlace" aria-label="Copiar enlace">${icon('link')}</button>
+      <button class="icon-btn" id="fm-keys" title="Atajos de teclado" aria-label="Atajos de teclado">${icon('keyboard')}</button></div>
       <p class="listener-note fm-note">Archivos del servidor — lectura directa; las escrituras corren como tu usuario del host.</p>
     </div>
     <div class="fm-main" id="fm-main">
@@ -81,7 +89,7 @@
           <button id="fm-back-btn" class="btn-secondary">${icon('arrow-left')} Volver</button>
         </div>
       </div>
-      <textarea id="fm-editor-text" class="mono" spellcheck="false" wrap="off"></textarea>
+      <textarea id="fm-editor-text" class="mono" aria-label="Contenido del archivo" spellcheck="false" wrap="off"></textarea>
       <p class="listener-note">Ctrl/Cmd+S guarda · Esc vuelve a la lista</p>
     </div>
     <input type="file" id="fm-file-input" class="hidden" multiple>
@@ -114,6 +122,7 @@
     editingPath: null,
     readOnly: false,
     originalContent: '',
+    lineEnding: '\n',
     dragDepth: 0,
     sel: new Set(),   // multi-selection (names within cwd)
     anchor: null,     // last-clicked row name — shift+click range base
@@ -197,7 +206,7 @@
     if (VID_EXT.has(ext)) return 'video';
     if (AUD_EXT.has(ext)) return 'audio';
     if (ext === 'pdf') return 'pdf';
-    if (CODE_EXT.has(ext) || TEXT_EXT.has(ext) || !name.includes('.')) return 'text';
+    if (CODE_EXT.has(ext) || TEXT_EXT.has(ext) || !name.includes('.') || /^\.env(?:\.|$)/i.test(name)) return 'text';
     return 'other';
   }
 
@@ -231,6 +240,7 @@
   }
 
   function renderCrumbs() {
+    el('fm-location').value = S.cwd;
     const parts = S.cwd.split('/').filter(Boolean);
     let html = `<button class="fm-crumb" data-p="${esc(S.home || '/')}">${icon('home')} Inicio</button>`;
     let acc = '';
@@ -239,6 +249,7 @@
       html += `<span class="fm-sep">/</span><button class="fm-crumb" data-p="${esc(acc)}">${esc(seg)}</button>`;
     }
     el('fm-breadcrumb').innerHTML = html;
+    el('fm-breadcrumb').lastElementChild?.setAttribute('aria-current', 'location');
     refreshIcons();
   }
 
@@ -554,6 +565,7 @@
     c.innerHTML = S.cols.map((col, i) => colHtml(col, i)).join('');
     // Keep the deepest column in view.
     requestAnimationFrame(() => {
+      if(window.AxonNavigation?.applying)return;
       const last = c.lastElementChild;
       if (last) last.scrollIntoView({ inline: 'end', block: 'nearest' });
       const selRow = c.querySelector('.fm-col:last-child .fm-col-row.fm-selected');
@@ -562,7 +574,13 @@
   }
 
   // Push a directory column onto the stack and fetch its entries.
-  async function drill(path) {
+  async function drill(path, fromRoute = false) {
+    if (window.AxonNavigation?.ready && !window.AxonNavigation.applying && !fromRoute) {
+      const snapshot = captureFiles();
+      snapshot.cols = [...snapshot.cols, { path, sel: [], top: 0 }];
+      snapshot.scroll['fm-cols'][0]=Number.MAX_SAFE_INTEGER;
+      return window.AxonNavigation.go(window.AxonNavigation.url('files', { ...fileParams(), path, item: null, edit: null }), { view: snapshot });
+    }
     const col = { path, entries: [], sel: new Set(), loading: true, error: null };
     S.cols.push(col);
     renderCols();
@@ -570,6 +588,7 @@
       const data = await api(`/api/files?path=${encodeURIComponent(path)}`, {
         signal: AbortSignal.timeout(25_000),
       });
+      if(!S.cols.includes(col))return;
       if (inTrash(data.path)) await loadTrashNames(data.path);
       col.entries = trashify(data.entries || [], data.path);
       col.loading = false;
@@ -605,6 +624,7 @@
     // Selecting in a column discards every deeper column (Finder semantics).
     S.cols = S.cols.slice(0, i + 1);
     if (name === '..') {
+      if(window.AxonNavigation?.ready && !window.AxonNavigation.applying){const snap=captureFiles();snap.cols=snap.cols.slice(0,i);const target=snap.cols.at(-1)?.path || parentOf(col.path);void window.AxonNavigation.go(window.AxonNavigation.url('files',{...fileParams(),path:target,item:null,edit:null}),{view:snap});return;}
       // Pop this column: parent column is the new deepest level.
       S.cols.pop();
       const prev = S.cols[S.cols.length - 1];
@@ -669,8 +689,15 @@
   }
 
   // ---------- Navigation ----------
-  async function navigate(p) {
+  async function navigate(p, fromRoute = false) {
+    const nav = window.AxonNavigation;
+    if (nav?.ready && !nav.applying && !fromRoute) {
+      const target = p || S.cwd || '~';
+      const prior = fileLocations[target] || (target===S.cwd ? captureFiles() : undefined);
+      return nav.go(nav.url('files', { ...fileParams(), path: target, item: null, edit: null, ...(target!==S.cwd?{search:null,q:S.filter || null}:{}) }), { view: prior });
+    }
     S.navId++;
+    const request = S.navId;
     if (S.searchMode) toggleSearch(false);
     S.anchor = null;
     S.cursor = null;
@@ -679,7 +706,7 @@
       S.cols = [];
       setState('');
       render(); // syncs container visibility before the first drill lands
-      await drill(p ?? S.cwd ?? '');
+      await drill(p ?? S.cwd ?? '', true);
       return;
     }
     S.sel.clear();
@@ -687,6 +714,7 @@
     try {
       const q = p ? `?path=${encodeURIComponent(p)}` : '';
       const data = await api(`/api/files${q}`, { signal: AbortSignal.timeout(25_000) });
+      if (request !== S.navId) return;
       S.cwd = data.path;
       if (!S.home && data.home) S.home = data.home;
       if (inTrash(data.path)) await loadTrashNames(data.path);
@@ -701,6 +729,7 @@
   }
 
   function loadFiles() {
+    if (window.AxonNavigation) return;
     // Runs every time the tab opens — refresh the current dir, or home first time.
     navigate(S.cwd || undefined);
   }
@@ -767,11 +796,17 @@
     refreshIcons();
   }
 
-  function openPreview(name) {
+  function openPreview(name, fromRoute = false) {
+    const nav = window.AxonNavigation;
+    if (nav?.ready && !nav.applying && !fromRoute && (nav.current.params.item !== name || nav.current.params.edit)) {
+      void nav.go(nav.url('files', { ...fileParams(), item: name, edit: null }), { view: captureFiles(), transient: true });
+      return;
+    }
     const entry = S.entries.find((e) => e.name === name);
     const p = join(S.cwd, name);
     const kind = kindFor(name);
     S.preview = { path: p, name, kind };
+    window.AxonRecent?.add({section:'files',name,path:p,url:window.AxonNavigation.url('files',{...fileParams(),item:name,edit:null})});
     el('fm-preview').classList.remove('hidden');
     el('fm-resize').classList.remove('hidden');
     el('fm-prev-name').textContent = name;
@@ -833,7 +868,7 @@
       api(`/api/files/read?path=${encodeURIComponent(p)}`, { signal: AbortSignal.timeout(20_000) })
         .then((data) => {
           if (stale()) return;
-          if (String(data.content || '').includes('')) {
+          if (data.binary || String(data.content || '').includes('\u0000')) {
             renderPrevFallback('Archivo binario — sin vista de texto');
             return;
           }
@@ -858,7 +893,10 @@
     refreshIcons();
   }
 
-  function closePreview() {
+  function closePreview(fromRoute = false) {
+    if (!fromRoute && window.AxonNavigation?.ready && !window.AxonNavigation.applying && window.AxonNavigation.current.params.item && !S.editingPath) {
+      window.AxonNavigation.close({ ...fileParams(), item: null, edit: null }); return;
+    }
     if (!S.preview) return;
     S.preview = null;
     // innerHTML reset also stops any playing audio/video.
@@ -930,16 +968,25 @@
   });
 
   // ---------- Editor ----------
-  async function openEditor(p) {
+  async function openEditor(p, fromRoute = false) {
+    const nav = window.AxonNavigation;
+    if (nav?.ready && !nav.applying && !fromRoute) {
+      return nav.go(nav.url('files', { ...fileParams(), path: parentOf(p), item: p.split('/').pop(), edit: '1' }), { view: captureFiles(), transient: true });
+    }
+    const routeParams=nav?.current?.params;
     try {
       const data = await api(`/api/files/read?path=${encodeURIComponent(p)}`);
+      if(nav?.ready && (nav.current.section!=='files' || nav.current.params!==routeParams)) return;
+      window.AxonRecent?.add({section:'files',name:p.split('/').pop(),path:p,url:nav.url('files',{...fileParams(),path:parentOf(p),item:p.split('/').pop(),edit:'1'})});
       S.editingPath = data.path;
-      const binary = String(data.content || '').includes('\u0000');
+      S.editRevision=data.revision;
+      const binary = data.binary || String(data.content || '').includes('\u0000');
       S.readOnly = Boolean(data.truncated) || binary;
 
       el('fm-editor-name').textContent = data.path;
       el('fm-editor-text').value = data.content || '';
-      S.originalContent = data.content || '';
+      S.lineEnding = /\r\n/.test(data.content || '') ? '\r\n' : '\n';
+      S.originalContent = el('fm-editor-text').value;
       el('fm-editor-text').readOnly = S.readOnly;
       el('fm-save-btn').disabled = S.readOnly;
       updateDirty();
@@ -949,7 +996,7 @@
         flag.textContent = 'Truncado (>512KB) — solo lectura';
         flag.classList.remove('hidden');
       } else if (binary) {
-        flag.textContent = 'Binario — solo lectura';
+        flag.textContent = 'Binario o codificación distinta de UTF-8 — solo lectura';
         flag.classList.remove('hidden');
       } else {
         flag.classList.add('hidden');
@@ -964,6 +1011,9 @@
   }
 
   function closeEditor(refresh) {
+    if (window.AxonNavigation?.ready && !window.AxonNavigation.applying && window.AxonNavigation.current.params.edit) {
+      window.AxonNavigation.close({ ...fileParams(), item: null, edit: null }); return;
+    }
     S.editingPath = null;
     S.readOnly = false;
     S.originalContent = '';
@@ -991,6 +1041,7 @@
           ? await confirmDialog('Salir del editor', msg, 'Salir')
           : await fmConfirm(msg);
       if (!ok) return;
+      S.originalContent = el('fm-editor-text').value;
     }
     closeEditor(true);
   }
@@ -1030,14 +1081,15 @@
 
   // ---------- Save (with diff preview) ----------
   async function doSave(content) {
+    const savedPath = S.editingPath;
+    const bytes = S.lineEnding === '\r\n' ? content.replace(/\r?\n/g, '\r\n') : content;
     try {
-      await api('/api/files/write', {
+      const result=await api('/api/files/write', {
         method: 'POST',
-        body: { path: S.editingPath, content },
+        body: { path: savedPath, content: bytes,revision:S.editRevision },
       });
-      S.originalContent = content;
-      updateDirty();
-      toast(`Guardado: ${S.editingPath.split('/').pop()}`, 'ok', '', 3000);
+      if (S.editingPath === savedPath) { S.editRevision=result.revision;S.originalContent = content; updateDirty(); }
+      toast(`Guardado: ${savedPath.split('/').pop()}`, 'ok', '', 3000);
       return true;
     } catch (err) {
       errToast(err);
@@ -1137,13 +1189,15 @@
   }
 
   function openDiffModal(newVal) {
+    if (document.querySelector('.fm-diff-modal')) return;
     const rows = diffLines(S.originalContent, newVal) || diffFallback(S.originalContent, newVal);
     const adds = rows.reduce((k, r) => k + (r.t === 'add' ? 1 : 0), 0);
     const dels = rows.reduce((k, r) => k + (r.t === 'del' ? 1 : 0), 0);
     const modal = document.createElement('div');
     modal.className = 'modal fm-diff-modal';
     modal.innerHTML = `
-      <div class="fm-diff-content">
+      <div class="modal-content fm-diff-content">
+        <h3>Revisar cambios antes de guardar</h3>
         <div class="fm-diff-header">
           <span class="mono fm-diff-path"></span>
           <span class="fm-diff-stats"></span>
@@ -1311,6 +1365,14 @@
 
   // Keyboard-focus ring — visually distinct from selection (dashed outline).
   function markCursor() {
+    const scope = S.searchMode ? el('fm-tbody') : S.view === 'grid' ? el('fm-grid') : S.view === 'cols' ? el('fm-cols').lastElementChild : el('fm-tbody');
+    const rows = Array.from(scope?.querySelectorAll('[data-name]') || []);
+    const current = S.cursor || rows[0]?.dataset.name;
+    rows.forEach((row) => {
+      row.tabIndex = row.dataset.name === current ? 0 : -1;
+      row.setAttribute('aria-selected', String(S.sel.has(row.dataset.name)));
+      if(S.view!=='list')row.setAttribute('role','option');
+    });
     sec.querySelectorAll('.fm-focused').forEach((n) => n.classList.remove('fm-focused'));
     if (!S.cursor) return;
     const t = sec.querySelector(`#fm-tbody [data-name="${CSS.escape(S.cursor)}"], #fm-grid [data-name="${CSS.escape(S.cursor)}"]`);
@@ -1517,19 +1579,17 @@
   // ---------- Trash & undo journal ----------
   // Deletes go to a real trash dir (recoverable). Every mutating op records an
   // inverse closure so Ctrl+Z walks backwards through rename/move/trash/copy.
-  const inTrash = (dir) => S.trashDir && (dir === S.trashDir || dir.startsWith(S.trashDir + '/'));
+  const inTrash = (dir) => (S.trashDirs || [S.trashDir]).filter(Boolean).some(root => dir === root || dir.startsWith(root + '/'));
 
   // Trashed items live under random ids; the manifest maps them back to the
   // original name/location for a readable listing (ops still use the id).
   async function loadTrashNames(dir) {
     S.trashNames = {};
     try {
-      const r = await api(`/api/files/read?path=${encodeURIComponent(join(dir, '.manifest.json'))}`, {
-        signal: AbortSignal.timeout(10_000),
-      });
-      const items = JSON.parse(r.content || '[]');
-      for (const it of items) S.trashNames[it.id] = it;
-    } catch { /* no manifest — rows show raw ids */ }
+      const r = await api('/api/files/trash/info');
+      S.trashDirs = r.dirs || [r.dir];
+      for (const it of r.items || []) if (it.path.startsWith(dir + '/')) S.trashNames[it.key] = {...it, name:it.name, orig:it.orig};
+    } catch (err) { toast('No se pudieron leer los metadatos de papelera', 'error', err.message); }
   }
 
   const trashify = (entries, dir) => {
@@ -1551,7 +1611,7 @@
     }
     return data;
   }
-  const apiRestore = (ids) => api('/api/files/trash/restore', { method: 'POST', body: { ids } });
+  const apiRestore = (ids) => api('/api/files/trash/restore', { method: 'POST', body: { ids: ids.map(id => S.trashNames[id]?.id || id) } });
   const apiRename = (from, to) => api('/api/files/rename', { method: 'POST', body: { from, to } });
   const apiMkdir = (p) => api('/api/files/mkdir', { method: 'POST', body: { path: p } });
   const apiDeleteHard = (p) => api('/api/files/delete', { method: 'POST', body: { path: p, confirm: true } });
@@ -1657,11 +1717,11 @@
   }
 
   async function emptyTrash() {
-    const ok = await confirmDialog('Vaciar papelera', 'Se borran permanentemente todos los elementos de la papelera.');
+    const ok = await confirmDialog('Revisar papeleras', 'El vaciado permanente requiere un plan de selección verificado. Podés analizar ambas papeleras en Almacenamiento.');
     if (!ok) return;
     try {
-      await api('/api/files/trash/empty', { method: 'POST', body: { confirm: true } });
-      toast('Papelera vaciada', 'ok', '', 2500);
+      await window.AxonNavigation.go('/almacenamiento?view=cleanup');
+      return;
     } catch (err) {
       errToast(err);
     }
@@ -1681,7 +1741,7 @@
       const to = join(destDir, target);
       try {
         if (mode === 'cut') {
-          await apiRename(from, to);
+          await copyWithJobs(from,to,name,'move');
           out.moved.push({ from, to });
         } else {
           await copyWithJobs(from, to, name);
@@ -1708,8 +1768,8 @@
 
   // Copy via the job endpoint when it makes sense — small copies still return
   // fast because cp finishes before the first poll.
-  async function copyWithJobs(from, to, label) {
-    const data = await api('/api/files/copyjob', { method: 'POST', body: { from, to } });
+  async function copyWithJobs(from, to, label, mode='copy') {
+    const data = await api('/api/files/copyjob', { method: 'POST', body: { from, to, mode } });
     const jobId = data.jobId;
     if (!jobId) return;
     trackJob(jobId, label);
@@ -1718,6 +1778,18 @@
     const rec = S.jobs.get(jobId);
     await rec.done;
     if (rec.error) throw new Error(rec.error);
+  }
+
+  async function restoreTransfers(){
+    try {
+      const result=await api('/api/files/transfers',{fresh:true});
+      for(const op of result.operations||[])if(['running','planned','cancel-requested'].includes(op.state)&&!S.jobs.has(op.id))trackJob(op.id,op.to.split('/').pop());
+      let history=document.getElementById('fm-transfer-history');
+      if(!history){history=document.createElement('details');history.id='fm-transfer-history';history.className='maint-panel';sec.append(history);}
+      history.innerHTML=`<summary>Historial de transferencias (${result.operations.length})</summary><p>Los movimientos entre discos conservan un original recuperable. No liberan espacio automáticamente.</p>${result.operations.map(op=>`<article><b>${esc(op.mode==='move'?'Movimiento':'Copia')} · ${esc(op.state)}</b><p class="maint-path">${esc(op.from)} → ${esc(op.to)}</p><p>${esc(op.message||'Resultado en curso')}</p>${op.recoveryPath?`<p>Original conservado: <span class="maint-path">${esc(op.recoveryPath)}</span>. Podés copiarlo desde Archivos a un destino libre.</p>`:''}${op.partialPath?`<p>Contenido parcial conservado: <span class="maint-path">${esc(op.partialPath)}</span>. Revisalo antes de decidir qué conservar.</p>`:''}${op.mode==='move'&&['verified','interrupted'].includes(op.state)?`<button class="btn-secondary" data-transfer-recover="${esc(op.id)}">Devolver original al origen</button>`:''}<button class="btn-secondary" data-transfer-refresh="${esc(op.id)}">Comprobar resultado</button></article>`).join('')||'<p>Todavía no hay transferencias.</p>'}`;
+      history.querySelectorAll('[data-transfer-recover]').forEach(b=>b.onclick=async()=>{if(!await confirmDialog('Recuperar original','Se devuelve el original a su origen si está libre; se conservan las copias.'))return;try{await api(`/api/files/transfers/${b.dataset.transferRecover}/recover`,{method:'POST',body:{}});await restoreTransfers();}catch(e){errToast(e);}});
+      history.querySelectorAll('[data-transfer-refresh]').forEach(b=>b.onclick=async()=>{b.disabled=true;try{await api(`/api/files/transfers/${b.dataset.transferRefresh}`,{fresh:true});await restoreTransfers();}catch(e){errToast(e);}finally{b.disabled=false;}});
+    }catch(e){errToast(e);}
   }
 
   function trackJob(jobId, label) {
@@ -1731,8 +1803,8 @@
           const st = await api(`/api/files/copyjob/${jobId}`);
           rec2.pct = st.pct;
           renderJobs();
-          if (st.error) { rec2.error = st.error; S.jobs.delete(jobId); renderJobs(); return; }
-          if (st.done) { S.jobs.delete(jobId); renderJobs(); return; }
+          if (st.error) { rec2.error = st.error; S.jobs.delete(jobId); renderJobs(); errToast(new Error(st.error));await restoreTransfers();return; }
+          if (st.done) { S.jobs.delete(jobId); renderJobs();await restoreTransfers();return; }
         } catch (err) {
           rec2.error = err.message;
           S.jobs.delete(jobId);
@@ -1745,7 +1817,7 @@
       rec.error = 'Cancelado';
       S.jobs.delete(jobId);
       renderJobs();
-      try { await api(`/api/files/copyjob/${jobId}`, { method: 'DELETE' }); } catch { /* gone */ }
+      try { await api(`/api/files/copyjob/${jobId}`, { method: 'DELETE' });await restoreTransfers(); } catch(e) {errToast(e);}
     };
     S.jobs.set(jobId, rec);
     renderJobs();
@@ -1952,6 +2024,7 @@
       // Empty space → area menu.
       e.preventDefault();
       const items = [
+        { icon: 'file-plus', label: 'Nuevo archivo', run: () => createFile() },
         { icon: 'folder-plus', label: 'Nueva carpeta', run: () => el('fm-mkdir-btn').click() },
         { icon: 'upload', label: 'Subir archivos', run: () => el('fm-file-input').click() },
       ];
@@ -2004,6 +2077,7 @@
     if (type === 'dir' && typeof openTermCmd === 'function') {
       items.push({ icon: 'terminal', label: 'Terminal en esta carpeta', run: () => openTermCmd(`cd '${p.replace(/'/g, `'\\''`)}'`) });
     }
+    if (type === 'dir') items.push({ icon: 'file-plus', label: 'Nuevo archivo en esta carpeta', run: () => createFile(p) });
     if (type !== 'dir') {
       items.push(
         { icon: 'eye', label: 'Vista previa', run: () => { S.cwd = basePath; if (colI !== null && S.cols[colI]) S.entries = S.cols[colI].entries; openPreview(name); } },
@@ -2153,6 +2227,7 @@
     scope
       ?.querySelector(`[data-name="${CSS.escape(S.cursor)}"]`)
       ?.scrollIntoView({ block: 'nearest' });
+    scope?.querySelector(`[data-name="${CSS.escape(S.cursor)}"]`)?.focus({ preventScroll: true });
   }
 
   function selectName(name) {
@@ -2249,6 +2324,7 @@
       }
     } else if (k === 'ArrowLeft' || k === 'Backspace') {
       if (S.cols.length <= 1) return;
+      if(window.AxonNavigation?.ready && !window.AxonNavigation.applying){const snap=captureFiles();snap.cols.pop();void window.AxonNavigation.go(window.AxonNavigation.url('files',{...fileParams(),path:snap.cols.at(-1).path,item:null,edit:null}),{view:snap});return;}
       S.cols.pop();
       const prev = S.cols[S.cols.length - 1];
       S.sel = prev.sel;
@@ -2329,6 +2405,9 @@
       } else if (kl === 'h') {
         e.preventDefault();
         toggleHidden();
+      } else if (kl === 'n' && e.altKey) {
+        e.preventDefault();
+        el('fm-new-file-btn').click();
       } else if (kl === 'n' && e.shiftKey) {
         e.preventDefault();
         el('fm-mkdir-btn').click();
@@ -2476,6 +2555,7 @@
       ['Supr', 'A la papelera (dentro de ella: definitivo)'],
       ['Ctrl+H', 'Mostrar/ocultar archivos ocultos'],
       ['Ctrl+F', 'Búsqueda recursiva'],
+      ['Ctrl+Alt+N · Ctrl+Shift+N', 'Nuevo archivo · nueva carpeta'],
       ['/', 'Enfocar filtro'],
       ['Espacio', 'Vista previa rápida'],
       ['←/→ con preview', 'Archivo anterior/siguiente'],
@@ -2535,8 +2615,87 @@
     });
   }
 
+  // ---------- New file ----------
+  async function createFile(dir = S.cwd) {
+    if (!dir || inTrash(dir) || document.querySelector('.fm-create-modal')) return;
+    // Let the existing navigation guard resolve unsaved editor changes first.
+    if (S.editingPath) {
+      if (window.AxonNavigation?.ready) {
+        const left = await window.AxonNavigation.go(window.AxonNavigation.url('files', { ...fileParams(), item: null, edit: null }));
+        if (!left) return;
+      } else {
+        await confirmCloseEditor();
+        if (S.editingPath) return;
+      }
+    }
+    const modal = document.createElement('div');
+    modal.className = 'modal fm-create-modal';
+    modal.innerHTML = `
+      <form class="modal-content fm-create-form">
+        <h3>Nuevo archivo</h3>
+        <p class="listener-note">Se creará vacío en <span class="mono fm-create-path"></span></p>
+        <label class="fm-prompt-label" for="fm-create-name"><span>Nombre completo, incluida la extensión</span></label>
+        <input id="fm-create-name" class="fm-prompt-input" required autocomplete="off" spellcheck="false"
+          placeholder="archivo.txt, .env, config.json…" aria-describedby="fm-create-help fm-create-error">
+        <div class="fm-create-presets" role="group" aria-label="Nombres rápidos">
+          <button type="button" class="btn-secondary" data-name="archivo.txt">${icon('file-text')} Texto (.txt)</button>
+          <button type="button" class="btn-secondary" data-name=".env">${icon('file-code')} Entorno (.env)</button>
+          <button type="button" class="btn-secondary" data-name="config.json">JSON</button>
+        </div>
+        <p id="fm-create-help" class="listener-note">Podés usar cualquier extensión o dejarlo sin extensión. Después se abre el editor de texto.</p>
+        <p id="fm-create-error" class="fm-create-error hidden" role="alert"></p>
+        <div class="modal-actions">
+          <button type="button" class="btn-secondary fm-create-cancel">Cancelar</button>
+          <button type="submit" class="btn-primary fm-create-submit">${icon('file-plus')} Crear y editar</button>
+        </div>
+      </form>`;
+    modal.querySelector('.fm-create-path').textContent = dir;
+    const input = modal.querySelector('#fm-create-name');
+    const error = modal.querySelector('#fm-create-error');
+    let pending = false;
+    const cancel = () => { if (!pending) modal.remove(); };
+    modal.querySelector('.fm-create-cancel').addEventListener('click', cancel);
+    modal.addEventListener('axon:dialog-cancel', cancel);
+    modal.addEventListener('click', e => { if (e.target === modal) cancel(); });
+    modal.querySelectorAll('[data-name]').forEach(button => button.addEventListener('click', () => {
+      input.value = button.dataset.name; input.focus(); input.select(); error.classList.add('hidden');
+    }));
+    modal.querySelector('form').addEventListener('submit', async e => {
+      e.preventDefault();
+      if (pending) return;
+      const name = input.value.trim();
+      error.classList.add('hidden');
+      if (!name || name === '.' || name === '..' || /[/\\\x00-\x1f\x7f]/.test(name) || new TextEncoder().encode(name).length > 255) {
+        error.textContent = 'Usá un nombre sin barras, de hasta 255 bytes.'; error.classList.remove('hidden'); input.focus(); return;
+      }
+      pending = true;
+      input.disabled = true;
+      modal.querySelectorAll('button[type="button"]').forEach(button => button.disabled = true);
+      try {
+        const created = await api('/api/files/create', { method: 'POST', body: { path: dir, name }, busy: modal.querySelector('.fm-create-submit') });
+        modal.remove();
+        if (name.startsWith('.')) { S.showHidden = true; localStorage.setItem('fm-hidden', '1'); updateHiddenBtn(); }
+        toast(`Archivo creado: ${name}`, 'ok', '', 2500);
+        if (window.AxonNavigation?.ready) {
+          await window.AxonNavigation.go(window.AxonNavigation.url('files', {
+            ...fileParams(), path: parentOf(created.path), item: name, edit: '1', hidden: S.showHidden ? '1' : '0', q: null, search: null,
+          }));
+        } else { S.filter = ''; el('fm-filter').value = ''; await navigate(dir); await openEditor(created.path); }
+      } catch (err) {
+        error.textContent = err.message || 'No se pudo crear el archivo'; error.classList.remove('hidden');
+      } finally {
+        pending = false;
+        input.disabled = false;
+        modal.querySelectorAll('button[type="button"]').forEach(button => button.disabled = false);
+        if (modal.isConnected) input.focus();
+      }
+    });
+    document.body.appendChild(modal); refreshIcons(); input.focus();
+  }
+
   // ---------- Toolbar ----------
-  el('fm-refresh-btn').addEventListener('click', () => navigate(S.cwd || undefined));
+  el('fm-new-file-btn').addEventListener('click', () => createFile());
+  el('fm-refresh-btn').addEventListener('click', async () => { const snap=captureFiles(); await restoreFiles(window.AxonNavigation.current.params,snap); window.AxonNavigation?.checkpoint(); });
 
   el('fm-filter').addEventListener('input', (e) => {
     if (S.searchMode) {
@@ -2631,6 +2790,76 @@
     el('fm-up-bar').style.width = total ? `${Math.round((done / total) * 100)}%` : '0%';
   }
 
+  async function uploadRequest(url, options = {}) {
+    const res = await fetch(url, { credentials: 'same-origin', ...options });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok !== true) {
+      const err = new Error(data.error || `HTTP ${res.status}`);
+      err.detail = data.detail;
+      err.status = res.status;
+      err.received = data.received;
+      throw err;
+    }
+    return data;
+  }
+
+  async function uploadFileParts(p, signal, progress) {
+    let id;
+    let finished = false;
+    try {
+      // Let init finish even if Cancel is pressed so its temporary directory
+      // can always be cleaned using the returned id.
+      const init = await uploadRequest('/api/files/upload/init', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: p.dir, name: p.finalName, size: p.f.size }),
+      });
+      id = init.id;
+      let offset = 0;
+      while (offset < p.f.size) {
+        signal.throwIfAborted();
+        const end = Math.min(p.f.size, offset + init.chunkSize);
+        const blob = p.f.slice(offset, end);
+        let next;
+        for (let attempt = 0; ; attempt++) {
+          try {
+            const data = await uploadRequest(`/api/files/upload/${id}?offset=${offset}`, {
+              method: 'PUT', body: blob, signal,
+            });
+            next = data.received;
+            break;
+          } catch (err) {
+            signal.throwIfAborted();
+            // The response may have been lost after the server wrote this
+            // block. Its acknowledged offset makes the retry idempotent.
+            if (err.status === 409 && err.received === end) { next = end; break; }
+            if (attempt >= 3 || (err.status && err.status < 500 && err.status !== 409)) throw err;
+            await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+          }
+        }
+        if (next !== end) throw new Error('El servidor confirmó un tamaño de bloque inválido');
+        offset = next;
+        progress(p.f.size ? offset / p.f.size : 1);
+      }
+      signal.throwIfAborted();
+      // Completion is an atomic rename. Await its outcome even when Cancel
+      // is pressed so the journal records a file that was already committed.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const done = await uploadRequest(`/api/files/upload/${id}/finish`, { method: 'POST' });
+          finished = true;
+          return done;
+        } catch (err) {
+          if (attempt >= 3 || (err.status && err.status < 500)) throw err;
+          await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+        }
+      }
+    } finally {
+      if (id && !finished) {
+        await uploadRequest(`/api/files/upload/${id}`, { method: 'DELETE' }).catch(() => {});
+      }
+    }
+  }
+
   // Per-conflict choice modal — Explorer-style overwrite/rename/skip with an
   // "apply to all" toggle for the rest of the batch.
   function uploadConflictAsk(name, remaining) {
@@ -2662,6 +2891,7 @@
   }
 
   async function uploadFiles(files, destDir) {
+    if (uploadAbort) return toast('Ya hay una subida en curso', 'warn', '', 2500);
     destDir = destDir || S.cwd;
     const list = Array.from(files || []).filter(Boolean);
     if (!list.length) return;
@@ -2710,6 +2940,7 @@
 
     const total = todo.length;
     if (!total) return toast('Subida omitida — nada que subir', 'warn', '', 2500);
+    if (uploadAbort) return toast('Ya hay una subida en curso', 'warn', '', 2500);
     uploadAbort = new AbortController();
     el('fm-up-cancel').disabled = false;
     setUploadBar(0, total, `Subiendo 0/${total}…`);
@@ -2719,28 +2950,15 @@
     for (const p of todo) {
       if (uploadAbort.signal.aborted) break;
       try {
-        const fd = new FormData();
-        fd.append('rel', p.rel);
-        fd.append('name', p.finalName);
-        fd.append('file', p.f, p.finalName);
-        const res = await fetch(`/api/files/upload?path=${encodeURIComponent(p.dir)}`, {
-          method: 'POST',
-          credentials: 'same-origin',
-          body: fd,
-          signal: uploadAbort.signal,
+        const done = await uploadFileParts(p, uploadAbort.signal, (fraction) => {
+          setUploadBar(okCount + failed.length + fraction, total,
+            `Subiendo ${okCount + failed.length + 1}/${total}: ${p.finalName} · ${Math.round(fraction * 100)}%`);
         });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok || data.ok === false) {
-          const err = new Error(data.error || `HTTP ${res.status}`);
-          err.detail = data.detail;
-          err.status = res.status;
-          throw err;
-        }
         okCount++;
-        if (!p.overwritten) created.push(join(p.dir, p.finalName));
+        if (!p.overwritten) created.push(done.path);
       } catch (err) {
         if (uploadAbort.signal.aborted) break;
-        const why = err.status === 413 ? 'El archivo supera el límite de 64 MB' : err.message || 'Error';
+        const why = err.message || 'Error';
         failed.push(`${p.rel}: ${why}`);
       }
       setUploadBar(okCount + failed.length, total, `Subiendo ${okCount + failed.length}/${total}…`);
@@ -2994,7 +3212,89 @@
   document.addEventListener('drop', dndEnd); // dropped outside → clear state
 
   // Trash location — resolved once; needed for in-trash behaviors.
-  api('/api/files/trash/info')
-    .then((r) => { S.trashDir = r.dir; })
-    .catch(() => {});
+  document.addEventListener('axon:authenticated', () => api('/api/files/trash/info').then(r => { S.trashDir = r.dir; S.trashDirs = r.dirs || [r.dir]; }).catch(() => {}), { once: true });
+  // Location snapshots contain UI state only, never editor contents.
+  const fileLocations = (() => { try { const d=JSON.parse(localStorage.getItem('axon:file-locations:v1') || '{}');return d && typeof d==='object' && !Array.isArray(d)?d:{}; } catch { return {}; } })();
+  function fileParams() {
+    return { path: S.cwd || '~', view: S.view, sort: S.sort.key, order: S.sort.dir === 1 ? 'asc' : 'desc', q: (S.searchMode?S.searchQ:S.filter) || null, search:S.searchMode?'1':null, hidden: S.showHidden ? '1' : '0',
+      item: S.editingPath?.split('/').pop() || S.preview?.name || null, edit: S.editingPath ? '1' : null };
+  }
+  function captureFiles() {
+    const scroll = {};
+    for (const id of ['fm-table-wrap','fm-grid','fm-cols']) scroll[id] = [el(id).scrollLeft, el(id).scrollTop];
+    const snapshot = { cursor: S.cursor, sel: [...S.sel].slice(0, 500), anchor: S.anchor, scroll,
+      cols: S.cols.map((c,i) => ({path:c.path, sel:[...c.sel], top:el('fm-cols').children[i]?.scrollTop || 0})),
+      focus: Boolean(document.activeElement?.closest('#tab-files [data-name]')) };
+    if (S.cwd) {
+      fileLocations[S.cwd] = snapshot;
+      const keys = Object.keys(fileLocations);
+      while (keys.length > 40) delete fileLocations[keys.shift()];
+      try { localStorage.setItem('axon:file-locations:v1',JSON.stringify(fileLocations)); } catch { /* full storage */ }
+    }
+    return snapshot;
+  }
+  async function restoreFiles(params, snapshot) {
+    S.editingPath = null;
+    closePreview(true);
+    S.view = ['list','grid','cols'].includes(params.view) ? params.view : S.view;
+    S.sort = {key:['name','size','mtime'].includes(params.sort) ? params.sort : S.sort.key, dir:params.order ? (params.order==='desc' ? -1 : 1) : S.sort.dir};
+    S.showHidden = params.hidden ? params.hidden==='1' : S.showHidden;
+    S.filter = params.search==='1' ? '' : params.q || '';
+    el('fm-filter').value = S.filter;
+    sec.querySelectorAll('.fm-vbtn').forEach(b=>b.classList.toggle('active',b.dataset.view===S.view));
+    await navigate(params.path || '~', true);
+    await restoreTransfers();
+    if (window.AxonNavigation.current.section !== 'files' || window.AxonNavigation.current.params !== params) return;
+    snapshot ||= fileLocations[S.cwd];
+    if (S.view==='cols' && snapshot?.cols?.length) {
+      const stop=snapshot.cols.findIndex(c=>c.path===S.cwd);
+      if (stop >= 0) {
+        S.cols=[];
+        for (const c of snapshot.cols.slice(0,stop+1)) { await drill(c.path,true); const col=S.cols.at(-1); if(col) col.sel=new Set(c.sel); }
+        syncColCwd(); renderCols();
+        snapshot.cols.slice(0,stop+1).forEach((c,i)=>{if(el('fm-cols').children[i]) el('fm-cols').children[i].scrollTop=c.top || 0;});
+      }
+    }
+    if(params.search==='1'){toggleSearch(true);S.searchQ=params.q || '';el('fm-filter').value=S.searchQ;await runSearch();if(window.AxonNavigation.current.params!==params)return;}
+    const available=new Set((S.searchMode?S.searchResults || []:S.entries).map(e=>e.name));
+    S.sel=new Set((snapshot?.sel || []).filter(n=>available.has(n)));
+    S.cursor=available.has(snapshot?.cursor) ? snapshot.cursor : null;
+    S.anchor=snapshot?.anchor || null;
+    if(S.view==='cols' && S.cols.length) S.cols.at(-1).sel=S.sel;
+    applySelToDom();
+    for(const [id,xy] of Object.entries(snapshot?.scroll || {})) { const node=el(id); if(node){node.scrollLeft=xy[0];node.scrollTop=xy[1];} }
+    if(snapshot?.focus && S.cursor) sec.querySelector(`[data-name="${CSS.escape(S.cursor)}"]`)?.focus({preventScroll:true});
+    if(params.item && !params.item.includes('/') && available.has(params.item)) {
+      S.cursor=params.item;
+      if(params.edit==='1') await openEditor(join(S.cwd,params.item),true); else openPreview(params.item,true);
+    }
+    if(params.action==='upload') { el('fm-file-input').click(); }
+    window.AxonNavigation.update('files',fileParams());
+    window.AxonNavigation.controls();
+  }
+  window.AxonPages ||= {};
+  window.AxonPages.files={capture:captureFiles,params:fileParams,restore:restoreFiles,dirty:isDirty,
+    canLeave:async next=>{
+      if(!isDirty() || (next.section==='files' && next.params.edit==='1' && join(next.params.path || S.cwd,next.params.item || '')===S.editingPath)) return true;
+      return confirmDialog('Cambios sin guardar','Si salís del editor se pierden los cambios de este archivo.','Salir sin guardar');
+    }, leave:()=>closePreview(true)};
+  el('fm-location-form').addEventListener('submit',e=>{e.preventDefault();navigate(el('fm-location').value.trim());});
+  el('fm-parent').addEventListener('click',()=>navigate(parentOf(S.cwd)));
+  el('fm-keys').addEventListener('click',showHelp);
+  document.addEventListener('keydown',e=>{
+    if(!sec.classList.contains('active')) return;
+    if(e.altKey && e.key==='ArrowUp'){e.preventDefault();navigate(parentOf(S.cwd));}
+    if((e.ctrlKey||e.metaKey)&&e.shiftKey&&e.key.toLowerCase()==='l'){e.preventDefault();el('fm-location').focus();el('fm-location').select();}
+  });
+  const saveLocation=()=>{if(!sec.classList.contains('active'))return;queueMicrotask(()=>{
+    if(!window.AxonNavigation?.ready || window.AxonNavigation.applying) return;
+    markCursor(); window.AxonNavigation.update('files',fileParams());
+  });};
+  sec.addEventListener('focusin',e=>{const row=e.target.closest('[data-name]');if(row){S.cursor=row.dataset.name;markCursor();saveLocation();}});
+  ['click','keyup','input','change'].forEach(type=>sec.addEventListener(type,saveLocation));
+  sec.addEventListener('scroll',saveLocation,{capture:true,passive:true});
+  el('fm-grid').setAttribute('role','listbox');el('fm-grid').setAttribute('aria-label','Archivos');
+  el('fm-grid').setAttribute('aria-multiselectable','true');
+  el('fm-table').setAttribute('role','grid');el('fm-table').setAttribute('aria-label','Archivos');
+  const oldRender=render; render=function(){oldRender(); markCursor();};
 })();

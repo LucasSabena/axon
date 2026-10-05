@@ -144,7 +144,7 @@ async function writeToHost(hostPath: string, data: Uint8Array): Promise<{ ok: bo
     const proc = hostSpawnInteractive(`cat > ${shq(hostPath)}`, { user: 'user' });
     const stdin = proc.stdin as {
       write(d: Uint8Array | string): number | Promise<number>;
-      flush(): void | Promise<void>;
+      flush(): number | Promise<number>;
       end(): void;
     };
     try {
@@ -239,7 +239,7 @@ export function registerDropRoutes(app: Hono): void {
 
   app.post('/api/drop/text', async (c) => {
     await sweep();
-    const body = await c.req.json<{ text?: string }>().catch(() => ({}));
+    const body = await c.req.json<{ text?: string }>().catch(() => ({} as { text?: string }));
     const text = String(body.text ?? '');
     if (!text.trim()) return fail(c, 400, 'Texto vacío');
     if (text.length > MAX_TEXT_CHARS) return fail(c, 413, 'Texto demasiado largo (máx. 1 MB)');
@@ -288,7 +288,7 @@ export function registerDropRoutes(app: Hono): void {
   // Register a drop pointing at an EXISTING host file (server → device pull).
   app.post('/api/drop/serve', async (c) => {
     await sweep();
-    const body = await c.req.json<{ path?: string }>().catch(() => ({}));
+    const body = await c.req.json<{ path?: string }>().catch(() => ({} as { path?: string }));
     const hostPath = await normalizeServePath(String(body.path || ''));
     if (!hostPath) return fail(c, 400, 'Ruta no permitida — solo bajo /home /tmp /srv /opt /mnt');
     const fsPath = hostToContainer(hostPath);
@@ -309,7 +309,7 @@ export function registerDropRoutes(app: Hono): void {
 
   // Server-side clipboard: "Enviar al servidor" / "Traer".
   app.post('/api/drop/clip', async (c) => {
-    const body = await c.req.json<{ text?: string }>().catch(() => ({}));
+    const body = await c.req.json<{ text?: string }>().catch(() => ({} as { text?: string }));
     clip = { text: String(body.text ?? '').slice(0, MAX_TEXT_CHARS), t: Date.now() };
     return c.json({ ok: true, t: clip.t });
   });

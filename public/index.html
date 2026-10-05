@@ -9,18 +9,24 @@
   <link rel="icon" type="image/svg+xml" href="/marca/favicon.svg">
   <link rel="apple-touch-icon" href="/marca/app%20icon.svg">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>AXON</title>
   <link rel="stylesheet" href="/app.css?v=18">
-  <link rel="stylesheet" href="/feat-files.css?v=21">
+  <link rel="stylesheet" href="/feat-files.css?v=20261004maintenance">
   <link rel="stylesheet" href="/feat-scripts.css?v=18">
   <link rel="stylesheet" href="/feat-metrics.css?v=18">
   <link rel="stylesheet" href="/feat-drop.css?v=18">
   <link rel="stylesheet" href="/feat-ops.css?v=18">
   <link rel="stylesheet" href="/feat-notify.css?v=18">
-  <link rel="stylesheet" href="/feat-compose.css?v=18">
-  <link rel="stylesheet" href="/feat-agents.css?v=18">
-  <link rel="stylesheet" href="/feat-library.css?v=2">
+  <link rel="stylesheet" href="/feat-compose.css?v=20261004maintenance">
+  <link rel="stylesheet" href="/feat-agents.css?v=20">
+  <link rel="stylesheet" href="/agent-context.css?v=1">
+  <link rel="stylesheet" href="/feat-library.css?v=3">
+  <link rel="stylesheet" href="/navigation.css?v=1">
+  <link rel="stylesheet" href="/dashboard.css?v=1">
+  <link rel="stylesheet" href="/polish.css?v=1">
+  <link rel="stylesheet" href="/maintenance.css?v=1">
 </head>
 <body>
   <div id="app">
@@ -46,6 +52,7 @@
           </div>
 
           <nav class="sidebar-nav">
+            <button class="nav-item tab-btn" data-tab="dashboard"><i data-lucide="house" class="lucide-icon"></i><span class="nav-label">Inicio</span></button>
             <div class="nav-section-label"><span>Monitor</span></div>
             <button class="nav-item tab-btn active" data-tab="ports">
               <i data-lucide="plug" class="lucide-icon"></i>
@@ -81,6 +88,7 @@
             </button>
 
             <div class="nav-section-label"><span>Sistema</span></div>
+            <button class="nav-item tab-btn" data-tab="storage"><i data-lucide="hard-drive" class="lucide-icon"></i><span class="nav-label">Almacenamiento</span></button>
             <button class="nav-item tab-btn" data-tab="programs">
               <i data-lucide="package" class="lucide-icon"></i>
               <span class="nav-label">Programas</span>
@@ -94,20 +102,12 @@
 
           <div class="sidebar-footer">
             <div class="nav-section-label"><span>Tema</span></div>
-            <div class="theme-picker">
-              <button class="theme-option active" data-theme="axon">
-                <span class="theme-swatch axon"></span><span class="nav-label">Axon</span>
-              </button>
-              <button class="theme-option" data-theme="linear">
-                <span class="theme-swatch linear"></span><span class="nav-label">Linear</span>
-              </button>
-              <button class="theme-option" data-theme="netdata">
-                <span class="theme-swatch netdata"></span><span class="nav-label">Netdata</span>
-              </button>
-              <button class="theme-option" data-theme="warp">
-                <span class="theme-swatch warp"></span><span class="nav-label">Warp</span>
-              </button>
+            <div class="theme-picker theme-mode-picker" role="group" aria-label="Modo de color">
+              <button type="button" data-color-mode="light" title="Claro">☀ <span class="nav-label">Claro</span></button>
+              <button type="button" data-color-mode="dark" title="Oscuro">☾ <span class="nav-label">Oscuro</span></button>
+              <button type="button" data-color-mode="system" title="Sistema">◐ <span class="nav-label">Auto</span></button>
             </div>
+            <button type="button" class="theme-current" id="theme-current" title="Elegir entre 20 temas">Elegir tema</button>
             <div class="sidebar-toggle-row">
               <button class="sidebar-toggle" id="sidebar-collapse" title="Colapsar">
                 <i data-lucide="panel-left-close" class="lucide-icon"></i>
@@ -305,6 +305,7 @@
               </div>
               <p class="listener-note browser-note">Chrome real corriendo en el servidor — los localhost, las cookies y las sesiones son del servidor. Todo lo que veas acá ocurre allá.</p>
               <div class="browser-frame-wrap">
+                <div id="browser-state" class="browser-state" role="status" aria-live="polite"></div>
                 <iframe id="browser-frame" title="Navegador del servidor" allow="clipboard-read; clipboard-write"></iframe>
               </div>
             </section>
@@ -416,7 +417,9 @@
           <button type="button" id="job-close" class="btn-secondary">Cerrar</button>
         </div>
       </div>
-      <pre id="job-log" class="logs-pre"></pre>
+      <div id="job-login-links" class="job-login-links" aria-label="Enlaces del login"></div>
+      <div class="job-output-tools"><span class="listener-note">Podés seleccionar texto y abrir los enlaces.</span><button type="button" id="job-copy" class="btn-secondary">Copiar salida</button><button type="button" id="job-select" class="btn-secondary">Seleccionar todo</button><button type="button" id="job-bottom" class="btn-secondary">Ir al final</button></div>
+      <pre id="job-log" class="logs-pre" tabindex="0" aria-label="Salida de la tarea"></pre>
     </div>
   </div>
 
@@ -569,21 +572,42 @@
   <div id="toast-container"></div>
 
   <link rel="stylesheet" href="/vendor/xterm.css">
-  <script src="/vendor/xterm.js"></script>
-  <script src="/vendor/xterm-addon-fit.js"></script>
-  <script src="/vendor/qrcode.js"></script>
-  <script src="/vendor/lucide.min.js?v=18"></script>
-  <script src="/app.js?v=18"></script>
-  <script src="/feat-files.js?v=21"></script>
-  <script src="/feat-scripts.js?v=18"></script>
-  <script src="/feat-logs.js?v=18"></script>
-  <script src="/feat-metrics.js?v=18"></script>
-  <script src="/feat-drop.js?v=18"></script>
-  <script src="/feat-ops.js?v=18"></script>
-  <script src="/feat-notify.js?v=18"></script>
-  <script src="/feat-compose.js?v=18"></script>
-  <script src="/feat-agents.js?v=18"></script>
-  <script src="/feat-library.js?v=2"></script>
-  <script src="/mobile.js?v=18"></script>
+  <script defer src="/vendor/xterm.js"></script>
+  <script defer src="/vendor/xterm-addon-fit.js"></script>
+  <script defer src="/vendor/qrcode.js"></script>
+  <script defer src="/vendor/lucide.min.js?v=18"></script>
+  <script defer src="/request-client.js?v=1"></script>
+  <script defer src="/interaction.js?v=1"></script>
+  <script defer src="/themes.js?v=1"></script>
+  <link rel="stylesheet" href="/agent-accounts.css?v=3">
+  <link rel="stylesheet" href="/agent-usage.css?v=1">
+  <link rel="stylesheet" href="/agent-consumption.css?v=1">
+  <script defer src="/terminal-tools.js?v=1"></script>
+  <script defer src="/app.js?v=20261004accounts2"></script>
+  <script defer src="/feat-files.js?v=20261004maintenance"></script>
+  <script defer src="/feat-scripts.js?v=18"></script>
+  <script defer src="/feat-logs.js?v=18"></script>
+  <script defer src="/feat-metrics.js?v=18"></script>
+  <script defer src="/feat-drop.js?v=18"></script>
+  <script defer src="/feat-ops.js?v=18"></script>
+  <link rel="stylesheet" href="/optimizer.css?v=1">
+  <script defer src="/optimizer.js?v=2"></script>
+  <script defer src="/feat-notify.js?v=19"></script>
+  <script defer src="/feat-compose.js?v=20261004maintenance"></script>
+  <script defer src="/agent-context.js?v=1"></script>
+  <script defer src="/agent-usage.js?v=1"></script>
+  <script defer src="/agent-consumption.js?v=1"></script>
+  <script defer src="/agent-accounts.js?v=3"></script>
+  <script defer src="/feat-agents.js?v=20261004consumption"></script>
+  <script defer src="/feat-library.js?v=5"></script>
+  <script defer src="/dashboard.js?v=1"></script>
+  <script defer src="/storage.js?v=1"></script>
+  <script defer src="/home-links.js?v=1"></script>
+  <script defer src="/app-migrations.js?v=1"></script>
+  <script defer src="/app-store.js?v=20261004maintenance"></script>
+  <script defer src="/settings.js?v=1"></script>
+  <script defer src="/view-controls.js?v=20261004accounts"></script>
+  <script type="module" src="/navigation.js?v=1"></script>
+  <script defer src="/mobile.js?v=19"></script>
 </body>
 </html>

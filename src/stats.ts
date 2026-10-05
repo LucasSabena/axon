@@ -177,7 +177,8 @@ function calculateCpuPercent(statContent: string): number {
   }
 
   const totalDiff = total - lastCpuStats.total;
-  const idleDiff = idle - lastCpuStats.idle;
+  // Time waiting for disk and time stolen by a hypervisor are not CPU work.
+  const idleDiff = idle - lastCpuStats.idle + iowait - lastCpuStats.iowait + steal - lastCpuStats.steal;
   const percent = totalDiff ? Math.round(((totalDiff - idleDiff) / totalDiff) * 100) : 0;
 
   lastCpuStats = { user, nice, system, idle, iowait, irq, softirq, steal, total, time: now };

@@ -27,7 +27,7 @@ RUN install -m 0755 -d /etc/apt/keyrings \
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && corepack enable \
-    && corepack prepare pnpm@latest --activate \
+    && corepack prepare pnpm@12.5.1 --activate \
     && corepack prepare yarn@stable --activate \
     && rm -rf /var/lib/apt/lists/*
 
@@ -37,6 +37,11 @@ COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --prod --frozen-lockfile
 
 COPY . .
+
+ARG AXON_VERSION=1.1.0
+ARG AXON_REVISION=development
+ENV AXON_VERSION=$AXON_VERSION AXON_REVISION=$AXON_REVISION
+LABEL org.opencontainers.image.source="https://github.com/LucasSabena/axon" org.opencontainers.image.version=$AXON_VERSION org.opencontainers.image.revision=$AXON_REVISION
 
 ENV NODE_ENV=production
 ENV CONFIG_PATH=/app/data/config.json

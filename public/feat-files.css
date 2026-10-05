@@ -370,6 +370,11 @@ body.fm-marqueeing * { cursor: crosshair !important; }
   font-family: var(--font-mono); font-size: 0.85rem; outline: none;
 }
 .fm-prompt-input:focus { border-color: var(--accent); }
+.fm-create-form { display: flex; flex-direction: column; gap: 12px; }
+.fm-create-form h3, .fm-create-form p { margin: 0; }
+.fm-create-path { overflow-wrap: anywhere; }
+.fm-create-presets { display: flex; flex-wrap: wrap; gap: 8px; }
+.fm-create-error { color: var(--danger); font-size: 0.85rem; }
 
 /* ---------- Preview pane ---------- */
 .fm-preview {

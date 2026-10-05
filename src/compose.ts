@@ -2,6 +2,11 @@ import { Hono } from 'hono';
 import { $ } from 'bun';
 import { hostExec, hostSpawnInteractive, hostToContainer, containerToHost, HOST_USER } from './host';
 import { runJob } from './jobs';
+import { ComposeDrafts } from './compose-drafts';
+import {ComposeReleases} from './compose-releases';
+import {actor,textField} from './storage/http';
+import { hash } from './storage/policy';
+import { protect, body as maintenanceBody, only } from './storage/http';
 import { realpath, stat, open } from 'node:fs/promises';
 import * as path from 'node:path';
 
@@ -9,9 +14,9 @@ import * as path from 'node:path';
 // Compose feature module — Docker Compose visual editor backend.
 // Self-contained: index.ts only calls registerComposeRoutes(app).
 //
-// Reads go through hostToContainer() (the /hostfs read-only mount). Writes MUST
-// stream through stdin of a host-side `cat > dest` because the mount is RO.
-// Mutations run as the unprivileged HOST_USER account. `docker` may not exist
+// Reads go through hostToContainer() (the /hostfs read-only mount). Editor saves
+// are SQLite drafts; promotion to the host is not enabled. Docker lifecycle
+// mutations run as the unprivileged HOST_USER account. `docker` may not exist
 // in-container — dockerCmd() falls back to hostExec like src/docker-ops.ts.
 // ---------------------------------------------------------------------------
 
@@ -104,7 +109,7 @@ async function writeHostFile(
     const proc = hostSpawnInteractive(`cat > ${shq(hostPath)}`, { user: 'user' });
     const stdin = proc.stdin as {
       write(d: Uint8Array | string): number | Promise<number>;
-      flush(): void | Promise<void>;
+      flush(): number | Promise<number>;
       end(): void;
     };
     try {
@@ -247,6 +252,8 @@ function fmtBytes(bytes: number): string {
 }
 
 interface ComposeDeps {
+  drafts?: ComposeDrafts;
+  releases?: ComposeReleases;
   getNotes?: () => Record<string, string> | undefined;
   setNote?: (key: string, note: string) => Promise<void> | void;
 }
@@ -267,6 +274,11 @@ async function readHead(hostPath: string, maxBytes: number): Promise<string> {
 }
 
 export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
+  protect(app, "/api/compose");
+  app.get('/api/compose/releases',async c=>c.json({ok:true,operations:await deps.releases?.list(actor(c))||[]}));
+  app.post('/api/compose/releases',async c=>{const b=await maintenanceBody(c);only(b,['path']);const r=await resolveComposePath(textField(b.path,4096));if(!r.path)return fail(c,403,r.error!);if(!deps.releases)return fail(c,503,'Aplicación no disponible en este contexto');return c.json({ok:true,operation:await deps.releases.prepare(r.path,actor(c))},201);});
+  app.get('/api/compose/releases/:id',async c=>{if(!deps.releases)return fail(c,503,'Motor no disponible');return c.json({ok:true,operation:await deps.releases.status(c.req.param('id'),actor(c))});});
+  app.post('/api/compose/releases/:id/:action',async c=>{const b=await maintenanceBody(c);only(b,['digest']);const action=c.req.param('action');if(!['apply','rollback'].includes(action))return fail(c,400,'Acción desconocida');if(!deps.releases)return fail(c,503,'Motor no disponible');return c.json({ok:true,operation:await deps.releases.execute(c.req.param('id'),textField(b.digest),actor(c),action==='rollback')},202);});
   // ---------- List projects: containers' compose labels + dormant files ----------
   app.get('/api/compose', async (c) => {
     const projects = new Map<string, ComposeProject>();
@@ -452,7 +464,8 @@ export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
       const { bytesRead } = await fh.read(buf, 0, MAX_READ_BYTES + 1, 0);
       const truncated = bytesRead > MAX_READ_BYTES;
       const content = buf.subarray(0, Math.min(bytesRead, MAX_READ_BYTES)).toString('utf-8');
-      return c.json({ ok: true, path: r.path, content, truncated });
+      const draft = deps.drafts?.get(r.path);
+      return c.json({ ok: true, path: r.path, content: draft?.content ?? content, revision: draft?.revision ?? hash(content), draft: !!draft, deployedContent: content, truncated });
     } catch (e: any) {
       return fail(c, e?.code === 'EACCES' ? 403 : 500, 'No se pudo leer el archivo', { detail: String(e?.message || e) });
     } finally {
@@ -460,7 +473,7 @@ export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
     }
   });
 
-  // ---------- Save (backup → stdin cat → `compose config -q` validation) ----------
+  // ---------- Save a private draft; never replace the deployable file ----------
   app.post('/api/compose/save', async (c) => {
     let body: any;
     try {
@@ -476,23 +489,27 @@ export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
       return fail(c, 413, `El archivo supera el límite de ${MAX_SAVE_BYTES / 1024} KB`);
     }
 
-    // Timestamped backup alongside the file; a missing original (new file)
-    // just means there's nothing to back up — non-fatal either way.
-    const backup = `${r.path}.bak-${Math.floor(Date.now() / 1000)}`;
-    const cpRes = await hostExec(`cp -- ${shq(r.path)} ${shq(backup)}`, { user: 'user', timeoutMs: 15_000 });
-    const backupPath = cpRes.ok ? backup : null;
+    if (!deps.drafts) return fail(c, 503, 'El ledger de borradores no está disponible');
+    const original = await readHead(r.path, MAX_READ_BYTES + 1);
+    if (Buffer.byteLength(original) > MAX_READ_BYTES) return fail(c, 413, 'Archivo original demasiado grande');
+    const draft = deps.drafts.save(r.path, body.content, original, body.revision);
+    return c.json({ ok: true, saved: true, draft: true, applied: false, path: r.path, revision: draft.revision, validation: draft.validation, message: 'Borrador guardado en Axon. El archivo del host sigue intacto. La validación local no equivale a validar Docker Compose.' });
+  });
 
-    const wr = await writeHostFile(r.path, buf);
-    if (!wr.ok) return fail(c, 500, wr.error!, { detail: wr.detail, backup: backupPath });
+  app.post('/api/compose/draft-preview', async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const r = await resolveComposePath(body?.path);
+    if (!r.path) return fail(c, 403, r.error!);
+    const preview = deps.drafts?.preview(r.path, await readHead(r.path, MAX_READ_BYTES));
+    if (!preview) return fail(c, 404, 'No hay borrador para comparar');
+    return c.json({ ok: true, ...preview });
+  });
 
-    // Syntax/merge validation. A failure is a warning, not a rollback — the
-    // user may be mid-edit and still wants the file on disk.
-    const vres = await dockerCmd(`compose -f ${shq(r.path)} config -q`);
-    const validation = vres.ok
-      ? { ok: true }
-      : { ok: false, error: (vres.stderr || vres.stdout || 'validación falló').trim().slice(0, 4000) };
-
-    return c.json({ ok: true, saved: true, path: r.path, backup: backupPath, validation });
+  app.post('/api/compose/draft-discard', async (c) => {
+    const body = await maintenanceBody(c);only(body,['path','revision']);
+    if(typeof body?.path!=='string'||!path.isAbsolute(body.path)||body.path.length>4096)return fail(c,400,'Ruta de borrador inválida');
+    if(!deps.drafts)return fail(c,503,'El ledger de borradores no está disponible');
+    return c.json({ok:true,...deps.drafts.discard(body.path,body.revision)});
   });
 
   // ---------- Preview: rendered config + service status ----------
@@ -505,6 +522,12 @@ export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
     }
     const r = await resolveComposePath(body?.path);
     if (!r.path) return fail(c, 403, r.error!);
+
+    const draft = deps.drafts?.preview(r.path, await readHead(r.path, MAX_READ_BYTES));
+    if (draft) return c.json({ok: true, path: r.path, draft: true, rendered: draft.after, renderedTruncated: false,
+      services: draft.draft.services.map(name => ({name, status: 'borrador', image: '', ports: '', container: ''})),
+      error: 'Borrador de Axon, todavía sin aplicar. ' + draft.blockers.join(' '),
+      before: draft.before, changedOnHost: draft.changedOnHost});
 
     const cfg = await dockerCmd(`compose -f ${shq(r.path)} config`);
     const rendered = cfg.stdout.slice(0, MAX_RENDER_BYTES);
@@ -580,6 +603,11 @@ export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
     const r = await resolveComposePath(body?.path);
     if (!r.path) return fail(c, 403, r.error!);
 
+    if (verb === 'up' && deps.drafts?.get(r.path)) return fail(c, 409, 'Hay un borrador sin aplicar. Compará y resolvé sus precondiciones antes de iniciar el stack.');
+    if (verb === 'up') {
+      const validation = await dockerCmd(`compose -f ${shq(r.path)} config -q`);
+      if (!validation.ok) return fail(c, 409, 'La configuración actual no pasó la validación de Docker Compose');
+    }
     const dirName = path.posix.basename(path.posix.dirname(r.path)) || r.path;
     const job = runJob(`compose ${verb}: ${dirName}`, [
       {
@@ -591,7 +619,7 @@ export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
     return c.json({ ok: true, job });
   }
 
-  app.post('/api/compose/up', (c) => composeJob(c, 'up', 'up -d --remove-orphans'));
+  app.post('/api/compose/up', (c) => composeJob(c, 'up', 'up -d'));
   app.post('/api/compose/down', (c) => composeJob(c, 'down', 'down'));
   app.post('/api/compose/pull', (c) => composeJob(c, 'pull', 'pull'));
 }

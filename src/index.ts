@@ -15,6 +15,7 @@ import {
   setSessionHooks,
 } from './auth';
 import { loadConfig, saveConfig } from './config';
+import { validateSettings } from './settings-validation';
 import { getServerStats, getServerHosts } from './stats';
 import { setHostUser, hostExec, hostToContainer, hostSpawnInteractive } from './host';
 import {
@@ -24,11 +25,12 @@ import {
   killProcessTree,
   getProcessDetail,
 } from './ports';
-import { getJob, listJobs, runJob } from './jobs';
+import { getJob, listJobs, runJob, setJobCompletionHook } from './jobs';
 import {
   getPrograms,
   invalidateProgramsCache,
   warmProgramsCache,
+  programsStatus,
   installedPackagesSummary,
   listDesktopApps,
   programById,
@@ -63,11 +65,12 @@ import {
   listAllDnsRecords,
   getRemoteTunnelConfig,
 } from './cloudflare';
-import type { DomainMapping, DomainStatus, Project } from './types';
-import { notify, setNotifyUrl } from './notify';
+import type { AppConfig, DomainMapping, DomainStatus, Project } from './types';
+import { notify, setNotifyUrl, notifyConfigured } from './notify';
 import { generateTotpSecret, verifyTotp, totpUri } from './totp';
 import { loadHeartbeats, recordHeartbeat, lastState, allHeartbeats, uptimePct, pruneHeartbeats } from './heartbeats';
 import { registerFilesRoutes } from './files';
+import { registerNavigationRoutes } from './navigation';
 import { registerEventRoutes, loadEvents, recordEvent } from './events';
 import { registerAlertRoutes, startAlertLoop } from './alerts';
 import { registerScriptRoutes, startScriptScheduler } from './scripts';
@@ -75,12 +78,37 @@ import { parseLogsSrc, startLogsSocket, stopLogsSocket, registerLogsRoutes } fro
 import type { LogsWsData } from './logs';
 import { registerMetricsRoutes } from './metrics';
 import { registerDropRoutes, startDropSweeper } from './drop';
-import { registerLibraryRoutes, libraryHostGuard } from './library';
+import { registerLibraryRoutes, libraryHostGuard, libraryFileOperation } from './library';
 import { registerSessionRoutes, recordSession, sessionIdForToken, isRevoked, touchSession, revokeSession } from './sessions';
 import { registerOpsRoutes } from './ops';
+import { registerOptimizerRoutes } from './optimizer';
 import { registerDockerOpsRoutes } from './docker-ops';
+import {MigrationRetirement} from './migration-retirement';
+import {HomepageMigration} from './homepage-migration';
+import {ComposeReleases} from './compose-releases';
 import { registerComposeRoutes } from './compose';
+import { registerStoreRoutes } from './app-store';
 import { registerAgentRoutes, listAgents, invalidateAgentsCache } from './agents';
+import { registerAgentAccounts } from './agent-accounts';
+import { registerAgentUsage } from './agent-usage';
+import { registerAgentConsumption } from './agent-consumption';
+import { hostTerminalCommand } from './terminal';
+
+import { MaintenanceRepository } from './storage/repository';
+import { MaintenanceError } from './storage/types';
+import { StorageService } from './storage/service';
+import { scanRoot, scanRoots } from './storage/scan';
+import { registerStorageRoutes } from './storage/routes';
+import {libraryTransferGuard} from './library';
+import {HostCleaner} from './storage/cleaner';
+import {FileTransfers} from './file-transfers';
+import { HomeLinks, registerHomeLinkRoutes, knownHomeLinks } from './home-links';
+import { Migrations, registerMigrationRoutes } from './app-migrations';
+import { dockerInstallations, physicalInstallations, programInstallation } from './installation-inventory';
+import { ComposeDrafts } from './compose-drafts';
+import { qaRoot, registerQaBoundary } from './qa-boundary';
+import { FileOperations, fileHostHome } from './file-operations';
+const maintenanceQaRoot = await qaRoot();
 
 const PORT = parseInt(process.env.PORT || '3457', 10);
 const BASE_DOMAIN = process.env.BASE_DOMAIN || 'example.com';
@@ -91,7 +119,7 @@ setHostUser(config.settings.hostUser);
 initProjects(config, saveConfig);
 await loadHeartbeats();
 await loadEvents();
-setNotifyUrl(config.settings.notifyUrl);
+setNotifyUrl(config.settings.notifyUrl, config.settings.notifyProvider);
 setSessionHooks({ isRevoked, touch: touchSession });
 
 // ---------- Heartbeat monitor ----------
@@ -134,6 +162,7 @@ setInterval(() => { heartbeatTick().catch(() => {}); }, HB_INTERVAL_MS).unref();
 heartbeatTick().catch(() => {});
 
 const app = new Hono();
+registerQaBoundary(app, maintenanceQaRoot);
 
 // gzip text responses (JS/CSS/HTML/JSON ~500KB → ~150KB). Skips
 // already-encoded bodies, downloads, and SSE (excluded by content-type).
@@ -241,7 +270,7 @@ app.post('/api/login', async (c) => {
     c.header('Retry-After', String(sec));
     return fail(c, 429, `Demasiados intentos fallidos — probá en ${Math.max(1, Math.ceil(sec / 60))} min`);
   }
-  const { username, password, code } = await c.req.json<{ username: string; password: string; code?: string }>().catch(() => ({ username: '', password: '' }));
+  const { username, password, code } = await c.req.json<{ username: string; password: string; code?: string }>().catch(() => ({ username: '', password: '', code: undefined as string | undefined }));
   // Always run PBKDF2 — short-circuiting on a wrong username would leak via
   // timing which usernames exist.
   const passOk = await verifyPassword(password, config.auth.passwordHash);
@@ -283,9 +312,14 @@ app.get('/api/me', async (c) => {
   if (token && isRevoked(sessionIdForToken(token))) {
     return c.json({ authenticated: false, username: null, totpEnabled: !!config.auth.totpSecret });
   }
-  return c.json({ authenticated: true, username: session.username, totpEnabled: !!config.auth.totpSecret });
+  return c.json({ authenticated: true, username: session.username, totpEnabled: !!config.auth.totpSecret, scanIntervalMs: config.settings.scanIntervalMs, capabilities: ['optimizer', 'optimizer-idle-guard'] });
 });
 
+app.use('/api/*', async (c,next)=>{if(/^\/api\/(storage|maintenance|home|compose|files\/trash)(?:\/|$)/.test(c.req.path))c.header('Cache-Control','private, no-store');await next();});
+app.get('/api/health', c => {
+  c.header('Cache-Control', 'no-store');
+  return c.json({ ok: true, version: process.env.AXON_VERSION || '1.1.0', revision: process.env.AXON_REVISION || 'development' });
+});
 app.use('/api/*', requireAuth);
 app.use('/p/*', requireAuth);
 
@@ -463,7 +497,17 @@ app.get('/api/ports/health', async (c) => {
 
 app.get('/api/programs', async (c) => {
   const programs = await getPrograms(c.req.query('fresh') === '1');
-  return c.json({ ok: true, programs });
+  return c.json({ ok: true, programs, ...programsStatus() });
+});
+
+app.post('/api/programs/:id/install', c => {
+  const def = programById(c.req.param('id'));
+  if (!def?.npmPkg || def.channel !== 'pnpm' || def.id === 'opencode' || !/^[@a-zA-Z0-9._/-]+$/.test(def.npmPkg)) return fail(c, 400, 'Este programa no tiene instalación gestionada');
+  const active = listJobs().find(j => j.status === 'running' && (j.title === def.name || j.title === `Instalar ${def.name}`));
+  if (active) return c.json({ ok: true, job: active });
+  invalidateProgramsCache(); invalidateAgentsCache();
+  const job = runJob(`Instalar ${def.name}`, [{ label: `Instalar ${def.npmPkg}`, cmd: `pnpm add -g ${shq(def.npmPkg)}`, user: 'user', group: def.name }]);
+  return c.json({ ok: true, job });
 });
 
 app.get('/api/programs/installed', async (c) => {
@@ -489,7 +533,7 @@ app.get('/api/programs/packages', async (c) => {
 app.post('/api/programs/:id/update', async (c) => {
   const def = programById(c.req.param('id'));
   if (!def) return fail(c, 404, 'Programa desconocido');
-  const running = listJobs().find((j) => j.status === 'running' && j.title === def.name);
+  const running = listJobs().find((j) => j.status === 'running' && (j.title === def.name || j.title === `Instalar ${def.name}` || j.steps.some(s=>s.group===def.name)));
   if (running) return c.json({ ok: true, job: running, already: true });
   // Versions/pending counts change under the job — drop the cached snapshots
   // so the next read recomputes instead of serving pre-update state.
@@ -500,6 +544,7 @@ app.post('/api/programs/:id/update', async (c) => {
 });
 
 app.post('/api/programs/:id/login', async (c) => {
+  if (['codex', 'claude-code'].includes(c.req.param('id'))) return fail(c, 409, 'Elegí la cuenta en Agents → Cuenta → Conectar');
   const def = programById(c.req.param('id'));
   if (!def?.auth?.login) return fail(c, 400, 'Este programa no tiene login automatizable');
   const job = runJob(`Login ${def.name}`, def.auth.login.map((s) => ({ ...s, group: def.name })));
@@ -507,6 +552,7 @@ app.post('/api/programs/:id/login', async (c) => {
 });
 
 app.post('/api/programs/:id/logout', async (c) => {
+  if (['codex', 'claude-code'].includes(c.req.param('id'))) return fail(c, 409, 'Las cuentas se administran desde Agents → Cuenta');
   const def = programById(c.req.param('id'));
   if (!def?.auth?.logout) return fail(c, 400, 'Este programa no tiene logout automatizable');
   const job = runJob(`Logout ${def.name}`, def.auth.logout.map((s) => ({ ...s, group: def.name })));
@@ -516,6 +562,8 @@ app.post('/api/programs/:id/logout', async (c) => {
 app.post('/api/programs/update-all', async (c) => {
   const programs = await getPrograms();
   // Only programs with a known pending update — don't reinstall everything.
+  const status = programsStatus();
+  if (status.checkingMetadata || status.checkingUpdates) return fail(c, 409, 'La comprobación de versiones sigue en curso. Esperá a que termine.');
   const pending = programs.filter((p) => p.installed && (p.latestVersion || p.pendingUpdates));
   const steps = pending.flatMap((p) =>
     (programById(p.id)?.steps || []).map((s) => ({ ...s, label: `${p.name} — ${s.label}`, group: p.name }))
@@ -677,7 +725,7 @@ app.post('/api/projects/detect', async (c) => {
 });
 
 app.post('/api/projects', async (c) => {
-  const body = await c.req.json<Partial<Project>>().catch(() => ({}));
+  const body = await c.req.json<Partial<Project>>().catch(() => ({} as Partial<Project>));
   if (!body.name || !body.cwd) {
     return fail(c, 400, 'Faltan campos: name, cwd');
   }
@@ -1047,7 +1095,7 @@ app.delete('/api/domains/:id', async (c) => {
 
 // Bulk delete: one tunnel sync for N domains instead of N syncs.
 app.post('/api/domains/bulk-delete', async (c) => {
-  const body = await c.req.json<{ ids?: string[] }>().catch(() => ({}));
+  const body = await c.req.json<{ ids?: string[] }>().catch(() => ({} as { ids?: string[] }));
   const ids = new Set(body.ids || []);
   if (!ids.size) return fail(c, 400, 'Sin dominios seleccionados');
   const targets = config.domains.filter((d) => ids.has(d.id));
@@ -1086,13 +1134,29 @@ app.get('/api/config', async (c) => {
   return c.json({ ok: true, config: { ...rest, auth: { username: auth.username, totpEnabled: !!auth.totpSecret } } });
 });
 
+let settingsWrite: Promise<unknown> = Promise.resolve();
 app.put('/api/config', async (c) => {
-  const body = await c.req.json<Partial<AppConfig['settings']>>().catch(() => ({}));
-  config.settings = { ...config.settings, ...body };
-  await saveConfig(config);
-  configurePorts(config.settings);
-  setNotifyUrl(config.settings.notifyUrl);
-  return c.json({ ok: true, settings: config.settings });
+  let body: Partial<AppConfig['settings']>;
+  try { body = validateSettings(await c.req.json()); } catch (e) { return fail(c, 400, (e as Error).message); }
+  const operation = settingsWrite.catch(() => {}).then(async () => {
+    const settings = { ...config.settings, ...body };
+    await saveConfig({ ...config, settings });
+    config.settings = settings;
+    configurePorts(settings);
+    setHostUser(settings.hostUser);
+    invalidateProgramsCache(); invalidateAgentsCache();
+    setNotifyUrl(settings.notifyUrl, settings.notifyProvider);
+    return settings;
+  });
+  settingsWrite = operation;
+  return c.json({ ok: true, settings: await operation });
+});
+
+app.post('/api/notifications/test', async c => {
+  if (!notifyConfigured()) return fail(c, 400, 'Guardá un webhook antes de probarlo');
+  try { await notify('Axon — prueba de notificaciones', 'El webhook está funcionando.', 3, true); }
+  catch (e) { return fail(c, 502, (e as Error).message); }
+  return c.json({ ok: true, message: 'El destino aceptó la notificación de prueba.' });
 });
 
 app.get('/api/stats', async (c) => {
@@ -1244,7 +1308,7 @@ app.get('/api/domains/heartbeats', async (c) => {
 // ---------- Remote power ----------
 
 app.post('/api/system/power', async (c) => {
-  const body = await c.req.json<{ action?: string; confirm?: string }>().catch(() => ({}));
+  const body = await c.req.json<{ action?: string; confirm?: string }>().catch(() => ({} as { action?: string; confirm?: string }));
   const action = body.action;
   if (action !== 'reboot' && action !== 'poweroff') return fail(c, 400, 'Acción inválida');
   const want = action === 'reboot' ? 'REINICIAR' : 'APAGAR';
@@ -1286,7 +1350,7 @@ WantedBy=default.target
 }
 
 app.post('/api/systemd/create-service', async (c) => {
-  const body = await c.req.json<{ pid?: number; name?: string }>().catch(() => ({}));
+  const body = await c.req.json<{ pid?: number; name?: string }>().catch(() => ({} as { pid?: number; name?: string }));
   const pid = Number(body.pid);
   if (!pid || pid <= 1) return fail(c, 400, 'PID inválido');
   const name = String(body.name || '')
@@ -1322,7 +1386,7 @@ app.post('/api/systemd/create-service', async (c) => {
 
 // Preview of the unit that would be generated — no writes.
 app.post('/api/systemd/preview-service', async (c) => {
-  const body = await c.req.json<{ pid?: number; name?: string }>().catch(() => ({}));
+  const body = await c.req.json<{ pid?: number; name?: string }>().catch(() => ({} as { pid?: number; name?: string }));
   const pid = Number(body.pid);
   if (!pid || pid <= 1) return fail(c, 400, 'PID inválido');
   const [cmdlineRaw, cwdRes] = await Promise.all([
@@ -1338,19 +1402,39 @@ app.post('/api/systemd/preview-service', async (c) => {
 });
 
 // ---------- Feature modules (self-contained, wired here) ----------
-registerFilesRoutes(app);
+const maintenanceRepo = new MaintenanceRepository(path.join(path.dirname(process.env.CONFIG_PATH || '/app/data/config.json'), 'maintenance'));
+const fileOperations = new FileOperations(maintenanceRepo, maintenanceQaRoot ? async()=>maintenanceQaRoot : fileHostHome);
+fileOperations.onChanged(async(action,from,to)=>{await libraryFileOperation(action,from,to);recordEvent('file',action==='send'?'Elemento enviado a papelera':'Elemento restaurado','Operación verificada; no implica espacio liberado');});
+const fileTransfers=new FileTransfers(maintenanceRepo,maintenanceQaRoot?async()=>maintenanceQaRoot:fileHostHome);
+fileTransfers.onValidate(async(mode,from,to)=>{if(maintenanceQaRoot&&(![from,to].every(p=>p.startsWith(maintenanceQaRoot+'/'))))throw new MaintenanceError('QA: transferencia fuera de la fixture',403);await libraryTransferGuard(mode,from,to);});
+fileTransfers.onChanged(async(mode,from,to)=>{await libraryFileOperation(mode,from,to);recordEvent('file',mode==='move'?'Movimiento verificado':'Copia verificada','Operación durable; no implica ahorro de disco');});
+registerFilesRoutes(app, fileOperations,fileTransfers,maintenanceQaRoot||undefined);
 registerEventRoutes(app);
 registerAlertRoutes(app);
 registerScriptRoutes(app);
 registerLogsRoutes(app);
 registerMetricsRoutes(app);
 registerDropRoutes(app);
-registerLibraryRoutes(app);
+registerLibraryRoutes(app,fileTransfers);
 registerSessionRoutes(app);
 registerOpsRoutes(app);
+registerOptimizerRoutes(app, async () => config);
 registerDockerOpsRoutes(app);
 registerAgentRoutes(app);
+registerAgentAccounts(app, maintenanceQaRoot ? async () => maintenanceQaRoot : fileHostHome, () => { invalidateProgramsCache(); invalidateAgentsCache(); });
+registerAgentUsage(app, maintenanceQaRoot ? async () => maintenanceQaRoot : fileHostHome);
+registerAgentConsumption(app, maintenanceQaRoot ? async () => maintenanceQaRoot : fileHostHome);
+registerStoreRoutes(app);
+const storageService = new StorageService(maintenanceRepo, () => maintenanceQaRoot ? Promise.resolve([{id:'qa-cache',path:path.join(maintenanceQaRoot,'scan-fixture'),title:'Caché de prueba aislada',adapterId:'packages'}]) : scanRoots(config.projects), scanRoot,undefined,maintenanceQaRoot?new HostCleaner(async()=>maintenanceQaRoot,async()=>({complete:true,references:[],tools:[],unknownProcesses:0,examined:0,elapsedMs:0}),undefined,maintenanceQaRoot):new HostCleaner(fileHostHome));
+registerStorageRoutes(app, storageService, fileOperations);
+registerHomeLinkRoutes(app, new HomeLinks(maintenanceRepo), () => knownHomeLinks(config.domains,allHeartbeats()));
+const installations = maintenanceQaRoot ? async () => ['homepage','filebrowser','portainer'].map(name => ({id:'qa-'+name,name,backend:'docker',scope:'fixture',version:'fixture',executablePath:null,coverage:'Fixture de QA; no es una instalación real',references:[],container:{id:'qa-'+name,project:'qa-isolated',service:name,state:'fixture',mounts:[{source:maintenanceQaRoot,destination:'/data',type:'bind'}],configFiles:[],image:name+':fixture'},blockers:['Fixture: ninguna retirada autorizada']})) : async () => [...await physicalInstallations(await getPrograms()), ...await dockerInstallations()];
+const composeDrafts=new ComposeDrafts(maintenanceRepo),composeReleases=new ComposeReleases(maintenanceRepo,composeDrafts,fileHostHome);
+const migrationService=new Migrations(maintenanceRepo,installations);
+registerMigrationRoutes(app,migrationService,installations,maintenanceQaRoot?undefined:new HomepageMigration(migrationService,new HomeLinks(maintenanceRepo)),maintenanceQaRoot?undefined:new MigrationRetirement(migrationService,composeDrafts,composeReleases));
 registerComposeRoutes(app, {
+  drafts: composeDrafts,
+  releases: maintenanceQaRoot?undefined:composeReleases,
   getNotes: () => config.composeNotes,
   setNote: async (key, note) => {
     config.composeNotes = { ...(config.composeNotes || {}), [key]: note };
@@ -1362,6 +1446,11 @@ registerComposeRoutes(app, {
 // Open a URL inside the embedded server-side Chromium via its CDP endpoint.
 // The jlesage image publishes remote debugging on 127.0.0.1:9222 when
 // CHROMIUM_REMOTE_DEBUGGING=1 — this only opens tabs in the running session.
+app.get('/api/browser/status', async c => {
+  const response = await fetch('http://127.0.0.1:5800/', {signal:AbortSignal.timeout(4000)}).catch(() => null);
+  await response?.body?.cancel().catch(() => {});
+  return c.json({ok:true, available:!!response?.ok});
+});
 app.post('/api/browser/open', async (c) => {
   const body = await c.req.json<{ url?: string }>().catch(() => ({} as { url?: string }));
   const raw = (body.url || '').trim();
@@ -1403,12 +1492,19 @@ startDropSweeper();
 
 // Warm the expensive caches in the background so the first Programs/Agents
 // page load doesn't pay the full host-scan cost.
+setJobCompletionHook(() => { invalidateProgramsCache(); invalidateAgentsCache(); warmProgramsCache(); });
 warmProgramsCache();
 listAgents().catch(() => {});
 
+registerNavigationRoutes(app);
 app.get('/*', serveStatic({ root: './public' }));
 
 app.onError((err, c) => {
+  if (err instanceof MaintenanceError) return err.getResponse();
+  if (/^\/api\/(storage|maintenance|home|compose|files\/trash)(?:\/|$)/.test(c.req.path)) {
+    c.header('Cache-Control', 'private, no-store');
+    return c.json({ok:false,error:'La operación no se pudo completar. Revisá el historial antes de reintentar.'},503);
+  }
   console.error('Unhandled error:', err);
   return fail(c, 500, 'Error interno', { detail: String(err) });
 });
@@ -1430,10 +1526,7 @@ function startTermSocket(ws: Bun.ServerWebSocket<WsData>): void {
   // No persistence — the shell dies with the WS. `script` still provides the
   // local PTY (docker -t allocates the container-side one); COLUMNS/LINES are
   // a best-effort hint for the container's initial winsize.
-  const inner = t.exec
-    ? `docker exec -it -e COLUMNS=${cols} -e LINES=${rows} ${shq(t.exec)} sh -c 'command -v bash >/dev/null && exec bash -l || exec sh -l'`
-    : `tmux new-session -A -s ${session}`;
-  const cmd = `export TERM=xterm-256color; script -qfc "stty cols ${cols} rows ${rows}; exec ${inner}" /dev/null`;
+  const cmd = hostTerminalCommand({ session, cols, rows, exec: t.exec });
   const proc = hostSpawnInteractive(cmd, { user: 'user' });
   t.proc = proc;
   const pump = async (stream: ReadableStream<Uint8Array> | undefined) => {
@@ -1456,9 +1549,12 @@ function startTermSocket(ws: Bun.ServerWebSocket<WsData>): void {
 
 export default {
   port: PORT,
-  async fetch(req: Request, server: Bun.Server) {
+  hostname: process.env.AXON_BIND_HOST || '0.0.0.0',
+  idleTimeout: 60,
+  async fetch(req: Request, server: Bun.Server<WsData>) {
     const url = new URL(req.url);
     const isWs = req.headers.get('upgrade')?.toLowerCase() === 'websocket';
+    if (maintenanceQaRoot && isWs) return new Response('QA: WebSocket operativo bloqueado', {status:403});
     const wsMatch = url.pathname.match(/^\/p\/(\d+)(\/.*)?$/);
     if (wsMatch && isWs) {
       const token = req.headers.get('cookie')?.match(/(?:^|;\s*)axon_session=([^;]+)/)?.[1];
@@ -1545,7 +1641,7 @@ export default {
   websocket: {
     open(ws: Bun.ServerWebSocket<WsData>) {
       if (ws.data.kind === 'term') { startTermSocket(ws); return; }
-      if (ws.data.kind === 'logs') { startLogsSocket(ws); return; }
+      if (ws.data.kind === 'logs') { startLogsSocket(ws as Bun.ServerWebSocket<LogsWsData>); return; }
       // Handlers were attached in fetch() before upgrade — just link the
       // socket and flush any upstream frames buffered in between.
       ws.data.ws = ws;

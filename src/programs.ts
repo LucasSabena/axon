@@ -1,13 +1,18 @@
 import { readdir } from 'fs/promises';
 import * as path from 'path';
-import { HOST_FS, hostExec, readHostFile } from './host';
+import { HOST_FS, HOST_USER, hostExec, readHostFile } from './host';
 import type { DesktopApp, ProgramDef, ProgramView } from './types';
 
 // Registry of updatable programs. Each step declares which user runs it on the
 // host: root for system package managers, `user` for user-level tools whose
 // binaries live in ~/.local, ~/.bun, etc.
 // `npmPkg` marks pnpm-global packages: their latest version is resolved via
-// `npm view` so the card can show "current → latest".
+// `pnpm view` so the card can show "current → latest".
+function selectedAccountCheck(agent: string, fallback: string): string {
+  const decode = "import json,sys;d=json.load(sys.stdin);p=next(p for p in d['profiles'] if p['active']);print((p.get('email') or p['label']) if p['connected'] else '');sys.exit(0 if p['connected'] else 1)";
+  return `if [ -x "$HOME/.local/bin/axon-agent" ]; then "$HOME/.local/bin/axon-agent" status ${agent} | python3 -c "${decode}"; else ${fallback}; fi`;
+}
+
 const PROGRAMS: ProgramDef[] = [
   // --- AI / dev CLIs ---
   {
@@ -20,7 +25,7 @@ const PROGRAMS: ProgramDef[] = [
     detect: [{ cmd: 'command -v codex', user: 'user' }],
     version: { cmd: 'codex --version 2>/dev/null | head -1', user: 'user' },
     auth: {
-      check: { cmd: 'python3 -c "import json,base64;d=json.load(open(\'$HOME/.codex/auth.json\'));t=d.get(\'tokens\',{});tok=t.get(\'id_token\') or t.get(\'access_token\');p=tok.split(\'.\')[1];p+=\'=\'*(-len(p)%4);print(json.loads(base64.urlsafe_b64decode(p)).get(\'email\',\'cuenta\'))" 2>/dev/null', user: 'user' },
+      check: { cmd: selectedAccountCheck('codex', 'python3 -c "import json,base64;d=json.load(open(\'$HOME/.codex/auth.json\'));t=d.get(\'tokens\',{});tok=t.get(\'id_token\') or t.get(\'access_token\');p=tok.split(\'.\')[1];p+=\'=\'*(-len(p)%4);print(json.loads(base64.urlsafe_b64decode(p)).get(\'email\',\'cuenta\'))" 2>/dev/null'), user: 'user' },
       login: [{ label: 'codex login (device)', cmd: 'codex login --device-auth', user: 'user' }],
       logout: [{ label: 'codex logout', cmd: 'codex logout', user: 'user' }],
     },
@@ -35,7 +40,7 @@ const PROGRAMS: ProgramDef[] = [
     detect: [{ cmd: 'command -v claude', user: 'user' }],
     version: { cmd: 'claude --version 2>/dev/null | head -1', user: 'user' },
     auth: {
-      check: { cmd: 'e=$(python3 -c "import json;print(json.load(open(\'$HOME/.claude.json\')).get(\'oauthAccount\',{}).get(\'emailAddress\',\'\'))" 2>/dev/null); [ -n "$e" ] && echo "$e"', user: 'user' },
+      check: { cmd: selectedAccountCheck('claude', 'e=$(python3 -c "import json;print(json.load(open(\'$HOME/.claude.json\')).get(\'oauthAccount\',{}).get(\'emailAddress\',\'\'))" 2>/dev/null); [ -n "$e" ] && echo "$e"'), user: 'user' },
       logout: [
         { label: 'Borrar credenciales', cmd: 'rm -f $HOME/.claude/.credentials.json', user: 'user' },
         { label: 'Limpiar cuenta', cmd: 'python3 -c "import json;p=\'$HOME/.claude.json\';d=json.load(open(p));d.pop(\'oauthAccount\',None);json.dump(d,open(p,\'w\'))"', user: 'user' },
@@ -313,7 +318,7 @@ const PROGRAMS: ProgramDef[] = [
     icon: 'boxes',
     desc: 'Firefox, Chromium y otros snaps.',
     channel: 'snap',
-    detect: [{ cmd: 'command -v snap && snap list', user: 'root' }],
+    detect: [{ cmd: 'command -v snap', user: 'root' }],
     updatesCheck: { cmd: "snap refresh --list 2>/dev/null | tail -n +2 | wc -l", user: 'root' },
     steps: [{ label: 'snap refresh', cmd: 'snap refresh', user: 'root' }],
   },
@@ -341,8 +346,8 @@ const PROGRAMS: ProgramDef[] = [
     version: { cmd: 'pnpm --version', user: 'user' },
     updatesCheck: { cmd: "pnpm outdated -g --format json 2>/dev/null | grep -c '\"latest\"'", user: 'user' },
     auth: {
-      check: { cmd: 'npm whoami 2>/dev/null', user: 'user' },
-      loginHint: 'Ejecutá `npm login` en una terminal',
+      check: { cmd: 'pnpm whoami 2>/dev/null', user: 'user' },
+      loginHint: 'Ejecutá `pnpm login` en una terminal',
     },
     steps: [
       { label: 'Actualizar pnpm', cmd: 'pnpm self-update 2>/dev/null || pnpm add -g pnpm@latest', user: 'user' },
@@ -438,10 +443,10 @@ async function pnpmReleasePolicy(): Promise<ReleasePolicy> {
 async function npmLatestInstallable(pkg: string, pol: ReleasePolicy): Promise<string | null> {
   if (!/^[@a-zA-Z0-9._/-]+$/.test(pkg)) return null;
   if (pol.minutes <= 0 || pol.excludes.includes(pkg)) {
-    const r = await hostExec(`npm view ${pkg} version 2>/dev/null`, { user: 'user', timeoutMs: 30_000 });
+    const r = await hostExec(`pnpm view ${pkg} version 2>/dev/null`, { user: 'user', timeoutMs: 30_000 });
     return semverOf(r.stdout.trim());
   }
-  const r = await hostExec(`npm view ${pkg} time --json 2>/dev/null`, { user: 'user', timeoutMs: 30_000 });
+  const r = await hostExec(`pnpm view ${pkg} time --json 2>/dev/null`, { user: 'user', timeoutMs: 30_000 });
   let times: Record<string, string>;
   try { times = JSON.parse(r.stdout); } catch { return null; }
   const cutoff = Date.now() - pol.minutes * 60_000;
@@ -454,109 +459,128 @@ async function npmLatestInstallable(pkg: string, pol: ReleasePolicy): Promise<st
   return best;
 }
 
-export async function detectPrograms(): Promise<ProgramView[]> {
-  // Kick off the pnpm policy probe in parallel with the per-program scans —
-  // it's only needed for npmLatestInstallable below.
-  const policyP = pnpmReleasePolicy().catch(() => ({ minutes: 0, excludes: [] as string[] }));
-  const views = await Promise.all(
-    PROGRAMS.map(async (p) => {
-      // Every probe for a program is independent, so fire them concurrently —
-      // each hostExec is a separate nsenter+login-shell spawn (~50ms), and
-      // awaiting them serially used to add ~200ms+ per program for no reason.
-      // Failed commands are harmless: they're only read when `installed`.
-      const detectP = (async () => {
-        for (const d of p.detect) {
-          const res = await hostExec(d.cmd, { user: d.user, timeoutMs: 15_000 });
-          if (!res.ok) return false;
-        }
-        return true;
-      })();
-      const versionP = p.version
-        ? hostExec(p.version.cmd, { user: p.version.user, timeoutMs: 15_000 })
-        : Promise.resolve(null);
-      const updatesP = p.updatesCheck
-        ? hostExec(p.updatesCheck.cmd, { user: p.updatesCheck.user, timeoutMs: 60_000 })
-        : Promise.resolve(null);
-      const authP = p.auth
-        ? hostExec(p.auth.check.cmd, { user: p.auth.check.user, timeoutMs: 15_000 })
-        : Promise.resolve(null);
+async function programMetadata(p: ProgramDef) {
+  const [v, a] = await Promise.all([
+    p.version ? hostExec(p.version.cmd, { user: p.version.user, timeoutMs: 15_000 }) : null,
+    p.auth ? hostExec(p.auth.check.cmd, { user: p.auth.check.user, timeoutMs: 15_000 }) : null,
+  ]);
+  return {
+    version: v?.ok ? v.stdout.trim().split('\n')[0] || undefined : undefined,
+    auth: p.auth ? {
+      loggedIn: !!(a?.ok && a.stdout.trim()),
+      account: a?.ok ? a.stdout.trim().split('\n')[0] || undefined : undefined,
+      canLogin: !!p.auth.login, canLogout: !!p.auth.logout, loginHint: p.auth.loginHint,
+    } : undefined,
+    metadataPending: false,
+  };
+}
 
-      const installed = await detectP;
-      const view: ProgramView = {
-        id: p.id,
-        name: p.name,
-        icon: p.icon,
-        brandIcon: BRAND_ICONS[p.id],
-        desc: p.desc,
-        channel: p.channel,
-        installed,
-        steps: p.steps.map((s) => ({ label: s.label, cmd: s.cmd, user: s.user })),
-      };
-      const v = await versionP;
-      if (installed && v?.ok) view.version = v.stdout.trim().split('\n')[0] || undefined;
-      const u = await updatesP;
-      if (installed && u?.ok) {
-        const n = parseInt(u.stdout.trim(), 10);
-        if (!Number.isNaN(n) && n > 0) view.pendingUpdates = String(n);
-      }
-      // Account/session state for account-backed CLIs
-      const a = await authP;
-      if (installed && p.auth) {
-        view.auth = {
-          loggedIn: !!(a?.ok && a.stdout.trim().length > 0),
-          account: a?.ok ? a.stdout.trim().split('\n')[0] || undefined : undefined,
-          canLogin: !!p.auth.login,
-          canLogout: !!p.auth.logout,
-          loginHint: p.auth.loginHint,
-        };
-      }
-      // npm-registry-backed tools: compare installed semver vs the version
-      // pnpm would actually install (respects minimumReleaseAge).
-      if (installed && p.npmPkg) {
-        const latestV = await npmLatestInstallable(p.npmPkg, await policyP);
-        const currentV = view.version ? semverOf(view.version) : null;
-        if (latestV && currentV && newerThan(latestV, currentV)) {
-          view.latestVersion = latestV;
-        }
-      }
-      return view;
-    })
-  );
-  return views;
+export async function detectPrograms(checkUpdates = false, inspect = true, probe = hostExec): Promise<ProgramView[]> {
+  const policy = checkUpdates ? pnpmReleasePolicy().catch(() => ({minutes:0,excludes:[] as string[]})) : null;
+  return Promise.all(PROGRAMS.map(async p => {
+    let installed = true;
+    for (const d of p.detect) {
+      if (!(await probe(d.cmd, { user:d.user, timeoutMs:15_000 })).ok) { installed=false; break; }
+    }
+    const view: ProgramView = {
+      id:p.id, name:p.name, icon:p.icon, brandIcon:BRAND_ICONS[p.id], desc:p.desc,
+      channel:p.channel, installed,
+      installable:!!p.npmPkg && p.channel==='pnpm' && p.id!=='opencode', packageName:p.npmPkg,
+      steps:p.steps.map(s=>({label:s.label, cmd:s.cmd, user:s.user})),
+      metadataPending: installed && !!(p.version || p.auth) && !inspect,
+    };
+    if (!installed || !inspect) return view;
+    Object.assign(view, await programMetadata(p));
+    if (checkUpdates && p.updatesCheck) {
+      const r=await hostExec(p.updatesCheck.cmd,{user:p.updatesCheck.user,timeoutMs:60_000});
+      const n=r.ok ? parseInt(r.stdout.trim(),10) : 0;
+      if(n>0)view.pendingUpdates=String(n);
+    }
+    if (checkUpdates && p.npmPkg) {
+      const latest=await npmLatestInstallable(p.npmPkg,await policy!);
+      if(latest && view.version && newerThan(latest,semverOf(view.version) || '0.0.0'))view.latestVersion=latest;
+    }
+    return view;
+  }));
 }
 
 // --- Shared stale-while-revalidate cache ---
-// detectPrograms() is expensive (~30 programs × several hostExec + npm view
-// calls each). Both /api/programs and the agents rail need the result, so it
+// Installation probes return first; local versions/accounts and registry checks
+// complete in the background. Both /api/programs and the agents rail need the result, so it
 // lives here in one place: fresh hits are instant, stale hits return the last
 // data immediately and recompute in the background.
 let progCache: { at: number; data: ProgramView[] } | null = null;
+let progGeneration = 0;
+let updateInflight: Promise<void> | null = null;
+let metadataInflight: Promise<void> | null = null;
+let updateCheckedAt = 0;
 let progInflight: Promise<ProgramView[]> | null = null;
 const PROG_TTL_MS = 60_000;
 const PROG_STALE_MS = 10 * 60_000;
 
 export function invalidateProgramsCache(): void {
+  progGeneration++;
   progCache = null;
+  progInflight = null;
+  metadataInflight = null;
+  updateInflight = null;
+  updateCheckedAt = 0;
 }
 
+export function peekPrograms(): ProgramView[] { return progCache?.data || []; }
+export function programsStatus() { return { checkingMetadata: !!metadataInflight, checkingUpdates: !!updateInflight, checkedAt: updateCheckedAt }; }
+function hydratePrograms(data: ProgramView[], generation: number): void {
+  const flight=Promise.all(data.filter(p=>p.installed && p.metadataPending).map(async view=>{
+    const next=await programMetadata(programById(view.id)!);
+    if(generation===progGeneration && progCache?.data===data)Object.assign(view,next);
+  })).then(()=>{
+    if(generation===progGeneration && progCache?.data===data)checkUpdates();
+  }).finally(()=>{if(metadataInflight===flight)metadataInflight=null;});
+  metadataInflight=flight;
+}
+function checkUpdates(): void {
+  if (updateInflight || !progCache || Date.now() - updateCheckedAt < 5 * 60_000) return;
+  const generation = progGeneration;
+  const data = progCache.data;
+  const flight = (async () => {
+    const policy = await pnpmReleasePolicy().catch(() => ({ minutes: 0, excludes: [] as string[] }));
+    await Promise.all(data.filter(p => p.installed).map(async view => {
+      const def = programById(view.id)!;
+      const next = { ...view };
+      if (def.npmPkg) {
+        const latest = await npmLatestInstallable(def.npmPkg, policy);
+        const current = view.version ? semverOf(view.version) : null;
+        if (latest && current) next.latestVersion = newerThan(latest, current) ? latest : undefined;
+      }
+      if (def.updatesCheck) {
+        const r = await hostExec(def.updatesCheck.cmd, { user: def.updatesCheck.user, timeoutMs: 60_000 });
+        if (r.ok) { const n = parseInt(r.stdout.trim(), 10); next.pendingUpdates = n > 0 ? String(n) : undefined; }
+      }
+      if (generation === progGeneration && progCache?.data === data) Object.assign(view, next);
+    }));
+    if (generation === progGeneration && progCache?.data === data) updateCheckedAt = Date.now();
+  })().catch(() => {}).finally(() => { if(updateInflight===flight)updateInflight = null; });
+  updateInflight=flight;
+}
 function refreshPrograms(): Promise<ProgramView[]> {
   if (!progInflight) {
-    progInflight = detectPrograms()
-      .then((data) => {
-        progCache = { at: Date.now(), data };
-        return data;
-      })
-      .finally(() => {
-        progInflight = null;
-      });
+    const generation = progGeneration;
+    const previous = new Map(peekPrograms().map(p=>[p.id,p]));
+    const flight = detectPrograms(false, false).then(data => {
+      for (const p of data) { const old=previous.get(p.id);if(old?.installed && p.installed){p.version=old.version;p.auth=old.auth;} }
+      if (generation === progGeneration) { progCache = { at: Date.now(), data }; hydratePrograms(data,generation); }
+      return data;
+    }).finally(() => { if (progInflight === flight) progInflight = null; });
+    progInflight = flight;
   }
   return progInflight;
 }
 
 export async function getPrograms(force = false): Promise<ProgramView[]> {
+  if (force) updateCheckedAt = 0;
   if (!force && progCache) {
     const age = Date.now() - progCache.at;
-    if (age < PROG_TTL_MS) return progCache.data;
+    if (age < PROG_TTL_MS) { if(!metadataInflight)checkUpdates(); return progCache.data; }
     if (age < PROG_STALE_MS) {
       // Serve stale instantly; refresh for the next caller.
       refreshPrograms().catch(() => {});
@@ -580,8 +604,8 @@ export async function listDesktopApps(): Promise<DesktopApp[]> {
     `${HOST_FS}/usr/share/applications`,
     `${HOST_FS}/var/lib/snapd/desktop/applications`,
     `${HOST_FS}/var/lib/flatpak/exports/share/applications`,
-    `${HOST_FS}/home/${process.env.HOST_USER || 'root'}/.local/share/applications`,
-    `${HOST_FS}/home/${process.env.HOST_USER || 'root'}/.local/share/flatpak/exports/share/applications`,
+    `${HOST_FS}${HOST_USER === 'root' ? '/root' : `/home/${HOST_USER}`}/.local/share/applications`,
+    `${HOST_FS}${HOST_USER === 'root' ? '/root' : `/home/${HOST_USER}`}/.local/share/flatpak/exports/share/applications`,
   ];
   const seen = new Set<string>();
   for (const dir of dirs) {
@@ -721,22 +745,23 @@ export async function searchAptPackages(filter: string): Promise<{ name: string;
 // fallback theme every theme inherits, so covering it (system + flatpak +
 // user-local roots) resolves virtually every packaged icon.
 const ICON_EXTS = ['.png', '.svg', '.xpm'];
-const ICON_HOST_USER = process.env.HOST_USER || 'root';
 const ICON_SIZES = ['scalable', '256x256', '128x128', '96x96', '64x64', '48x48', '32x32', '24x24', '16x16'];
-const ICON_ROOTS = [
+const iconDirs = () => {
+const roots = [
   '/usr/share/icons',
   '/usr/local/share/icons',
   '/var/lib/flatpak/exports/share/icons',
-  `/home/${ICON_HOST_USER}/.local/share/icons`,
+  `${HOST_USER === 'root' ? '/root' : `/home/${HOST_USER}`}/.local/share/icons`,
 ];
-const ICON_DIRS = [
+return [
   '/usr/share/pixmaps',
   '/usr/local/share/pixmaps',
-  `/home/${ICON_HOST_USER}/.local/share/pixmaps`,
-  ...ICON_ROOTS.flatMap((r) => ICON_SIZES.map((s) => `${r}/hicolor/${s}/apps`)),
+  `${HOST_USER === 'root' ? '/root' : `/home/${HOST_USER}`}/.local/share/pixmaps`,
+  ...roots.flatMap((r) => ICON_SIZES.map((s) => `${r}/hicolor/${s}/apps`)),
   '/var/lib/snapd/desktop/icons',
   '/snap/icons',
 ];
+};
 
 export async function resolveIcon(iconName: string): Promise<string | null> {
   if (!iconName || iconName.includes('..') || iconName.includes('\0')) return null;
@@ -747,7 +772,7 @@ export async function resolveIcon(iconName: string): Promise<string | null> {
     const p = hostToContainerFs(iconName);
     if (p) return p;
   }
-  for (const dir of ICON_DIRS) {
+  for (const dir of iconDirs()) {
     for (const ext of ICON_EXTS) {
       const candidate = `${dir}/${iconName}${ext}`;
       const p = hostToContainerFs(candidate);

@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir } from 'fs/promises';
+import { readFile, writeFile, mkdir, rename } from 'fs/promises';
 import * as path from 'path';
 import { hashPassword } from './auth';
 import type { AppConfig } from './types';
@@ -47,7 +47,15 @@ export async function loadConfig(): Promise<AppConfig> {
   return config;
 }
 
-export async function saveConfig(config: AppConfig): Promise<void> {
-  await mkdir(path.dirname(CONFIG_PATH), { recursive: true });
-  await writeFile(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf-8');
+let saveQueue: Promise<void> = Promise.resolve();
+export function saveConfig(config: AppConfig): Promise<void> {
+  const text = JSON.stringify(config, null, 2);
+  const operation = saveQueue.catch(() => {}).then(async () => {
+    await mkdir(path.dirname(CONFIG_PATH), { recursive: true });
+    const temp = `${CONFIG_PATH}.${process.pid}.tmp`;
+    await writeFile(temp, text, 'utf-8');
+    await rename(temp, CONFIG_PATH);
+  });
+  saveQueue = operation;
+  return operation;
 }

@@ -8,6 +8,7 @@
 (() => {
   'use strict';
 
+  let restoringAgent = false;
   let agentsList = [];
   let discoveredList = []; // heuristic candidates not managed yet
   let selectedId = null;
@@ -45,7 +46,7 @@
         activeTabName = 'agents';
       }
     } catch { /* older app.js */ }
-    loadAgents();
+    if (!window.AxonNavigation) loadAgents();
   }
 
   function ensureDom() {
@@ -78,7 +79,7 @@
           <span class="last-updated" id="agents-updated"></span>
         </div>
       </div>
-      <p class="listener-note">Agentes detectados en el host — skills, MCP servers, plugins y cuentas de cada uno. Los cambios escriben directo en su config (queda backup <code>.axonbak</code>).</p>
+      <p class="listener-note">Agentes detectados en el host: configuración, integraciones, chats y memorias locales. Las ediciones conservan un respaldo.</p>
       <div class="agents-layout">
         <div class="agents-side">
           <div class="agents-search">
@@ -97,11 +98,11 @@
           <div class="agents-rail" id="agents-rail"><p class="ops-loading">Detectando agentes…</p></div>
         </div>
         <div class="agents-detail" id="agents-detail">
-          <div class="agents-placeholder">${icon('bot')}<p>Elegí un agente para ver sus skills, MCPs y plugins</p></div>
+          <div class="agents-placeholder">${icon('bot')}<p>Elegí un agente, Chats o Memorias para ver su contenido.</p></div>
         </div>
       </div>`;
     main.appendChild(sec);
-    sec.querySelector('#agents-refresh').addEventListener('click', loadAgents);
+    sec.querySelector('#agents-refresh').addEventListener('click', async()=>{if(await window.AgentContext.canLeave())await loadAgents();});
     sec.querySelector('#agents-q').addEventListener('input', onSearch);
     sec.querySelector('#agents-add').addEventListener('click', () => {
       $('#agents-add-form').classList.toggle('hidden');
@@ -125,58 +126,121 @@
 
   // ---------- data ----------
 
-  async function loadAgents() {
+  async function loadAgents({ refreshDetail = true } = {}) {
     ensureDom();
     try {
-      const [{ agents }, disc] = await Promise.all([
-        api('/api/agents'),
-        api('/api/agents-discovered').catch(() => ({ candidates: [] })),
-      ]);
+      const { agents } = await api('/api/agents');
       agentsList = agents || [];
-      discoveredList = disc.candidates || [];
+      // Optional discovery never holds the main rail hostage.
+      api('/api/agents-discovered', {cacheMs:60_000}).then(disc=>{
+        discoveredList=disc.candidates || []; if(!railQuery) renderRail();
+      }).catch(()=>{});
       window.__pmAgents = agentsList; // ⌘K command palette integration
       $('#agents-updated').textContent = `Actualizado ${new Date().toLocaleTimeString()}`;
       renderRail();
       const upd = agentsList.filter((a) => a.latestVersion).length;
       const nc = $('#nav-count-agents');
       if (nc) { nc.textContent = upd || ''; nc.classList.toggle('hidden', !upd); nc.classList.toggle('nav-alert', upd > 0); }
-      if (selectedId) loadDetail(selectedId, { silent: true });
-      // warm the docs count for the rail row in the background
-      api('/api/agent-docs').then(({ docs }) => {
-        docsCount = (docs || []).length;
-        const sub = $('#agents-rail .agent-docs-row .agent-sub');
-        if (sub) sub.textContent = `${docsCount} archivos`;
-      }).catch(() => {});
+      if (refreshDetail && selectedId && !restoringAgent) loadDetail(selectedId, { silent: true });
+
     } catch (err) {
       errToast(err);
     }
   }
 
   async function loadDetail(id, { silent } = {}) {
-    if (loadingDetail && !silent) return;
     loadingDetail = true;
+    const routeParams=window.AxonNavigation?.current?.params;
+    const stale=()=>selectedId!==id || (window.AxonNavigation?.ready && window.AxonNavigation.current.params!==routeParams);
     if (!silent) {
       $('#agents-detail').innerHTML = `<div class="agents-placeholder">${icon('loader')}<p>Cargando…</p></div>`;
       refreshIcons();
     }
     try {
-      if (id === '__docs') {
+      if (id === '__chats' || id === '__memories') { await window.AgentContext.render($('#agents-detail'),id === '__chats' ? 'chats' : 'memories',routeParams || {}); if(stale())return; }
+      else if (id === '__store') { await renderStore(); if(stale())return; }
+      else if (id === '__archives') { await renderArchives(); if(stale())return; }
+      else if (id === '__docs') {
         const { docs, missing } = await api('/api/agent-docs');
+        if(stale())return;
         docsCount = (docs || []).length;
         renderDocs(docs || [], missing || []);
       } else if (id === '__matrix') {
         const m = await api('/api/agents-matrix');
+        if(stale())return;
         renderMatrix(m.agents || [], m.rows || []);
       } else {
         const { agent } = await api(`/api/agents/${id}`);
+        if(stale())return;
         selectedDetail = agent;
         renderDetail();
+        if(agent?.residual) addArchiveAction(agent);
       }
     } catch (err) {
       errToast(err);
     } finally {
       loadingDetail = false;
     }
+  }
+
+  async function renderStore() {
+    const id=selectedId, {programs}=await api('/api/programs');if(selectedId!==id)return;
+    const list=programs.filter(p=>p.installable && agentsList.some(a=>a.programId===p.id));
+    $('#agents-detail').innerHTML=`<div class="agd-head"><div><h3>Instalar agentes</h3><p class="listener-note">Herramientas del registro de Axon. Instalación global con pnpm, progreso y logs en vivo.</p></div></div><div class="view-tools"><input id="agent-store-search" class="filter-input" type="search" aria-label="Buscar en catálogo" placeholder="Buscar herramienta…"></div><div class="programs-grid">${list.map(p=>`<article class="program-card" data-store-name="${esc(p.name.toLowerCase())}"><strong>${esc(p.name)}</strong><p class="program-desc">${esc(p.desc||'')}</p><code>${esc(p.packageName)}</code><div class="program-actions">${p.installed?'<span class="program-ok">Instalado</span>':`<button class="btn-primary" data-store-install="${esc(p.id)}">${icon('download')} Instalar</button>`}</div></article>`).join('')}</div>`;
+    $('#agent-store-search').addEventListener('input',e=>{$$('[data-store-name]').forEach(row=>row.hidden=!row.dataset.storeName.includes(e.target.value.trim().toLowerCase()));});
+    $$('[data-store-install]').forEach(button=>button.addEventListener('click',async()=>{
+      const p=list.find(p=>p.id===button.dataset.storeInstall);
+      if(!(await confirmDialog('Instalar agente',`Se ejecuta pnpm add -g ${p.packageName} con el usuario del host.`, 'Instalar')))return;
+      try{await AxonUI.busy(button,async()=>{const {job}=await api(`/api/programs/${p.id}/install`,{method:'POST'});openJobModal(job);});}catch(e){errToast(e);}
+    }));refreshIcons();
+  }
+  async function renderArchives() {
+    const id=selectedId;
+    const [stored,pending]=await Promise.allSettled([api('/api/agent-archives'),api('/api/agent-residuals')]);
+    if(selectedId!==id)return;
+    const archives=stored.status==='fulfilled'?stored.value.archives:[];
+    const residuals=pending.status==='fulfilled'?pending.value.residuals:[];
+    const errors=[stored,pending].filter(r=>r.status==='rejected').map(r=>r.reason.message);
+    $('#agents-detail').innerHTML=`<h3>Limpiar residuales</h3><p class="listener-note">Seleccioná varias configuraciones de agentes desinstalados y retiralas en un paso. Se conservan en un respaldo recuperable; archivar no libera espacio en disco.</p>${errors.map(error=>`<p role="alert" class="listener-note">${esc(error)}</p>`).join('')}
+      <div class="residual-tools"><label><input type="checkbox" id="residual-all" ${residuals.some(r=>r.eligible)?'':'disabled'}> Seleccionar todos los disponibles</label><button class="btn-primary" id="residual-clean" disabled>${icon('archive')} Limpiar seleccionados <span id="residual-count">(0)</span></button></div>
+      <div class="residual-list">${residuals.length?residuals.map(r=>`<label class="residual-item"><input type="checkbox" data-residual-id="${esc(r.id)}" ${r.eligible?'':'disabled'}><span><strong>${esc(r.name)}</strong><code>${esc(r.source)}</code><small>${r.eligible?esc(r.size||'Sin estimación'):esc(r.reason||'Esta carpeta no se puede retirar')}</small></span></label>`).join(''):'<p class="empty-state">No hay configuraciones residuales para limpiar.</p>'}</div>
+      <p id="residual-result" role="status" aria-live="polite"></p>
+      <h4>Respaldos recuperables (${archives.length})</h4><p class="listener-note">Restaurar devuelve la configuración original y nunca reemplaza una carpeta existente.</p>${archives.length?archives.map(a=>`<div class="ag-item"><div class="ag-item-body"><strong>${esc(a.name)}</strong><code class="ag-item-detail">${esc(a.source)}</code><small>${relTime(a.at)}</small></div><button class="btn-secondary" data-archive-restore="${esc(a.id)}">${icon('archive-restore')} Restaurar</button></div>`).join(''):'<p class="empty-state">No hay configuraciones archivadas.</p>'}`;
+    const choices=()=>[...document.querySelectorAll('[data-residual-id]:not(:disabled)')];
+    const selected=()=>choices().filter(c=>c.checked);
+    const sync=()=>{const all=choices(),count=selected().length;$('#residual-count').textContent=`(${count})`;$('#residual-clean').disabled=!count;$('#residual-all').checked=!!all.length&&count===all.length;$('#residual-all').indeterminate=count>0&&count<all.length;};
+    $('#residual-all').addEventListener('change',e=>{choices().forEach(c=>c.checked=e.target.checked);sync();});
+    choices().forEach(c=>c.addEventListener('change',sync));
+    $('#residual-clean').addEventListener('click',async e=>{
+      const selectedRows=selected().map(c=>residuals.find(r=>r.id===c.dataset.residualId));
+      if(!selectedRows.length)return;
+      const detail=selectedRows.map(r=>`${r.name}: ${r.source} (${r.size||'Sin estimación'})`).join('\n');
+      if(!(await confirmDialog(`Limpiar ${selectedRows.length} residuales`,`${detail}\n\nSe mueven a respaldos de Axon para poder restaurarlos.`, 'Limpiar seleccionados')))return;
+      if(selectedId!==id)return;
+      const button=e.currentTarget,controls=[$('#residual-all'),...choices()];controls.forEach(c=>c.disabled=true);
+      try{
+        const result=await AxonUI.busy(button,()=>api('/api/agent-residuals/archive',{method:'POST',body:{confirm:true,ids:selectedRows.map(r=>r.id)}}));
+        await loadAgents({refreshDetail:false});
+        if(selectedId===id){await renderArchives();$('#residual-result').textContent=`${result.archives.length} ${result.archives.length===1?'configuración archivada':'configuraciones archivadas'}.${result.failures.length?' '+result.failures.map(f=>`${f.name}: ${f.error}`).join(' · '):''}`;}
+        toast(`${result.archives.length} residuales archivados`,result.failures.length?'error':'ok',result.failures.map(f=>`${f.name}: ${f.error}`).join('\n'));
+      }catch(err){if(selectedId===id){controls.forEach(c=>c.disabled=false);sync();}errToast(err);}
+    });
+    $$('[data-archive-restore]').forEach(button=>button.addEventListener('click',async()=>{
+      if(!(await confirmDialog('Restaurar configuración','Se devuelve la carpeta a su ubicación original.', 'Restaurar')))return;
+      try{await AxonUI.busy(button,()=>api(`/api/agent-archives/${button.dataset.archiveRestore}/restore`,{method:'POST'}));toast('Configuración restaurada','ok');await loadAgents({refreshDetail:false});if(selectedId===id)await renderArchives();}catch(e){errToast(e);}
+    }));refreshIcons();
+  }
+  async function archiveAgent(agent,button){
+    try{
+      const preview=await AxonUI.busy(button,()=>api(`/api/agents/${agent.id}/archive-preview`));
+      if(!(await confirmDialog('Limpiar configuración residual',`${preview.source} (${preview.size}) se mueve a un respaldo de Axon. Podés restaurarla desde Limpiar residuales.`, 'Limpiar')))return;
+      await AxonUI.busy(button,()=>api(`/api/agents/${agent.id}/archive`,{method:'POST',body:{confirm:true}}));
+      await loadAgents({refreshDetail:false});toast('Configuración archivada','ok');selectAgent('__archives');
+    }catch(e){errToast(e);}
+  }
+  function addArchiveAction(agent){
+    const button=document.createElement('button');button.className='btn-secondary';button.innerHTML=`${icon('archive')} Limpiar configuración residual`;
+    $('#agents-detail').prepend(button);refreshIcons();button.addEventListener('click',()=>archiveAgent(agent,button));
   }
 
   // ---------- global search ----------
@@ -189,7 +253,9 @@
     if (railQuery.length < 2) { box.classList.add('hidden'); return; }
     searchTimer = setTimeout(async () => {
       try {
-        const { matches } = await api(`/api/agents-search?q=${encodeURIComponent(railQuery)}`);
+        const query=railQuery;
+        const { matches } = await api(`/api/agents-search?q=${encodeURIComponent(query)}`);
+        if(query!==railQuery)return;
         if (!matches.length) { box.innerHTML = '<p class="ag-match-empty listener-note">Sin coincidencias</p>'; }
         else {
           box.innerHTML = matches.map((m) => `
@@ -214,6 +280,9 @@
   }
 
   function selectAgent(id) {
+    if(window.AxonNavigation?.ready && !window.AxonNavigation.applying){
+      void window.AxonNavigation.go(window.AxonNavigation.url('agents',{id,tab:agSubTab}),{view:{selectedId:id,agSubTab}});return;
+    }
     selectedId = id;
     $('#ag-drawer')?.classList.add('hidden');
     $$('.agent-row').forEach((r) => r.classList.toggle('active', r.dataset.id === id));
@@ -260,7 +329,10 @@
         </span>
         ${auth}`;
       el.addEventListener('click', () => selectAgent(a.id));
-      rail.appendChild(el);
+      if(a.residual){
+        const wrap=document.createElement('div');wrap.className='agent-row-wrap';
+        const quick=document.createElement('button');quick.className='icon-btn residual-quick';quick.dataset.residualQuick=a.id;quick.setAttribute('aria-label',`Limpiar residual de ${a.name}`);quick.title=`Limpiar residual de ${a.name}`;quick.innerHTML=icon('archive');quick.addEventListener('click',()=>archiveAgent(a,quick));wrap.append(el,quick);rail.append(wrap);
+      }else rail.appendChild(el);
     }
     if (!installed.length && !residual.length && !missing.length && q) {
       rail.innerHTML = '<p class="agd-empty listener-note">Ningún agente coincide</p>';
@@ -310,6 +382,11 @@
       }
     }
 
+    const contextNav=document.createElement('div');contextNav.className='ctx-nav';rail.prepend(contextNav);
+    for(const [id,name,description,ic] of [['__chats','Chats','Conversaciones por proyecto','messages-square'],['__memories','Memorias','Engram y memorias locales','brain'],['__store','Instalar agentes','Herramientas de IA','package'],['__archives','Limpiar residuales',`${agentsList.filter(a=>a.residual).length} detectados · selección múltiple`,'archive']]){
+      const row=document.createElement('button');row.className=`agent-row ${selectedId===id?'active':''}`;row.dataset.id=id;
+      row.innerHTML=`<span class="agent-ic">${icon(ic)}</span><span class="agent-row-body"><span class="agent-name">${name}</span><span class="agent-sub">${description}</span></span>`;row.addEventListener('click',()=>selectAgent(id));(id==='__chats'||id==='__memories'||id==='__archives'?contextNav:rail).append(row);
+    }
     // pseudo-rows: matriz MCP×agente + documentos de instrucciones
     const matrixRow = document.createElement('button');
     matrixRow.className = `agent-row ${selectedId === '__matrix' ? 'active' : ''}`;
@@ -454,7 +531,7 @@
 
   // ---------- markdown viewer / editor modal ----------
 
-  let mdPath = null;
+  let mdPath = null,mdRevision=null;
 
   function mdInline(s) {
     return s
@@ -539,7 +616,7 @@
     $('#agmd-modal').classList.remove('hidden');
     $('#agmd-view').innerHTML = '<p class="listener-note">Cargando…</p>';
     try {
-      const { content } = await api(`/api/files/read?path=${encodeURIComponent(path)}`);
+      const { content,revision } = await api(`/api/files/read?path=${encodeURIComponent(path)}`);mdRevision=revision;
       $('#agmd-editor').value = content;
       $('#agmd-view').innerHTML = /\.(md|mdc)$/i.test(path) ? mdRender(content) : `<pre class="md-pre"><code>${esc(content)}</code></pre>`;
       setMdMode(mode);
@@ -553,8 +630,8 @@
   async function saveMd() {
     const content = $('#agmd-editor').value;
     try {
-      await api('/api/files/write', { method: 'POST', body: { path: mdPath, content } });
-      toast('Archivo guardado (backup .axonbak previo)', 'ok');
+      const result=await api('/api/files/write', { method: 'POST', body: { path: mdPath, content,revision:mdRevision } });mdRevision=result.revision;
+      toast('Archivo guardado', 'ok');
       $('#agmd-status').textContent = 'Guardado';
       if (/\.(md|mdc)$/i.test(mdPath)) $('#agmd-view').innerHTML = mdRender(content);
       else $('#agmd-view').innerHTML = `<pre class="md-pre"><code>${esc(content)}</code></pre>`;
@@ -565,7 +642,7 @@
   // ---------- detail ----------
 
   const KIND_META = {
-    provider: { title: 'Cuenta & providers', icon: 'key-round', addable: false },
+    provider: { title: 'Cuentas, uso & providers', icon: 'key-round', addable: false },
     doc: { title: 'Doc', icon: 'file-text', addable: false },
     config: { title: 'Config', icon: 'settings-2', addable: false },
     skill: { title: 'Skills', icon: 'sparkles', addable: true },
@@ -578,6 +655,8 @@
     const box = $('#agents-detail');
     if (!a) return;
     const auth = a.auth;
+    const multiAccount = ['codex', 'claude'].includes(a.id) && a.installed;
+    const usagePanel = ['opencode', 'openchamber', 'devin'].includes(a.id) && a.installed;
     const updateBtn = a.latestVersion && a.programId
       ? `<button class="btn-primary agd-update" data-pid="${esc(a.programId)}">${icon('arrow-up-circle')} Actualizar → ${esc(a.latestVersion)}</button>`
       : a.programId ? `<button class="btn-secondary agd-update" data-pid="${esc(a.programId)}" title="Reinstalar / actualizar">${icon('arrow-up-circle')} Update</button>` : '';
@@ -593,7 +672,12 @@
     const notes = (a.notes || []).map((n) => `<p class="agd-note">${icon('info')} ${esc(n)}</p>`).join('');
 
     const groups = { provider: [], doc: [], config: [], skill: [], mcp: [], plugin: [] };
-    for (const it of a.items || []) groups[it.kind]?.push(it);
+    for (const it of a.items || []) {
+      // The account panel owns subscription identity; native config providers
+      // remain visible, but must not display another profile as the active one.
+      if (multiAccount && it.kind === 'provider' && !it.copyable && ['openai', 'anthropic'].includes(it.key)) continue;
+      groups[it.kind]?.push(it);
+    }
 
     // agent's global instruction doc → editable Doc tab
     const home = (a.configRoot || '').split('/').slice(0, 3).join('/');
@@ -625,7 +709,7 @@
           </div>`;
         continue;
       }
-      if (kind === 'provider' && !items.length && !auth) { secMap[kind] = null; continue; }
+      if (kind === 'provider' && !items.length && !auth && !multiAccount && !usagePanel) { secMap[kind] = null; continue; }
       if (kind === 'plugin' && !items.length) { secMap[kind] = null; continue; }
       // builtin/system skills collapse — they outnumber user skills and are
       // read-only noise (VS Code groups its built-in extensions the same way).
@@ -645,7 +729,7 @@
       const addBtn = meta.addable
         ? `<button class="btn-action agd-add" data-kind="${kind}">${icon('plus')} Agregar</button>` : '';
       const extra = kind === 'provider'
-        ? `<div class="agd-authrow">${auth ? `<span class="health-dot ${auth.loggedIn ? 'health-ok' : 'health-bad'}"></span><span class="${auth.loggedIn ? 'auth-account' : 'listener-note'}">${auth.loggedIn ? esc(auth.account || 'Sesión activa') : 'Sin sesión'}</span>${loginBtn}${logoutBtn}${hint}` : ''}</div>` : '';
+        ? multiAccount ? '<div class="ag-accounts" data-account-panel></div>' : `<div class="agd-authrow">${auth ? `<span class="health-dot ${auth.loggedIn ? 'health-ok' : 'health-bad'}"></span><span class="${auth.loggedIn ? 'auth-account' : 'listener-note'}">${auth.loggedIn ? esc(auth.account || 'Sesión activa') : 'Sin sesión'}</span>${loginBtn}${logoutBtn}${hint}` : ''}</div>${usagePanel ? '<div data-agent-usage-panel></div>' : ''}` : '';
       const addForm = kind === 'skill' ? `
         <div class="agd-form hidden" data-kind="skill">
           <input type="text" id="agf-skill-name" class="filter-input" placeholder="nombre-de-la-skill">
@@ -692,16 +776,18 @@
 
     // Tab bar: Cuenta | Skills | MCPs | Plugins — keeps the detail short
     // instead of one long scroll. The chosen tab persists across agents.
-    const TAB_ORDER = ['provider', 'doc', 'config', 'skill', 'mcp', 'plugin'];
-    const TAB_LABEL = { provider: 'Cuenta', doc: 'Doc', config: 'Config', skill: 'Skills', mcp: 'MCPs', plugin: 'Plugins' };
+    const consumptionPanel = ['codex', 'claude', 'opencode', 'openchamber', 'gemini', 'devin'].includes(a.id);
+    if (consumptionPanel) secMap.consumption = '<div data-agent-consumption-panel></div>';
+    const TAB_ORDER = ['provider', 'consumption', 'doc', 'config', 'skill', 'mcp', 'plugin'];
+    const TAB_LABEL = { provider: 'Cuenta y uso', consumption: 'Consumo', doc: 'Doc', config: 'Config', skill: 'Skills', mcp: 'MCPs', plugin: 'Plugins' };
     const visible = TAB_ORDER.filter((k) => secMap[k]);
     const active = visible.includes(agSubTab) ? agSubTab : 'skill';
     const tabsHtml = `
       <div class="agd-tabs">
         ${visible.map((k) => `
           <button class="agd-tab ${k === active ? 'active' : ''}" data-agtab="${k}">
-            ${icon(KIND_META[k].icon)} ${TAB_LABEL[k]}
-            <span class="agd-tab-count">${groups[k].length || ''}</span>
+            ${icon(k === 'consumption' ? 'chart-no-axes-combined' : KIND_META[k].icon)} ${TAB_LABEL[k]}
+            <span class="agd-tab-count">${groups[k]?.length || ''}</span>
           </button>`).join('')}
       </div>`;
     const panesHtml = visible.map((k) =>
@@ -723,6 +809,9 @@
       ${tabsHtml}
       ${panesHtml}`;
     wireDetail(box);
+    if (active === 'consumption') mountConsumption(box);
+    if (multiAccount) window.AxonAgentAccounts.mount(box.querySelector('[data-account-panel]'), a.id);
+    else if (usagePanel) void window.AxonAgentUsage.mount(box.querySelector('[data-agent-usage-panel]'), a.id);
     refreshIcons();
   }
 
@@ -762,12 +851,18 @@
       </div>`;
   }
 
+  function mountConsumption(box) {
+    const host = box.querySelector('[data-agent-consumption-panel]');
+    if (host && !host.dataset.mounted) { host.dataset.mounted = 'true'; void window.AxonAgentConsumption.mount(host, selectedId); }
+  }
+
   function wireDetail(box) {
     box.querySelectorAll('.agd-tab').forEach((t) => t.addEventListener('click', () => {
       agSubTab = t.dataset.agtab;
       box.querySelectorAll('.agd-tab').forEach((x) => x.classList.toggle('active', x.dataset.agtab === agSubTab));
       box.querySelectorAll('.agd-pane').forEach((x) => x.classList.toggle('active', x.dataset.agtab === agSubTab));
       if (agSubTab === 'config') { loadSettings(box); loadBackups(box); }
+      if (agSubTab === 'consumption') mountConsumption(box);
     }));
 
     // if the agent opened straight into the config tab (persisted choice)
@@ -794,7 +889,7 @@
       v.addEventListener('click', () => openMd(v.dataset.path, 'edit')));
     box.querySelectorAll('.ag-doc-new').forEach((v) => v.addEventListener('click', async () => {
       try {
-        await api('/api/files/write', { method: 'POST', body: { path: v.dataset.path, content: `# Reglas globales — ${v.dataset.agent}\n\n## Contexto\n\n## Convenciones\n\n` } });
+        await api('/api/files/write', { method: 'POST', body: { path: v.dataset.path,revision:'missing', content: `# Reglas globales — ${v.dataset.agent}\n\n## Contexto\n\n## Convenciones\n\n` } });
         toast('Doc creado', 'ok');
         openMd(v.dataset.path, 'edit');
       } catch (err) { errToast(err); }
@@ -845,7 +940,7 @@
       e.stopPropagation();
       const row = b.closest('.ag-item');
       row.querySelector('.ag-prov-menu')?.remove();
-      const targets = agentsList.filter((x) => x.installed && x.id !== selectedId && x.provWritable && x.id !== 'shared');
+      const targets = agentsList.filter((x) => x.installed && !x.residual && x.id !== selectedId && x.provWritable && x.id !== 'shared');
       if (!targets.length) { toast('Ningún otro agente instalado soporta providers', 'error'); return; }
       const menu = document.createElement('div');
       menu.className = 'ag-prov-menu';
@@ -856,6 +951,7 @@
         ev.stopPropagation();
         const targetName = t.textContent.trim();
         menu.remove();
+        if(!(await confirmDialog('Compartir credencial', `Se copia el provider ${b.dataset.key} a ${targetName}. Si ya existe, se actualiza su configuración y queda un respaldo. La key se transmite entre archivos en el servidor.`, 'Compartir')))return;
         try {
           const r = await api(`/api/agents/${selectedId}/providers/${encodeURIComponent(b.dataset.key)}/copy`, { method: 'POST', body: { target: t.dataset.id } });
           toast(`${b.dataset.key} → ${targetName}${r.note ? ` — ${r.note}` : ''}`, 'ok');
@@ -903,7 +999,7 @@
         selectedId = null;
         selectedDetail = null;
         loadAgents();
-        $('#agents-detail').innerHTML = `<div class="agents-placeholder">${icon('bot')}<p>Elegí un agente para ver sus skills, MCPs y plugins</p></div>`;
+        $('#agents-detail').innerHTML = `<div class="agents-placeholder">${icon('bot')}<p>Elegí un agente, Chats o Memorias para ver su contenido.</p></div>`;
         refreshIcons();
       } catch (err) { errToast(err); }
     });
@@ -1000,9 +1096,9 @@
 
   function ensureDrawer() {
     if ($('#ag-drawer')) return;
-    const d = document.createElement('aside');
+    const d = document.createElement('div');
     d.id = 'ag-drawer';
-    d.className = 'ag-drawer hidden';
+    d.className = 'modal ag-account-modal hidden';
     document.body.appendChild(d);
     d.addEventListener('click', (e) => { if (e.target.closest('.ag-drawer-close')) d.classList.add('hidden'); });
   }
@@ -1022,9 +1118,9 @@
           </div>`).join('')
       : '';
     d.innerHTML = `
-      <div class="ag-drawer-head">
+      <div class="modal-content ag-account-content"><div class="ag-drawer-head">
         <div class="ag-drawer-title">
-          <span class="ag-item-name">${esc(it.name)}</span>
+          <h3>${esc(it.name)}</h3>
           <div class="ag-drawer-badges">
             <span class="badge badge-other">${kindLabel}</span>
             ${it.scope ? `<span class="badge badge-other">${esc(it.scope)}</span>` : ''}
@@ -1046,7 +1142,7 @@
         ${health}
         ${it.file ? `<button class="btn-secondary agd-open" data-path="${esc(it.file)}">${icon('file-text')} Abrir archivo</button>` : ''}
         ${it.deletable ? `<button class="btn-secondary agd-del">${icon('trash-2')} Borrar</button>` : ''}
-      </div>`;
+      </div></div>`;
     d.classList.remove('hidden');
     refreshIcons();
 
@@ -1260,7 +1356,7 @@
   // ⌘K palette hook — jump straight to an agent / docs / matrix
   window.pmGotoAgent = (id) => {
     document.querySelector('.tab-btn[data-tab="agents"]')?.click();
-    if (id === '__docs' || id === '__matrix' || agentsList.some((a) => a.id === id)) {
+    if (id === '__docs' || id === '__matrix' || id === '__store' || id === '__archives' || id === '__chats' || id === '__memories' || agentsList.some((a) => a.id === id)) {
       selectAgent(id);
     }
   };
@@ -1270,4 +1366,19 @@
   } else {
     ensureDom();
   }
+  window.AxonPages ||= {};
+  window.AxonPages.agents={params:()=>({id:selectedId,tab:agSubTab,...window.AgentContext.params()}),dirty:()=>window.AgentContext.dirty(),canLeave:()=>window.AgentContext.canLeave(),capture:()=>({selectedId,agSubTab,railQuery}),restore:async (params,snap)=>{
+    restoringAgent=true;
+    try{
+      selectedId=params.id || snap?.selectedId || null;
+      agSubTab=['skill','mcp','plugin','provider','consumption','config','doc'].includes(params.tab)?params.tab:snap?.agSubTab || 'skill';
+      railQuery=snap?.railQuery || '';
+      await loadAgents();
+      if(window.AxonNavigation.current.section==='agents' && window.AxonNavigation.current.params===params && selectedId)await loadDetail(selectedId);
+    }finally{restoringAgent=false;}
+  }};
+  document.addEventListener('click',e=>{
+    if(!e.target.closest('#tab-agents'))return;
+    queueMicrotask(()=>{if(window.AxonNavigation?.ready && !window.AxonNavigation.applying && window.AxonNavigation.current.section==='agents')window.AxonNavigation.update('agents',{id:selectedId,tab:agSubTab,...window.AgentContext.params()});});
+  });
 })();

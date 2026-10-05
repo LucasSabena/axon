@@ -1,11 +1,16 @@
 {
   "name": "axon",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Panel de control web self-hosted para administrar un servidor completo: puertos, proyectos, Docker, dominios y más",
   "scripts": {
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
-    "build": "bun build src/index.ts --outdir dist --target bun"
+    "build": "bun build src/index.ts --outdir dist --target bun && mkdir -p dist/storage && cp src/storage/scan-host.py dist/scan-host.py && cp src/storage/trash-host.py dist/storage/trash-host.py && cp src/storage/file-task-host.py dist/storage/file-task-host.py && cp src/storage/compose-release-host.py dist/storage/compose-release-host.py && cp src/storage/installations-host.py dist/storage/installations-host.py && cp src/storage/versions-host.py dist/storage/versions-host.py && cp src/storage/edit-host.py dist/storage/edit-host.py",
+    "test": "bun run scripts/test.ts",
+    "check": "tsc --noEmit && bun run scripts/check-frontend.ts",
+    "qa:serve": "bun --no-env-file run scripts/qa-server.ts",
+    "qa:maintenance:read": "bun --no-env-file run scripts/maintenance-readonly.ts",
+    "test:installer": "python3 -m unittest discover -s deployment -p \"test_*.py\""
   },
   "dependencies": {
     "@jsquash/jpeg": "^1.6.0",
@@ -15,7 +20,8 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "@types/js-yaml": "^4.0.9"
+    "@types/js-yaml": "^4.0.9",
+    "typescript": "^7.0.2"
   },
   "module": "src/index.ts",
   "type": "module",

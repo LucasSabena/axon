@@ -8,3 +8,8 @@ dist
 .vscode
 .idea
 .playwright-cli/
+
+.claude/
+__pycache__/
+*.pyc
+.axon-install/

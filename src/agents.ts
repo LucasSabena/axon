@@ -1,5 +1,10 @@
 import { Hono } from 'hono';
-import { readFile, writeFile, mkdir } from 'fs/promises';
+import { readFile, writeFile, mkdir, stat } from 'fs/promises';
+import { hostToContainer } from './host';
+import { recordEvent } from './events';
+import { SnapshotCache } from './snapshot-cache';
+import { registerAgentArchives } from './agent-archives';
+import { registerAgentContext } from './agent-context';
 import * as path from 'path';
 import {
   hostExec,
@@ -10,7 +15,7 @@ import {
   readHostJson,
   HOST_USER,
 } from './host';
-import { getPrograms, programById } from './programs';
+import { getPrograms, peekPrograms, programById } from './programs';
 import { getProjects } from './projects';
 
 // --- AI agents manager ---
@@ -77,7 +82,7 @@ export interface AgentDetail extends AgentSummary {
 }
 
 // HOME expands lazily so tests/dev can override env.
-const H = () => `/home/${HOST_USER}`;
+const H = () => HOST_USER === 'root' ? '/root' : `/home/${HOST_USER}`;
 
 interface AgentDef {
   id: string;
@@ -187,7 +192,7 @@ const AGENTS: AgentDef[] = [
     notes: ['VS Code guarda MCPs en User/mcp.json bajo la clave "servers" (formato propio).'],
   },
   {
-    id: 'copilot', name: 'GitHub Copilot', icon: 'github', brandIcon: '/icons/githubcopilot.svg',
+    id: 'copilot', name: 'GitHub Copilot', icon: 'bot', brandIcon: '/icons/githubcopilot.svg',
     bin: 'copilot', configRoot: () => `${H()}/.copilot`,
     skillsDirs: [{ path: () => `${H()}/.copilot/skills`, scope: 'user', toggle: 'rename' }],
     mcp: { paths: () => [`${H()}/.copilot/mcp-config.json`], format: 'json-park' },
@@ -1625,12 +1630,19 @@ async function detectProgramsCached() {
   return getPrograms();
 }
 
+const detailCache = new SnapshotCache<AgentDetail | null>(10_000);
+const discoveryCache = new SnapshotCache<Awaited<ReturnType<typeof discoverAgents>>>(60_000, 1);
+let listGeneration = 0;
 let listCache: { at: number; data: AgentSummary[] } | null = null;
 let listInflight: Promise<AgentSummary[]> | null = null;
 const LIST_TTL = 30_000;
 const LIST_STALE = 5 * 60_000;
 export function invalidateAgentsCache(): void {
+  listGeneration++;
   listCache = null;
+  listInflight = null;
+  detailCache.clear();
+  discoveryCache.clear();
 }
 
 // A GUI app with no CLI bin still counts as installed when it ships a
@@ -1659,14 +1671,16 @@ export async function listAgents(): Promise<AgentSummary[]> {
 
 async function refreshAgentList(): Promise<AgentSummary[]> {
   if (!listInflight) {
-    listInflight = computeAgentList()
+    const generation = listGeneration;
+    const flight = computeAgentList()
       .then((data) => {
-        listCache = { at: Date.now(), data };
+        if (generation === listGeneration) listCache = { at: Date.now(), data };
         return data;
       })
       .finally(() => {
-        listInflight = null;
+        if (listInflight === flight) listInflight = null;
       });
+    listInflight = flight;
   }
   return listInflight;
 }
@@ -1674,7 +1688,7 @@ async function refreshAgentList(): Promise<AgentSummary[]> {
 async function computeAgentList(): Promise<AgentSummary[]> {
   // Run the per-agent fs scans concurrently with the programs detection —
   // neither depends on the other (versions/auth use the static registry).
-  const progP = detectProgramsCached();
+  const progP = Promise.resolve(peekPrograms());
   const scannedP = Promise.all(
     allDefs().map(async (def) => {
       const hasBin = def.bin ? (await hostExec(`command -v ${def.bin}`, { user: 'user', timeoutMs: 10_000 })).ok : false;
@@ -1690,11 +1704,7 @@ async function computeAgentList(): Promise<AgentSummary[]> {
           ])
         : [[], [], [], undefined, false];
       let version: string | undefined;
-      if (def.bin && hasBin) {
-        const cmd = progDef?.version?.cmd ?? `${def.bin} --version 2>/dev/null | head -1`;
-        const v = await hostExec(cmd, { user: progDef?.version?.user ?? 'user', timeoutMs: 15_000 });
-        if (v.ok) version = v.stdout.trim().split('\n')[0] || undefined;
-      }
+      version = peekPrograms().find(p => p.id === def.programId)?.version;
       return { def, installed, residual, version, auth, hasSettings, counts: { skills: skills.length, mcps: mcps.length, plugins: plugins.length } };
     })
   );
@@ -1718,7 +1728,10 @@ async function computeAgentList(): Promise<AgentSummary[]> {
   });
 }
 
-export async function agentDetail(id: string): Promise<AgentDetail | null> {
+export function agentDetail(id: string): Promise<AgentDetail | null> {
+  return detailCache.get(id, () => computeAgentDetail(id));
+}
+async function computeAgentDetail(id: string): Promise<AgentDetail | null> {
   const def = agentById(id);
   if (!def) return null;
   const hasBin = def.bin ? (await hostExec(`command -v ${def.bin}`, { user: 'user', timeoutMs: 10_000 })).ok : false;
@@ -1732,11 +1745,7 @@ export async function agentDetail(id: string): Promise<AgentDetail | null> {
     def.configFile ? hostExists(def.configFile()) : Promise.resolve(false),
   ]);
   let version: string | undefined;
-  if (hasBin) {
-    const cmd = prog?.version?.cmd ?? `${def.bin} --version 2>/dev/null | head -1`;
-    const v = await hostExec(cmd, { user: prog?.version?.user ?? 'user', timeoutMs: 15_000 });
-    if (v.ok) version = v.stdout.trim().split('\n')[0] || undefined;
-  }
+  version = peekPrograms().find(p => p.id === def.programId)?.version;
   const notes: string[] = [...(def.notes ?? [])];
   if (residual) notes.push('Solo quedó la carpeta de configuración — no hay binario ni .desktop: probablemente fue desinstalado. Podés gestionar los restos o ignorarlo.');
   if (def.shared) notes.push('Estas skills las ven todos los agentes — desactivar o borrar acá afecta a todos.');
@@ -2599,25 +2608,49 @@ function flattenSecrets(obj: Record<string, unknown>, prefix: string, depth: num
 // --- routes ---
 
 export function registerAgentRoutes(app: Hono): void {
+  registerAgentContext(app, H);
+  registerAgentArchives(app, {
+    home:H, agents:()=>allDefs().map(def=>({id:def.id,name:def.name,root:def.configRoot(),shared:def.shared})),
+    installed:async id=>{const def=agentById(id)!;return !!def.bin && (await hostExec(`command -v ${def.bin}`,{user:'user',timeoutMs:5000})).ok || await hasDesktopEntry(def);},
+    changed:invalidateAgentsCache,
+  });
+  const changes: Record<string, string> = { settings: 'Configuración editada', toggle: 'Integración actualizada', delete: 'Integración eliminada', 'add-skill': 'Skill agregada', 'add-mcp': 'MCP agregado', 'restore-backup': 'Respaldo restaurado' };
+  app.use('/api/agents/*', async (c, next) => {
+    await next();
+    if (c.req.method !== 'GET' && c.res.status < 300) invalidateAgentsCache();
+    const match = c.req.path.match(/^\/api\/agents\/([^/]+)\/([^/]+)$/);
+    if (c.req.method !== 'POST' || !match || !changes[match[2]] || c.res.status >= 300) return;
+    const def = agentById(match[1]);
+    if (def) recordEvent('agent', `${def.name}: ${changes[match[2]]}`, undefined,
+      { section: 'agents', params: { id: def.id, tab: ['settings','restore-backup'].includes(match[2]) ? 'config' : match[2]==='add-mcp' ? 'mcp' : 'skill' } });
+  });
+  app.get('/api/agents/activity', async (c) => {
+    const candidates = AGENTS.flatMap(def => agentManagedFiles(def).map(source => ({def, source})));
+    const backups = await Promise.all(candidates.map(async ({def, source}) => {
+      const s = await stat(hostToContainer(source + '.axonbak')).catch(() => null);
+      return s ? { agentId: def.id, agentName: def.name, source, mtime: s.mtimeMs } : null;
+    }));
+    return c.json({ ok: true, backups: backups.filter(Boolean).sort((a,b) => b!.mtime-a!.mtime).slice(0,8) });
+  });
   // Discovery + custom agents — separate root so it can't collide with /api/agents/:id
   app.get('/api/agents-discovered', async (c) => {
-    return c.json({ ok: true, candidates: await discoverAgents().catch(() => []) });
+    return c.json({ ok: true, candidates: await discoveryCache.get("all", discoverAgents).catch(() => []) });
   });
 
   app.post('/api/agents-discovered/add', async (c) => {
-    const { name, dir, bin } = await c.req.json<{ name?: string; dir?: string; bin?: string }>().catch(() => ({}));
+    const { name, dir, bin } = await c.req.json<{ name?: string; dir?: string; bin?: string }>().catch(() => ({} as { name?: string; dir?: string; bin?: string }));
     const r = await addCustomAgent((name || '').trim(), (dir || '').trim().replace(/\/+$/, ''), (bin || '').trim());
     return r.ok ? c.json(r) : c.json({ ok: false, error: r.error }, 400);
   });
 
   app.post('/api/agents-discovered/dismiss', async (c) => {
-    const { dir } = await c.req.json<{ dir?: string }>().catch(() => ({}));
+    const { dir } = await c.req.json<{ dir?: string }>().catch(() => ({} as { dir?: string }));
     const r = await dismissCandidate((dir || '').trim().replace(/\/+$/, ''));
     return r.ok ? c.json(r) : c.json({ ok: false, error: r.error }, 400);
   });
 
   app.post('/api/agents-discovered/remove', async (c) => {
-    const { id } = await c.req.json<{ id?: string }>().catch(() => ({}));
+    const { id } = await c.req.json<{ id?: string }>().catch(() => ({} as { id?: string }));
     const r = await removeCustomAgent(id || '');
     return r.ok ? c.json(r) : c.json({ ok: false, error: r.error }, 400);
   });
@@ -2628,8 +2661,9 @@ export function registerAgentRoutes(app: Hono): void {
   });
 
   app.post('/api/agent-docs/create', async (c) => {
-    const { dir } = await c.req.json<{ dir?: string }>().catch(() => ({}));
+    const { dir } = await c.req.json<{ dir?: string }>().catch(() => ({} as { dir?: string }));
     const r = await createAgentDoc(dir || '');
+    if(r.ok)recordEvent('agent','Documento de agente creado',r.path,{section:'agents',params:{id:'__docs'}});
     return r.ok ? c.json({ ok: true, path: r.path }) : c.json({ ok: false, error: r.error }, 400);
   });
 
@@ -2659,7 +2693,7 @@ export function registerAgentRoutes(app: Hono): void {
   app.post('/api/agents/:id/mcp-health', async (c) => {
     const def = agentById(c.req.param('id'));
     if (!def) return c.json({ ok: false, error: 'Agente desconocido' }, 404);
-    const { key } = await c.req.json<{ key?: string }>().catch(() => ({}));
+    const { key } = await c.req.json<{ key?: string }>().catch(() => ({} as { key?: string }));
     const r = await mcpHealth(def, key || '');
     return r.ok ? c.json(r) : c.json(r, 400);
   });
@@ -2689,10 +2723,10 @@ export function registerAgentRoutes(app: Hono): void {
   app.post('/api/agents/:id/providers/:key/copy', async (c) => {
     const def = agentById(c.req.param('id'));
     if (!def) return c.json({ ok: false, error: 'Agente desconocido' }, 404);
-    const { target } = await c.req.json<{ target?: string }>().catch(() => ({}));
+    const { target } = await c.req.json<{ target?: string }>().catch(() => ({} as { target?: string }));
     if (!target) return c.json({ ok: false, error: 'Falta el agente destino' }, 400);
     const r = await copyProvider(def.id, c.req.param('key'), target);
-    if (r.ok) { invalidateAgentsCache(); }
+    if (r.ok) { invalidateAgentsCache(); const destination=agentById(target);if(destination)recordEvent('agent',`${destination.name}: Provider copiado desde ${def.name}`,undefined,{section:'agents',params:{id:target,tab:'provider'}}); }
     return r.ok ? c.json({ ok: true, note: r.note }) : c.json({ ok: false, error: r.error }, 400);
   });
 
@@ -2705,7 +2739,7 @@ export function registerAgentRoutes(app: Hono): void {
   app.post('/api/agents/:id/restore-backup', async (c) => {
     const def = agentById(c.req.param('id'));
     if (!def) return c.json({ ok: false, error: 'Agente desconocido' }, 404);
-    const { path } = await c.req.json<{ path?: string }>().catch(() => ({}));
+    const { path } = await c.req.json<{ path?: string }>().catch(() => ({} as { path?: string }));
     const r = await restoreBackup(def, path || '');
     if (r.ok) { invalidateAgentsCache(); docsCache = null; }
     return r.ok ? c.json({ ok: true }) : c.json({ ok: false, error: r.error }, 400);
@@ -2728,7 +2762,8 @@ export function registerAgentRoutes(app: Hono): void {
   });
 
   app.get('/api/agents', async (c) => {
-    const agents = await listAgents();
+    const snapshot = await listAgents(), programs = new Map(peekPrograms().map(p=>[p.id,p]));
+    const agents = snapshot.map(a=>{ const p=programs.get(a.programId || '');return p ? {...a,version:p.version || a.version,latestVersion:p.latestVersion,auth:p.auth || a.auth} : a; });
     return c.json({ ok: true, agents });
   });
 
@@ -2765,7 +2800,7 @@ export function registerAgentRoutes(app: Hono): void {
   app.post('/api/agents/:id/add-skill', async (c) => {
     const def = agentById(c.req.param('id'));
     if (!def) return c.json({ ok: false, error: 'Agente desconocido' }, 404);
-    const { name, desc, body } = await c.req.json<{ name: string; desc?: string; body?: string }>().catch(() => ({ name: '' }));
+    const { name, desc, body } = await c.req.json<{ name: string; desc?: string; body?: string }>().catch(() => ({ name: '', ids: undefined as string[] | undefined, desc: undefined as string | undefined, body: undefined as string | undefined, url: undefined as string | undefined, command: undefined as string | undefined, args: undefined as string | undefined }));
     const r = await addSkill(def, name || '', desc || '', body || '');
     if (r.ok) invalidateAgentsCache();
     return r.ok ? c.json({ ok: true }) : c.json({ ok: false, error: r.error }, 400);
@@ -2774,7 +2809,7 @@ export function registerAgentRoutes(app: Hono): void {
   app.post('/api/agents/:id/add-mcp', async (c) => {
     const def = agentById(c.req.param('id'));
     if (!def) return c.json({ ok: false, error: 'Agente desconocido' }, 404);
-    const { name, url, command, args } = await c.req.json<{ name: string; url?: string; command?: string; args?: string }>().catch(() => ({ name: '' }));
+    const { name, url, command, args } = await c.req.json<{ name: string; url?: string; command?: string; args?: string }>().catch(() => ({ name: '', ids: undefined as string[] | undefined, desc: undefined as string | undefined, body: undefined as string | undefined, url: undefined as string | undefined, command: undefined as string | undefined, args: undefined as string | undefined }));
     const r = await addMcp(def, name || '', url || '', command || '', args || '');
     if (r.ok) invalidateAgentsCache();
     return r.ok ? c.json({ ok: true }) : c.json({ ok: false, error: r.error }, 400);

@@ -31,6 +31,7 @@
       const data = await api('/api/compose');
       S.projects = data.projects || [];
       render();
+      await releaseHistory();
       const nc = $('#nav-count-compose');
       if (nc) nc.textContent = S.projects.length || '';
       if (data.dockerError && !S.projects.length) {
@@ -71,7 +72,7 @@
       ? `<button class="btn-primary btn-inline cp-edit" title="Editar el archivo compose">${icon('pencil')} Editar</button>
          <button class="btn-secondary cp-preview" title="Renderizar config + estado">${icon('eye')} Preview</button>
          <button class="btn-secondary cp-pull" title="docker compose pull">${icon('download')} Pull</button>
-         <button class="btn-secondary cp-up" title="docker compose up -d --remove-orphans">${icon('play')} Up</button>
+         <button class="btn-secondary cp-up" title="docker compose up -d">${icon('play')} Up</button>
          <button class="btn-danger cp-down" title="docker compose down">${icon('square')} Down</button>`
       : '<span class="listener-note">Sin archivo de config detectado</span>';
     const badge = running
@@ -132,6 +133,9 @@
       const data = await api(`/api/compose/file?path=${encodeURIComponent(p)}`);
       S.editing = data.path;
       S.savedValue = data.content || '';
+      S.revision = data.revision;
+      S.draft = data.draft;
+      el('cp-ed-discard').disabled = !S.draft;
       S.readOnly = Boolean(data.truncated);
 
       el('cp-ed-path').textContent = data.path;
@@ -147,8 +151,9 @@
       } else {
         flag.classList.add('hidden');
       }
-      banner('cp-ed-banner', null, '');
+      banner('cp-ed-banner', data.draft ? 'warn' : null, data.draft ? 'Estás editando un borrador de Axon. El archivo desplegable del host sigue intacto.' : '');
       showView('editor');
+      await releaseHistory();
       ta.focus();
     } catch (err) {
       errToast(err);
@@ -181,15 +186,18 @@
     try {
       const res = await api('/api/compose/save', {
         method: 'POST',
-        body: { path: S.editing, content: el('cp-ed-text').value },
+        body: { path: S.editing, content: el('cp-ed-text').value, revision: S.revision },
       });
       S.savedValue = el('cp-ed-text').value;
+      S.revision = res.revision; S.draft = !!res.draft;
+      await releaseHistory();
+      el('cp-ed-discard').disabled = !S.draft;
       if (res.validation && res.validation.ok === false) {
-        banner('cp-ed-banner', 'warn', `Guardado, pero "docker compose config" falló:\n${res.validation.error || ''}`);
-        toast('Guardado con errores de validación', 'error', res.validation.error, 8000);
+        banner('cp-ed-banner', 'warn', `Borrador guardado; el archivo desplegable sigue intacto. Validación local:\n${res.validation.error || ''}`);
+        toast('Borrador guardado; requiere corrección', 'error', res.validation.error, 8000);
       } else {
-        banner('cp-ed-banner', 'ok', 'Guardado — "docker compose config" valida OK.');
-        toast(`Guardado: ${S.editing.split('/').pop()}`, 'ok', '', 3000);
+        banner('cp-ed-banner', 'ok', 'Borrador guardado. YAML válido en la revisión local; falta validar Docker Compose antes de aplicar.');
+        toast(`Borrador guardado: ${S.editing.split('/').pop()}`, 'ok', '', 3000);
       }
     } catch (err) {
       banner('cp-ed-banner', 'err', err.message || 'Error al guardar');
@@ -203,13 +211,15 @@
   async function validateEditor() {
     if (!S.editing) return;
     if (isDirty()) {
-      banner('cp-ed-banner', 'warn', 'Ojo: hay cambios sin guardar — la validación corre sobre el archivo en disco.');
+      banner('cp-ed-banner', 'warn', 'Hay cambios sin guardar. Guardá el borrador para comparar la versión revisada.');
     }
     const btn = el('cp-ed-validate');
     btn.disabled = true;
     try {
       const res = await api('/api/compose/preview', { method: 'POST', body: { path: S.editing } });
-      if (res.error) {
+      if (res.draft) {
+        banner('cp-ed-banner', 'warn', res.error || 'Borrador guardado. Falta validar Docker Compose antes de aplicar.');
+      } else if (res.error) {
         banner('cp-ed-banner', 'err', `"docker compose config" falló:\n${res.error}`);
       } else {
         const n = (res.services || []).length;
@@ -230,13 +240,15 @@
     el('cp-pv-path').textContent = p;
     el('cp-pv-rendered').textContent = 'Renderizando…';
     el('cp-pv-tbody').innerHTML = '';
+    el('cp-pv-comparison').classList.add('hidden');
+    el('cp-pv-rendered').classList.remove('hidden');
     banner('cp-pv-banner', null, '');
     showView('preview');
     try {
       const res = await api('/api/compose/preview', { method: 'POST', body: { path: p } });
       el('cp-pv-rendered').textContent =
         (res.rendered || '') + (res.renderedTruncated ? '\n…(salida truncada a 200KB)…\n' : '') || '(vacío)';
-      if (res.error) banner('cp-pv-banner', 'err', `"docker compose config" falló:\n${res.error}`);
+      if (res.error) banner('cp-pv-banner', res.draft ? 'warn' : 'err', `${res.draft ? 'Borrador sin aplicar' : 'Docker Compose no validado'}:\n${res.error}`);
       const rows = (res.services || [])
         .map(
           (s) => `<tr>
@@ -254,6 +266,53 @@
       banner('cp-pv-banner', 'err', err.message || 'No se pudo generar el preview');
       errToast(err);
     }
+  }
+
+  async function compareDraft() {
+    if (!S.editing) return;
+    if (isDirty()) {
+      banner('cp-ed-banner', 'warn', 'Guardá el borrador antes de comparar. Los cambios del editor todavía no pertenecen a la revisión guardada.');
+      return;
+    }
+    try {
+      const res = await api('/api/compose/draft-preview', {method:'POST', body:{path:S.editing}});
+      const comparison = res;
+      el('cp-pv-path').textContent=S.editing;
+      el('cp-pv-tbody').innerHTML='';
+      el('cp-pv-rendered').classList.add('hidden');
+      el('cp-pv-before').textContent=comparison.before;
+      el('cp-pv-after').textContent=comparison.after;
+      el('cp-pv-comparison').classList.remove('hidden');
+      banner('cp-pv-banner','warn',(comparison.changedOnHost?'El archivo del host cambió desde que creaste el borrador. Revisá el conflicto antes de continuar.\n':'El archivo desplegable sigue intacto.\n')+comparison.blockers.join(' '));
+      showView('preview');
+      await releaseHistory();
+      el('cp-pv-before').focus();
+    } catch(err) { banner('cp-ed-banner','err',err.message||'No se pudo comparar el borrador'); }
+  }
+
+  async function discardDraft() {
+    if(!S.editing||!S.draft)return;
+    if(!await confirmDialog('Descartar borrador','Se pierde el borrador y cualquier cambio sin guardar del editor. El archivo del host no se modifica.','Descartar borrador'))return;
+    try {
+      await api('/api/compose/draft-discard',{method:'POST',body:{path:S.editing,revision:S.revision}});
+      await openEditor(S.editing);
+      banner('cp-ed-banner','ok','Borrador descartado. Se muestra el archivo actual del host.');
+    } catch(err) { banner('cp-ed-banner','err',err.message||'No se pudo descartar'); }
+  }
+
+  let releaseTimer;
+  async function releaseHistory(){
+    clearTimeout(releaseTimer);
+    let panel=el('cp-release-history');
+    if(!panel){panel=document.createElement('section');panel.id='cp-release-history';panel.className='maint-panel';sec.append(panel);}
+    try{
+      const result=await api('/api/compose/releases',{fresh:true});
+      panel.innerHTML=`<h3>Aplicación y recuperación de Compose</h3><p>Guardá un borrador y prepará una revisión. Se validan Docker, imágenes y contenedores; sólo se reinician los servicios que ya estaban encendidos. No se eliminan huérfanos ni volúmenes. Recuperar configuración no revierte datos o migraciones de la aplicación.</p><button id="cp-release-prepare" class="btn-primary" ${S.editing&&S.draft?'':'disabled'}>Preparar aplicación del borrador</button><div role="status" id="cp-release-status"></div>${result.operations.map(op=>`<article><h4>${op.retire?'Retirada de '+esc(op.retire)+' · ':''}${esc({planned:'Revisión preparada',running:'Aplicando',verified:'Aplicación verificada',interrupted:'Interrumpido: revisar',restored:'Configuración recuperada'}[op.state]||op.state)} · ${esc(op.project)}</h4><p class="maint-path">${esc(op.path)}</p><p>${esc(op.message)}</p><ul>${op.changed.map(s=>`<li>${esc(s.name)}: ${s.fields.map(esc).join(', ')} · imagen ${esc(s.image)}</li>`).join('')}</ul><p>Se reinician: ${op.active.map(esc).join(', ')||'ninguno'}. Permanecen apagados: ${op.inactive.map(esc).join(', ')||'ninguno'}.</p>${op.state==='planned'?`<button class="btn-primary" data-release="${esc(op.id)}" data-digest="${esc(op.digest)}" data-action="apply" data-retire="${esc(op.retire||'')}">${op.retire?'Confirmar esta retirada':'Confirmar esta aplicación'}</button>`:''}${op.canRollback&&op.state!=='running'?`<button class="btn-secondary" data-release="${esc(op.id)}" data-digest="${esc(op.digest)}" data-action="rollback">Recuperar configuración e imágenes anteriores</button>`:''}<button class="btn-secondary" data-release-refresh="${esc(op.id)}">Comprobar estado</button></article>`).join('')}`;
+      el('cp-release-prepare').onclick=async()=>{if(isDirty()){el('cp-release-status').textContent='Guardá los cambios antes de preparar la revisión';return;}try{await api('/api/compose/releases',{method:'POST',body:{path:S.editing}});await releaseHistory();}catch(e){el('cp-release-status').textContent=e.message;}};
+      panel.querySelectorAll('[data-release]').forEach(b=>b.onclick=async()=>{const rollback=b.dataset.action==='rollback';if(!await confirmDialog(rollback?'Recuperar configuración':b.dataset.retire?'Retirar '+b.dataset.retire:'Aplicar esta selección',rollback?'Se restaura la configuración y las imágenes previas de los servicios indicados. Los datos no se revierten.':b.dataset.retire?'Se retira sólo el servicio y su contenedor. Los datos, volúmenes e imágenes se conservan; el resto del stack no cambia.':'Se publica la configuración revisada y se reinician únicamente los servicios encendidos indicados.','Confirmar'))return;b.disabled=true;try{await api(`/api/compose/releases/${b.dataset.release}/${b.dataset.action}`,{method:'POST',body:{digest:b.dataset.digest}});await releaseHistory();}catch(e){el('cp-release-status').textContent=e.message;}});
+      panel.querySelectorAll('[data-release-refresh]').forEach(b=>b.onclick=async()=>{try{await api(`/api/compose/releases/${b.dataset.releaseRefresh}`,{fresh:true});await releaseHistory();}catch(e){el('cp-release-status').textContent=e.message;}});
+      if(result.operations.some(op=>op.state==='running'))releaseTimer=setTimeout(()=>{if(activeTabName==='compose')releaseHistory();},1500);
+    }catch(e){panel.textContent=e.message;}
   }
 
   // ---------- Jobs (up / down / pull) ----------
@@ -308,7 +367,7 @@
   async function doUp(path) {
     const ok = await confirmDialog(
       'Levantar stack',
-      `Corre "docker compose up -d --remove-orphans" con ${path.split('/').pop()}.`,
+      `Corre "docker compose up -d" con ${path.split('/').pop()}.`,
       'Up -d'
     );
     if (!ok) return;
@@ -381,14 +440,16 @@
           <span class="badge badge-other hidden" id="cp-ed-flag"></span>
           <div class="section-actions">
             <button id="cp-ed-validate" class="btn-secondary" title="docker compose config (sin guardar)">${icon('check-circle-2')} Validar</button>
-            <button id="cp-ed-save" class="btn-primary">${icon('save')} Guardar</button>
+            <button id="cp-ed-save" class="btn-primary">${icon('save')} Guardar borrador</button>
+            <button id="cp-ed-compare" class="btn-secondary">${icon('columns-2')} Comparar borrador</button>
+            <button id="cp-ed-discard" class="btn-secondary" disabled>Descartar borrador</button>
             <button id="cp-ed-up" class="btn-secondary" title="docker compose up -d después de guardar">${icon('play')} Up -d</button>
             <button id="cp-ed-back" class="btn-secondary">${icon('arrow-left')} Volver</button>
           </div>
         </div>
         <div id="cp-ed-banner" class="cp-banner hidden"></div>
         <textarea id="cp-ed-text" class="mono" spellcheck="false" wrap="off"></textarea>
-        <p class="listener-note">Ctrl/Cmd+S guarda · "Validar" corre <code>docker compose config</code> sobre el archivo en disco (los cambios sin guardar no se evalúan).</p>
+        <p class="listener-note">Ctrl/Cmd+S guarda el borrador. Comparar muestra el archivo del host y la revisión guardada. La validación local del borrador no equivale a validar Docker ni aplicar.</p>
       </div>
       <div id="cp-preview" class="cp-preview hidden">
         <div class="cp-editor-bar">
@@ -409,6 +470,10 @@
             </table>
           </div>
           <pre id="cp-pv-rendered" class="cp-rendered mono"></pre>
+          <div id="cp-pv-comparison" class="cp-comparison hidden">
+            <section><h3>Archivo actual del host</h3><pre id="cp-pv-before" class="cp-rendered mono" tabindex="0" aria-label="Archivo actual del host"></pre></section>
+            <section><h3>Borrador guardado</h3><pre id="cp-pv-after" class="cp-rendered mono" tabindex="0" aria-label="Borrador guardado"></pre></section>
+          </div>
         </div>
       </div>`;
     main.appendChild(sec);
@@ -486,18 +551,20 @@
 
     el('cp-ed-save').addEventListener('click', saveEditor);
     el('cp-ed-validate').addEventListener('click', validateEditor);
+    el('cp-ed-compare').addEventListener('click', compareDraft);
+    el('cp-ed-discard').addEventListener('click', discardDraft);
     el('cp-ed-back').addEventListener('click', closeEditor);
     el('cp-ed-up').addEventListener('click', async () => {
       if (!S.editing) return;
       if (isDirty()) {
         const ok = await confirmDialog(
           'Guardar antes de levantar',
-          'Hay cambios sin guardar. ¿Guardar y correr "up -d"?',
-          'Guardar y Up'
+          'Hay cambios sin guardar. ¿Guardar como borrador? Aplicar requiere comparación y validación adicional.',
+          'Guardar borrador'
         );
         if (!ok) return;
         await saveEditor();
-        if (isDirty()) return; // save failed
+        if (isDirty() || S.draft) return; // drafts never imply deployment
       }
       doUp(S.editing);
     });

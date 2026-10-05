@@ -201,6 +201,11 @@
 }
 
 /* ---------- Fallback job modal ---------- */
+#tab-compose .cp-comparison { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; flex:1; min-height:0; overflow:auto; }
+#tab-compose .cp-comparison section { display:flex; flex-direction:column; min-width:0; min-height:160px; }
+#tab-compose .cp-comparison h3 { font-size:0.84rem; margin:0 0 8px; }
+#tab-compose .cp-comparison pre:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+@media(max-width:640px) { #tab-compose .cp-comparison { grid-template-columns:minmax(0,1fr); } }
 .cp-modal .cp-job-log {
   font-family: var(--font-mono);
   font-size: 0.74rem; line-height: 1.45;

@@ -153,6 +153,9 @@ export interface ProgramDef {
 }
 
 export interface ProgramView {
+  metadataPending?: boolean;
+  installable?: boolean;
+  packageName?: string;
   id: string;
   name: string;
   icon: string;
@@ -219,6 +222,7 @@ export interface AppConfig {
     scanDirs: string[];
     hostUser: string;
     notifyUrl?: string;
+    notifyProvider?: 'auto' | 'ntfy' | 'gotify' | 'discord';
     knownServices: Record<string, KnownService>;
   };
 }
