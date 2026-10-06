@@ -1682,7 +1682,12 @@
   // ---------- Trash & undo journal ----------
   // Deletes go to a real trash dir (recoverable). Every mutating op records an
   // inverse closure so Ctrl+Z walks backwards through rename/move/trash/copy.
-  const inTrash = (dir) => (S.trashDirs || [S.trashDir]).filter(Boolean).some(root => dir === root || dir.startsWith(root + '/')) || S.volumes.some(v => v.path && /^\/(?:\.Trash-\d+|\.Trash\/\d+)\/files(?:\/|$)/.test(dir.slice(v.path.replace(/\/$/, '').length)) && (dir===v.path || dir.startsWith(v.path.replace(/\/$/, '')+'/')));
+  const inTrash = (dir) => (S.trashDirs || [S.trashDir]).filter(Boolean).some(root => {
+    // A '…/files' root also covers its parent (Trash/, .Trash-1000/): files and
+    // info are structure, never user content.
+    if (root.endsWith('/files')) root = root.slice(0, -6);
+    return dir === root || dir.startsWith(root + '/');
+  }) || S.volumes.some(v => v.path && v.path !== '/' && /^\/\.Trash(?:-\d+|\/\d+)(?:\/|$)/.test(dir.slice(v.path.replace(/\/$/, '').length)) && dir.startsWith(v.path.replace(/\/$/, '') + '/'));
 
   // Trashed items live under random ids; the manifest maps them back to the
   // original name/location for a readable listing (ops still use the id).
@@ -1698,7 +1703,7 @@
   const trashify = (entries, dir) => {
     if (!inTrash(dir)) return entries;
     return (entries || [])
-      .filter((e) => e.name !== '.manifest.json')
+      .filter((e) => e.name !== '.manifest.json' && !e.name.startsWith('.axon-') && !e.name.startsWith('.manifest-') && !e.name.startsWith('.metadata-') && !e.name.startsWith('.state-'))
       .map((e) => {
         const meta = S.trashNames[e.name];
         return meta ? { ...e, trashName: meta.name, trashOrig: meta.orig } : e;
@@ -1753,20 +1758,30 @@
     navigate(S.cwd);
   }
 
-  // Delete = move to trash (reversible). Inside the trash dir there is no
-  // direct delete: permanent removal runs as a reviewed plan in Almacenamiento.
+  // Delete = move to trash (reversible). Inside the trash zone, delete is a
+  // real permanent purge of the selected trash items — one strong confirm,
+  // then the durable worker removes each entry with identity verification.
   async function deleteTargets(names, dir) {
     if (!names.length) return;
     const srcDir = dir || S.cwd;
     const paths = names.map((n) => join(srcDir, n));
     if (inTrash(srcDir)) {
-      const preview = names.slice(0, 6).join(', ') + (names.length > 6 ? ` y ${names.length - 6} más` : '');
+      await loadTrashNames(srcDir).catch(() => {});
+      const known = names.filter((n) => S.trashNames[n]?.id);
+      const structural = names.filter((n) => !S.trashNames[n]?.id);
+      if (structural.length) toast('Estructura de papelera', 'warn', `${structural.length} elemento${structural.length === 1 ? ' es' : 's son'} parte de la estructura de la papelera (files/, info/, metadatos) y no se borra por separado.`);
+      if (!known.length) return;
+      const preview = known.slice(0, 6).map((n) => S.trashNames[n].name || n).join(', ') + (known.length > 6 ? ` y ${known.length - 6} más` : '');
       const ok = await confirmDialog(
-        `Borrado definitivo — ${names.length} elemento${names.length === 1 ? '' : 's'}`,
-        `Es irreversible y requiere un plan revisado: ${preview}. Te llevo a Almacenamiento → Limpieza para hacerlo.`
+        `Borrado definitivo — ${known.length} elemento${known.length === 1 ? '' : 's'}`,
+        `Es irreversible y no tiene Deshacer: ${preview}. Se verifica la identidad de cada elemento antes de borrarlo y queda un recibo en el historial.`,
+        'Borrar definitivamente'
       );
       if (!ok) return;
-      await window.AxonNavigation.go('/almacenamiento?view=cleanup');
+      try {
+        const r = await api('/api/files/trash/purge', { method: 'POST', body: { ids: known.map((n) => S.trashNames[n].id) } });
+        if (r.operation) trackPurge(r.operation.id, known.length);
+      } catch (err) { errToast(err); }
       return;
     }
     try {
@@ -1814,21 +1829,69 @@
   }
 
   async function emptyTrash() {
-    const ok = await confirmDialog('Revisar papeleras', 'El vaciado permanente requiere un plan de selección verificado. Podés analizar las papeleras en Almacenamiento.');
+    const root = (S.trashDirs || []).find((r) => S.cwd === r || S.cwd.startsWith(r + '/') || join(S.cwd, 'files') === r);
+    if (!root) return toast('No se reconoce esta papelera', 'error', 'Navegá dentro de una papelera conocida para vaciarla.');
+    const count = Object.values(S.trashNames).filter((i) => i.path?.startsWith(root + '/')).length;
+    const ok = await confirmDialog('Vaciar papelera',
+      `Se eliminan definitivamente todos los elementos de esta papelera${count ? ` (${count} actualmente)` : ''}, uno por uno, con identidad verificada y recibo durable. Es irreversible; lo que llegue durante el vaciado se conserva.`,
+      'Vaciar papelera');
     if (!ok) return;
     try {
-      await window.AxonNavigation.go('/almacenamiento?view=cleanup');
-      return;
-    } catch (err) {
-      errToast(err);
-    }
-    navigate(S.cwd);
+      const r = await api('/api/files/trash/empty', { method: 'POST', body: { root } });
+      if (r.operation) trackPurge(r.operation.id, r.operation.total || 0);
+      else toast(r.message || 'La papelera ya está vacía', 'ok', '', 3000);
+    } catch (err) { errToast(err); }
+  }
+
+  // Poll a trash purge operation and report the verified outcome.
+  function trackPurge(opId, total) {
+    const rec = { label: `Borrado definitivo (${total})`, pct: 0, error: null, done: null, cancel: null };
+    rec.done = (async () => {
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 800));
+        const cur = S.jobs.get(opId);
+        if (!cur) return;
+        try {
+          const { operation, receipts } = await api(`/api/files/trash/operations/${opId}`, { fresh: true });
+          const finished = (receipts || []).filter((x) => !['running'].includes(x.state)).length;
+          cur.pct = total ? Math.min(99, Math.floor((finished * 100) / total)) : 0;
+          renderJobs();
+          if (!['running', 'planned'].includes(operation.state)) {
+            S.jobs.delete(opId);
+            renderJobs();
+            const freed = (receipts || []).reduce((a, x) => a + BigInt(x.retiredBytes || '0'), 0n);
+            if (operation.state === 'verified')
+              toast(`Borrado definitivo verificado: ${total} elemento${total === 1 ? '' : 's'}`, 'ok',
+                freed ? `Bloques retirados: ${fmtSize(Number(freed))}. El espacio libre real puede variar por actividad concurrente.` : '', 6000);
+            else if (operation.state === 'skipped')
+              toast('Borrado parcial', 'warn', operation.receipt?.message || 'Algunos elementos se conservaron para revisar.', 9000);
+            else
+              toast('El borrado necesita revisión', 'error',
+                `${operation.receipt?.message || ''}\nAbrí Almacenamiento → Historial → "Comprobar resultado real".`, 9000);
+            if (inTrash(S.cwd)) await loadTrashNames(S.cwd).catch(() => {});
+            navigate(S.cwd);
+            return;
+          }
+        } catch (err) {
+          S.jobs.delete(opId);
+          renderJobs();
+          errToast(err);
+          return;
+        }
+      }
+    })();
+    S.jobs.set(opId, rec);
+    renderJobs();
   }
 
   // ---------- Shared move/copy used by paste and drag & drop ----------
   // Returns {moved:[{from,to}], copied:[{from,to}], skipped, failed:[...]} so
   // callers can journal precisely.
   async function transferItems(names, srcDir, destDir, mode, fromVolume=volumeToken(srcDir)) {
+    if (inTrash(srcDir) || inTrash(destDir)) {
+      toast('La papelera no admite transferencias', 'warn', 'Usá Restaurar para recuperar elementos o Borrar definitivamente para eliminarlos.');
+      return { moved: [], copied: [], skipped: 0, failed: [] };
+    }
     const toVolume=volumeToken(destDir);
     const taken = new Set(await dirNames(destDir));
     const out = { moved: [], copied: [], skipped: 0, failed: [] };
@@ -1939,10 +2002,10 @@
         <span class="fm-job-label" title="${esc(j.label)}">${esc(j.label)}</span>
         <div class="fm-job-track"><div class="fm-job-bar" style="width:${j.pct}%"></div></div>
         <span class="fm-job-pct">${j.pct}%</span>
-        <button class="fm-job-x" title="Cancelar">${icon('x')}</button>
+        ${j.cancel ? `<button class="fm-job-x" title="Cancelar">${icon('x')}</button>` : ''}
       </div>`).join('');
     wrap.querySelectorAll('.fm-job').forEach((row) => {
-      row.querySelector('.fm-job-x').addEventListener('click', () => S.jobs.get(row.dataset.job)?.cancel());
+      row.querySelector('.fm-job-x')?.addEventListener('click', () => S.jobs.get(row.dataset.job)?.cancel?.());
     });
     refreshIcons();
   }
@@ -2158,12 +2221,14 @@
     const items = [];
     const trashCtx = inTrash(basePath);
     if (trashCtx) {
-      // In the trash the only sensible actions are restore and hard delete.
-      const ids = S.sel.has(name) ? [...S.sel] : [name];
-      items.push(
+      // Trash items get restore + real permanent delete. Structure dirs
+      // (files/, info/, .trashinfo) only get informational actions.
+      const ids = (S.sel.has(name) ? [...S.sel] : [name]).filter((n) => S.trashNames[n]?.id);
+      if (ids.length) items.push(
         { icon: 'undo-2', label: `Restaurar${ids.length > 1 ? ` (${ids.length})` : ''}`, run: () => restoreTrashed(ids) },
         { icon: 'trash-2', label: 'Borrar definitivamente', danger: true, run: () => deleteTargets(ids, basePath) },
-        { sep: true },
+        { sep: true });
+      items.push(
         { icon: 'clipboard', label: 'Copiar ruta', run: () => copyPath(p) },
         {
           icon: 'info', label: 'Propiedades',
@@ -2995,6 +3060,7 @@
   async function uploadFiles(files, destDir) {
     if (uploadAbort) return toast('Ya hay una subida en curso', 'warn', '', 2500);
     destDir = destDir || S.cwd;
+    if (inTrash(destDir)) return toast('La papelera no admite subidas', 'warn', 'Subí los archivos a una carpeta normal.');
     const list = Array.from(files || []).filter(Boolean);
     if (!list.length) return;
     // 1. Plan every file: relative path → target dir + final name.

@@ -36,7 +36,7 @@ export interface PendingOperation {
 }
 export class PendingOperationError extends MaintenanceError {
   constructor(readonly pending?:PendingOperation){
-    const action=pending?.action==='move'?'movimiento':pending?.action==='copy'?'copia':'trabajo';
+    const action=pending?.action==='move'?'movimiento':pending?.action==='copy'?'copia':pending?.action==='purge'?'borrado definitivo':'trabajo';
     const name=pending?.from?.split('/').pop();
     super(pending?`Hay un ${action} ${pending.state==='running'?'en curso':'pendiente de comprobar'}${name?`: ${name}`:''}. Comprobá su resultado antes de volver a intentar esta acción.`:'El recurso está ocupado por otro trabajo. Comprobá las operaciones pendientes antes de volver a intentarlo.');
   }

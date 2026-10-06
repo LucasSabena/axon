@@ -1451,9 +1451,19 @@ app.post('/api/systemd/preview-service', async (c) => {
 const maintenanceRepo = new MaintenanceRepository(path.join(path.dirname(process.env.CONFIG_PATH || '/app/data/config.json'), 'maintenance'));
 const fileOperations = new FileOperations(maintenanceRepo, maintenanceQaRoot ? async()=>maintenanceQaRoot : fileHostHome);
 if(!maintenanceQaRoot)fileOperations.onVolumes(async()=> (await hostVolumes.snapshot()).volumes.filter(v=>v.path&&v.readable).map(v=>({path:v.path!,mountId:v.mountId})));
-fileOperations.onChanged(async(action,from,to)=>{await libraryFileOperation(action,from,to);recordEvent('file',action==='send'?'Elemento enviado a papelera':'Elemento restaurado','Operación verificada; no implica espacio liberado');});
+fileOperations.onChanged(async(action,from,to)=>{
+  if(action==='purge'){recordEvent('file','Borrado definitivo verificado','Elemento retirado de la papelera; irreversible');return;}
+  await libraryFileOperation(action,from,to);recordEvent('file',action==='send'?'Elemento enviado a papelera':'Elemento restaurado','Operación verificada; no implica espacio liberado');});
 const fileTransfers=new FileTransfers(maintenanceRepo,maintenanceQaRoot?async()=>maintenanceQaRoot:fileHostHome);
-fileTransfers.onValidate(async(mode,from,to)=>{if(maintenanceQaRoot&&(![from,to].every(p=>p.startsWith(maintenanceQaRoot+'/'))))throw new MaintenanceError('QA: transferencia fuera de la fixture',403);});
+fileTransfers.onValidate(async(mode,from,to)=>{
+  if(maintenanceQaRoot&&(![from,to].every(p=>p.startsWith(maintenanceQaRoot+'/'))))throw new MaintenanceError('QA: transferencia fuera de la fixture',403);
+  // Transfers never touch trash zones: trashed items leave via Restaurar and
+  // are removed via Borrar definitivamente — both keep metadata and receipts
+  // consistent. Moving in/out by transfer would orphan .trashinfo entries.
+  const dirs=(await fileOperations.list()).dirs||[];
+  const inZone=(p:string)=>dirs.some(d=>{const base=d.endsWith('/files')?path.posix.dirname(d):d;return p===base||p.startsWith(base+'/');});
+  if(inZone(from)||inZone(to))throw new MaintenanceError('Los elementos de papelera se gestionan con Restaurar o Borrar definitivamente; no entran ni salen por transferencias.');
+});
 fileTransfers.onReview(async(mode,from,to)=>{
   const review=await libraryTransferReview(mode,from,to);if(!review)return;
   const references=[
@@ -1485,7 +1495,9 @@ registerAgentAccounts(app, maintenanceQaRoot ? async () => maintenanceQaRoot : f
 registerAgentUsage(app, maintenanceQaRoot ? async () => maintenanceQaRoot : fileHostHome);
 registerAgentConsumption(app, maintenanceQaRoot ? async () => maintenanceQaRoot : fileHostHome);
 registerStoreRoutes(app);
-const storageService = new StorageService(maintenanceRepo, () => maintenanceQaRoot ? Promise.resolve([{id:'qa-cache',path:path.join(maintenanceQaRoot,'scan-fixture'),title:'Caché de prueba aislada',adapterId:'packages'}]) : scanRoots(config.projects), scanRoot,undefined,maintenanceQaRoot?new HostCleaner(async()=>maintenanceQaRoot,async()=>({complete:true,references:[],tools:[],unknownProcesses:0,examined:0,elapsedMs:0}),undefined,maintenanceQaRoot):new HostCleaner(fileHostHome));
+const hostCleaner = maintenanceQaRoot?new HostCleaner(async()=>maintenanceQaRoot,async()=>({complete:true,references:[],tools:[],unknownProcesses:0,examined:0,elapsedMs:0}),undefined,maintenanceQaRoot):new HostCleaner(fileHostHome);
+const storageService = new StorageService(maintenanceRepo, () => maintenanceQaRoot ? Promise.resolve([{id:'qa-cache',path:path.join(maintenanceQaRoot,'scan-fixture'),title:'Caché de prueba aislada',adapterId:'packages'}]) : scanRoots(config.projects), scanRoot,undefined,hostCleaner);
+fileOperations.useCleaner(hostCleaner);
 registerStorageRoutes(app, storageService, fileOperations);
 registerHomeLinkRoutes(app, new HomeLinks(maintenanceRepo), () => knownHomeLinks(config.domains,allHeartbeats()));
 const installations = maintenanceQaRoot ? async () => ['homepage','filebrowser','portainer'].map(name => ({id:'qa-'+name,name,backend:'docker',scope:'fixture',version:'fixture',executablePath:null,coverage:'Fixture de QA; no es una instalación real',references:[],container:{id:'qa-'+name,project:'qa-isolated',service:name,state:'fixture',mounts:[{source:maintenanceQaRoot,destination:'/data',type:'bind'}],configFiles:[],image:name+':fixture'},blockers:['Fixture: ninguna retirada autorizada']})) : async () => [...await physicalInstallations(await getPrograms()), ...await dockerInstallations()];

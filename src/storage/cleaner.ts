@@ -27,12 +27,14 @@ export class HostCleaner {
   if(!root.adapterId.startsWith('trash-')&&PROTECTED.test(p))throw new Error('Ruta protegida');
  }
  async lockResource(){return `files:trash:${hash(await this.home())}`;}
- async prepare(c:Candidate,root:ScanRoot):Promise<{taskId:string;root:ScanRoot}|{blocker:string}>{
+ async prepare(c:Candidate,root:ScanRoot,opts?:{metadata?:boolean;quiet?:boolean}):Promise<{taskId:string;root:ScanRoot}|{blocker:string}>{
   try{
-   await this.eligibility(c,root);await this.quiet(c,root);
+   await this.eligibility(c,root);if(opts?.quiet!==false)await this.quiet(c,root);
    const taskId=crypto.randomUUID(),payload:Record<string,unknown>={action:'prepare',mode:'purge',id:taskId,home:await this.home(),from:c.identity.canonicalPath,to:c.identity.canonicalPath+'.axon-clean-'+taskId,adapter:this.fixtureRoot?'fixture':root.adapterId,allowedRoot:root.path};
-   if(root.adapterId==='trash-xdg')payload.metadataPath=path.join(path.dirname(root.path),'info',path.basename(c.identity.canonicalPath)+'.trashinfo');
-   if(root.adapterId==='trash-legacy')payload.metadataPath=path.join(root.path,'.manifest.json');
+   if(opts?.metadata!==false){
+    if(root.adapterId==='trash-xdg')payload.metadataPath=path.join(path.dirname(root.path),'info',path.basename(c.identity.canonicalPath)+'.trashinfo');
+    if(root.adapterId==='trash-legacy')payload.metadataPath=path.join(root.path,'.manifest.json');
+   }
    const r=await this.run(payload);if(!r.ok)throw new Error('No se pudo congelar el árbol: propietario, permisos, tamaño o metadatos incompatibles');
    return {taskId,root};
   }catch(e){return {blocker:e instanceof Error?e.message:'Precondiciones no verificadas'};}

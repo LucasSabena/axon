@@ -54,11 +54,59 @@ test('shared trash HTTP contract returns stable XDG IDs, hides identities and re
   const sent=await (await post('/api/files/trash',{paths:[p]})).json();expect(sent.items[0].trashed).toMatch(/^xdg:/);expect(sent.items[0].operationId).not.toBe(sent.items[0].trashed);
   const listed=await (await app.request('http://localhost/api/files/trash/info',{headers})).json();expect(listed.items[0].identity).toBeUndefined();expect(listed.dirs).toHaveLength(2);
   const restored=await (await post('/api/files/trash/restore',{ids:[sent.items[0].trashed]})).json();expect(restored.restored[0].to).toBe(p);expect(await readFile(p,'utf8')).toBe('fixture');
-  expect((await post('/api/files/trash/empty',{confirm:true})).status).toBe(409);
+  expect((await post('/api/files/trash/empty',{confirm:true})).status).toBe(400);
+  expect((await post('/api/files/trash/empty',{root:'/etc'})).status).toBe(400);
+  const emptied=await (await post('/api/files/trash/empty',{root:f.home+'/.local/share/Trash/files'})).json();expect(emptied.operation).toBeNull();expect(emptied.message).toContain('vacía');
  }finally{await f.clean();}
 });
 test('XDG files without an info directory stay visible as metadata-invalid items',async()=>{
  const f=await fixture();try{await mkdir(f.home+'/.local/share/Trash/files',{recursive:true,mode:0o700});await writeFile(f.home+'/.local/share/Trash/files/orphan','fixture');const r=await f.operations.list();expect(r.items).toHaveLength(1);expect(r.items[0].canRestore).toBe(false);expect(r.items[0].error).toContain('Metadatos');}finally{await f.clean();}
+});
+async function purgeFixture(f:Awaited<ReturnType<typeof fixture>>){
+ const {HostCleaner}=await import('./storage/cleaner');
+ const taskScript=await readFile(new URL('./storage/file-task-host.py',import.meta.url),'utf8');
+ const cleaner=new HostCleaner(async()=>f.home,async()=>({complete:true,references:[],tools:[],unknownProcesses:0,examined:0,elapsedMs:0}),async payload=>{
+  if(payload.home!==f.home)throw new Error('Fixture confinement');return JSON.parse(await boundedCommand(['python3','-c',taskScript],JSON.stringify(payload)));
+ });
+ f.operations.useCleaner(cleaner);return cleaner;
+}
+async function waitPurge(f:Awaited<ReturnType<typeof fixture>>,opId:string){
+ for(let i=0;i<600;i++){const s=await f.operations.operationStatus(opId,actor);if(s.operation.state!=='running')return s;await Bun.sleep(100);}
+ throw new Error('purge did not settle');
+}
+test('purge removes a trashed item permanently, cleans its trashinfo and releases the lock',async()=>{
+ const f=await fixture();try{
+  await purgeFixture(f);
+  const p=f.home+'/delete me';await writeFile(p,'gone soon');const sent=await f.operations.send(p,actor);expect(sent.state).toBe('verified');
+  const start=await f.operations.purge([sent.id!],actor);expect(start.operation.state).toBe('running');
+  const done=await waitPurge(f,start.operation.id);expect(done.operation.state).toBe('verified');
+  expect(done.receipts.some((r:any)=>r.state==='verified'&&BigInt(r.retiredBytes||'0')>0n)).toBe(true);
+  expect((await f.operations.list()).items).toHaveLength(0);
+  const {readdir}=await import('node:fs/promises');expect(await readdir(f.home+'/.local/share/Trash/info')).toHaveLength(0);
+  expect(f.repo.db.query('SELECT COUNT(*) AS n FROM locks').get()).toMatchObject({n:0});
+ }finally{await f.clean();}
+});
+test('purge removes orphan payloads without valid metadata and reports a mixed batch honestly',async()=>{
+ const f=await fixture();try{
+  await purgeFixture(f);
+  await mkdir(f.home+'/.local/share/Trash/files',{recursive:true,mode:0o700});await writeFile(f.home+'/.local/share/Trash/files/orphan','payload');
+  const orphan=(await f.operations.list()).items[0];expect(orphan.canRestore).toBe(false);
+  const dir=f.home+'/kept dir';await mkdir(dir);await writeFile(dir+'/inside','preserve');const sent=await f.operations.send(dir,actor);
+  const start=await f.operations.purge([orphan.id,sent.id!],actor);
+  const done=await waitPurge(f,start.operation.id);expect(done.operation.state).toBe('verified');
+  expect((await f.operations.list()).items).toHaveLength(0);
+  expect(await lstat(f.home+'/.local/share/Trash/files/orphan').then(()=>true,()=>false)).toBe(false);
+ }finally{await f.clean();}
+});
+test('purge refuses non-trash paths and unknown ids; empty targets only listed trash roots',async()=>{
+ const f=await fixture();try{
+  await purgeFixture(f);
+  const p=f.home+'/not trashed';await writeFile(p,'stays');
+  await expect(f.operations.purge(['xdg:missing'],actor)).rejects.toThrow();
+  await expect(f.operations.empty('/etc',actor)).rejects.toThrow('Papelera desconocida');
+  const empty=await f.operations.empty(f.home+'/.local/share/Trash/files',actor);expect(empty.operation).toBeNull();
+  expect(await readFile(p,'utf8')).toBe('stays');
+ }finally{await f.clean();}
 });
 test('desktop trash preserves hidden names and never treats them as internal metadata',async()=>{
  const f=await fixture();try{const root=f.home+'/.local/share/Trash';await mkdir(root+'/files',{recursive:true,mode:0o700});await mkdir(root+'/info',{mode:0o700});await writeFile(root+'/files/.hidden','fixture');await writeFile(root+'/info/.hidden.trashinfo','[Trash Info]\nPath='+f.home+'/.original\nDeletionDate=2026-10-04T12:00:00\n');const list=await f.operations.list();expect(list.items[0].id).toBe('xdg:.hidden');await f.operations.restore('xdg:.hidden',actor);expect(await readFile(f.home+'/.original','utf8')).toBe('fixture');}finally{await f.clean();}

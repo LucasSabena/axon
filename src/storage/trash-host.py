@@ -223,6 +223,8 @@ try:
    _,p,src,info=next(r for r in rs if r[0]==origin);original,date=meta(origin,src,key,info)
    if original!=selection['orig'] or identity(os.stat(key,dir_fd=src,follow_symlinks=False))!=selection['identity']:raise Guard('El elemento o sus metadatos cambiaron')
    if protected_trash(original,rs):raise Guard('Origen inválido dentro de papelera')
+   private_root=home+'/.local/share/axon';recovery=private_root+'/format-backups'
+   if len(original.split('/'))<4 or original==home or any(x in ('.ssh','.gnupg') for x in original.split('/')) or (under(original,private_root) and not under(original,recovery)):raise Guard('Destino de restauración protegido')
    dest=anchor(os.path.dirname(original));handles.append(dest);rename(src,key,dest,os.path.basename(original))
    matched=identity(os.stat(os.path.basename(original),dir_fd=dest,follow_symlinks=False))==selection['identity']
    if not matched:raise Guard('El elemento cambió durante la restauración; revisar recibo antes de reintentar')
