@@ -184,6 +184,7 @@ export async function syncCloudflaredRoutes(domains: DomainMapping[]): Promise<{
       const entry: TunnelIngress = {
         hostname: domain.fullDomain,
         service: domain.target,
+        // Local HTTPS services commonly use self-signed certs; skip origin TLS verify.
         originRequest: domain.target.startsWith('https://') ? { noTLSVerify: true } : {},
       };
       const catchAllIndex = ingress.findIndex((e) => !e.hostname);

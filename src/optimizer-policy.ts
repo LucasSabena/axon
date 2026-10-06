@@ -7,7 +7,7 @@ export interface Preference { importance: Importance; created: string; image: st
 
 const profiles: [RegExp, string, string, boolean][] = [
   [/axon/i, 'Axon', 'El panel que estás usando para administrar el servidor.', true],
-  [/cloudflared|tailscale|wireguard|traefik|nginx|caddy|example-proxy|example-gate/i, 'Acceso y conexiones', 'Permite acceder a aplicaciones o encamina conexiones. Apagarlo puede dejarte sin acceso.', true],
+  [/cloudflared|tailscale|wireguard|traefik|nginx|caddy/i, 'Acceso y conexiones', 'Permite acceder a aplicaciones o encamina conexiones. Apagarlo puede dejarte sin acceso.', true],
   [/authentik|authelia|keycloak/i, 'Inicio de sesión', 'Gestiona el acceso y las cuentas de otras aplicaciones.', true],
   [/vaultwarden|bitwarden/i, 'Contraseñas', 'Tu gestor de contraseñas. Apagarlo interrumpe el acceso y la sincronización.', true],
   [/postgres|pgvector|mariadb|mysql|redis|mongo|(?:^|[-/])db(?:$|[-:])/i, 'Datos de aplicaciones', 'Guarda datos o sostiene otras aplicaciones. Primero hay que identificar quién lo usa.', true],
@@ -19,7 +19,7 @@ const profiles: [RegExp, string, string, boolean][] = [
   [/vikunja/i, 'Tareas', 'Gestiona listas, proyectos y tareas. Deja de estar disponible al apagarlo.', false],
   [/portainer/i, 'Administración de Docker', 'Otro panel para administrar contenedores. Sus tareas en curso se interrumpen al apagarlo.', false],
   [/filebrowser/i, 'Explorador de archivos', 'Permite navegar y subir archivos. Apagarlo interrumpe transferencias activas.', false],
-  [/media-control/i, 'Control de parlantes', 'Aplicación para controlar parlantes. Deja de atender solicitudes al apagarla.', false],
+
 ];
 
 export function assessContainer(c: ContainerInfo, all: ContainerInfo[], preferences: Record<string, Preference>, domains: DomainMapping[], selfId = '') {

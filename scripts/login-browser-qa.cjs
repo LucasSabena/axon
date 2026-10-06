@@ -1,4 +1,4 @@
-const { chromium } = require('/home/user/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const { chromium } = require(process.env.AXON_QA_PLAYWRIGHT_ENTRY || 'playwright');
 const { default:AxeBuilder } = require('@axe-core/playwright');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');

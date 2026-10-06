@@ -39,7 +39,7 @@ const server = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(req) {
   return new Response(file, { headers: { 'Cache-Control': 'no-cache' } });
 } });
 const origin = `http://127.0.0.1:${server.port}`;
-const playwright = createRequire('/home/user/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/package.json')('playwright');
+const playwright = createRequire(process.env.AXON_QA_PLAYWRIGHT_ENTRY || require.resolve('playwright/package.json'))('playwright');
 const engine = process.env.AXON_QA_BROWSER || 'chromium';
 const browser = await playwright[engine].launch({ ...(engine === 'chromium' ? { channel: 'chrome' } : {}), headless: true });
 const check = (v: any, message: string) => { if (!v) throw Error(message); };

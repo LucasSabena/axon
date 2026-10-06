@@ -7,7 +7,7 @@ Dropbox aparece como una ubicación remota junto a Servidor. Navegar consulta no
 1. Abrí **Archivos → Dropbox → Configurar conexión**.
 2. Creá una aplicación en https://www.dropbox.com/developers/apps con **Scoped access** y **Full Dropbox**. App Folder no permite explorar las carpetas existentes de tu cuenta.
 3. Habilitá `account_info.read`, `files.metadata.read`, `files.content.read` y `sharing.read` en Permissions y guardá.
-4. Registrá la Redirect URI que muestra AXON, exactamente, en OAuth 2. El servidor detrás de un proxy debe configurar `AXON_PUBLIC_ORIGIN` con su origen público. El despliegue actual ya usa `https://axon.example.com`.
+4. Registrá la Redirect URI que muestra AXON, exactamente, en OAuth 2. El servidor detrás de un proxy debe configurar `AXON_PUBLIC_ORIGIN` con su origen público (por ejemplo `https://axon.example.com`).
 5. Guardá la **App key** en AXON y pulsá **Conectar Dropbox**. La contraseña se ingresa en Dropbox. No se necesita pegar el App secret: el flujo usa OAuth authorization code con PKCE y refresh tokens.
 
 Opcionalmente, el administrador puede configurar `DROPBOX_CLIENT_ID` en el entorno del servidor. En ese caso el campo no se edita en la interfaz. La autorización pertenece al usuario de AXON; cada cuenta conectada y sus enlaces se aíslan por usuario.

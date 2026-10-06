@@ -12,12 +12,12 @@ import { auditMutations } from './audit';
 async function fixture() {
   const dir = await mkdtemp(path.join(tmpdir(),'axon-platform-test-'));
   const store = new PlatformStore(path.join(dir,'state'));
-  const projects:any[] = [{id:'demo',name:'Demo',cwd:path.join(dir,'demo'),type:'node',port:1234},{id:'other',name:'Otro',cwd:path.join(dir,'other'),type:'node'}];
+  const projects:any[] = [{id:'demo',name:'DemoApp',cwd:path.join(dir,'demo'),type:'node',port:1234},{id:'other',name:'Otro',cwd:path.join(dir,'other'),type:'node'}];
   await mkdir(projects[0].cwd);
   const hub = new ProjectHub(store,{projects:() => projects,processes:async() => [],containers:async() => [],domains:() => [],home:async() => dir,chats:async() => ({ok:true,items:[]}),consumption:async() => ({ok:true,summary:{requests:0}})});
   const diagnostics = new Diagnostics(hub,{http:async() => ({ok:false,status:502,ms:1}),tcp:async() => ({ok:false,ms:1,error:'Fixture: puerto cerrado'})});
   const api = machineApi({store,hub,diagnostics,logs:async() => ['API_KEY=private']});
-  const token = store.createToken({name:'CI Demo',days:1,grants:[{projectId:'demo',scopes:['projects:read','diagnostics:run','audit:read']}]},'owner',['demo','other']).token;
+  const token = store.createToken({name:'CI DemoApp',days:1,grants:[{projectId:'demo',scopes:['projects:read','diagnostics:run','audit:read']}]},'owner',['demo','other']).token;
   const request = (url:string,options:RequestInit = {},credential = token) => api.request(url,{...options,headers:{authorization:`Bearer ${credential}`,...options.headers}});
   return {dir,store,hub,diagnostics,api,token,request,close:async() => {store.close();await rm(dir,{recursive:true,force:true});}};
 }
@@ -42,7 +42,7 @@ describe('AXON platform isolation and evidence',() => {
     const f = await fixture();
     try {
       expect(JSON.stringify(f.store.tokens())).not.toContain(f.token);
-      expect(f.store.authenticate(f.token)?.name).toBe('CI Demo');
+      expect(f.store.authenticate(f.token)?.name).toBe('CI DemoApp');
       expect((await f.request('/projects')).status).toBe(200);
       expect((await (await f.request('/projects')).json()).projects.map((p:any) => p.id)).toEqual(['demo']);
       expect((await f.request('/projects/other')).status).toBe(403);
@@ -69,7 +69,7 @@ describe('AXON platform isolation and evidence',() => {
   test('filesystem links are segment aware and manual relations do not infer unrelated containers',() => {
     expect(inside('/home/u/demo-evil','/home/u/demo')).toBe(false);
     expect(inside('/home/u/demo/api','/home/u/demo')).toBe(true);
-    const project:any = {id:'demo',name:'Demo',cwd:'/home/u/demo'};
+    const project:any = {id:'demo',name:'DemoApp',cwd:'/home/u/demo'};
     const c = (id:string,source:string):HubContainer => ({id,name:id,image:'fixture',state:'running',health:null,ports:[],configFiles:[],mounts:[{source,destination:'/app',type:'bind'}],dependsOn:[]});
     expect(relate(project,[],[c('real','/home/u/demo/data'),c('unrelated','/home/u')],[]).containers.map(c => c.id)).toEqual(['real']);
     expect(relate(project,[],[c('db','/var/lib/docker')],[],{containers:['db'],domains:[]}).containers[0].relation).toBe('manual');

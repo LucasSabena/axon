@@ -2,6 +2,25 @@
   "name": "axon",
   "version": "1.2.0",
   "description": "Panel de control web self-hosted para administrar un servidor completo: puertos, proyectos, Docker, dominios y más",
+  "license": "MIT",
+  "author": "Lucas Sabena <01studiobinary@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LucasSabena/axon.git"
+  },
+  "homepage": "https://github.com/LucasSabena/axon",
+  "bugs": "https://github.com/LucasSabena/axon/issues",
+  "keywords": [
+    "self-hosted",
+    "server-management",
+    "admin-panel",
+    "docker",
+    "bun",
+    "hono",
+    "linux",
+    "home-server",
+    "dashboard"
+  ],
   "scripts": {
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
@@ -25,7 +44,7 @@
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",
-    "@types/bun": "latest",
+    "@types/bun": "^1.4.2",
     "@types/js-yaml": "^4.0.9",
     "typescript": "^7.0.2"
   },

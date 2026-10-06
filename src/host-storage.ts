@@ -45,7 +45,7 @@ export async function availableStorage(){const snapshot=await hostVolumes.snapsh
 // indexes only the folders the user selects, never an entire disk by surprise.
 export async function projectSearchRoots(configured:string[]=[]){
   const home=await hostHome();
-  const candidates=[...(configured.length?configured:[home+'/Proyectos',home+'/server-stack']),...(await availableStorage().catch(()=>({disks:[]}))).disks.filter(v=>v.path&&v.path!=='/').map(v=>v.path!)];
+  const candidates=[...(configured.length?configured:[home+'/Proyectos',home+'/Projects']),...(await availableStorage().catch(()=>({disks:[]}))).disks.filter(v=>v.path&&v.path!=='/').map(v=>v.path!)];
   const roots:string[]=[];const identities=new Set<string>();
   for(const p of candidates)try{const full=await resolveHostPath(p,{directory:true});const s=await stat(hostToContainer(full));const key=s.dev+':'+s.ino;if(!identities.has(key)){identities.add(key);roots.push(full);}}catch{/* disconnected or unreadable roots keep their saved configuration */}
   return roots;

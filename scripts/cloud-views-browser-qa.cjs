@@ -4,7 +4,7 @@ async (page) => {
   await page.setViewportSize({width:1440,height:960});
   const provider={id:'dropbox',name:'Dropbox',configured:true,connected:true,visible:true,account:{name:'Cuenta de prueba',email:'qa@example.test'},sources:[{id:'account',name:'Mi Dropbox',type:'account'}]};
   const entry=(name,type,size,modified)=>({name,path:'/'+name,type,size,modified,downloadable:true});
-  const entries=['Clientes','Batev','Costos','Documentos','Dormi','Exportaciones','Informes','Manuales'].map(n=>entry(n,'dir',0,null));
+  const entries=['Clientes','Facturas','Informes','Proyectos','Respaldos'].map(n=>entry(n,'dir',0,null));
   entries.push(entry('Presupuesto 2.pdf','file',8192,'2026-09-10T12:00:00Z'),entry('Presupuesto 12.pdf','file',4096,'2026-10-05T12:00:00Z'),entry('Plano.png','file',256000,'2026-10-06T12:00:00Z'),entry('nota.txt','file',64,'2026-08-12T12:00:00Z'),entry('<img src=x onerror=alert(1)>.txt','file',32,null),entry('Nombre muy largo que debe conservarse al cambiar de vista y al navegar sin romper el ancho de la página.pdf','file',10000,null));
   let streams=0,lists=0;const copies=[];
   await page.route('**/api/connections',r=>r.fulfill({json:{ok:true,providers:[provider]}}));
@@ -51,7 +51,7 @@ async (page) => {
   await page.locator('[data-source=server]').click();await page.locator('#fm-location').waitFor({state:'visible'});await page.locator('[data-source=dropbox]').click();await page.locator('#cloud-list[data-view=list] .cloud-row').first().waitFor();
   await page.locator('.cloud-open[data-path="/nota.txt"]').click();await page.locator('.cloud-preview pre').waitFor();assert(streams===1,'Content not fetched only on open');assert(await page.locator('.cloud-preview pre').textContent()==='Texto de prueba','Preview failed');
   await page.locator('[aria-label="Cerrar vista previa"]').click();await page.locator('#cloud-preview').waitFor({state:'hidden'});
-  await page.addScriptTag({path:'/home/user/server-stack/axon/node_modules/.pnpm/axe-core@4.13.0/node_modules/axe-core/axe.min.js'});
+  await page.addScriptTag({path:require.resolve('axe-core/axe.min.js')});
   const widths=[1440,768,390,320];let axeCount=0;
   for(const mode of ['light','dark']){
     await page.evaluate(m=>window.AxonThemes.setMode(m),mode);

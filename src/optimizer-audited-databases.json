@@ -1,10 +1,10 @@
 [
   {
-    "id": "d03ce9c579a051a0e8e1b12b8129f1a0dcd59c49d74163cc22870159d01f22e5",
-    "created": "2026-09-30T05:24:46.993913186Z",
+    "id": "0000000000000000000000000000000000000000000000000000000000000001",
+    "created": "2026-01-01T00:00:00.000000000Z",
     "image": "postgres:16-alpine",
-    "imageId": "sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229",
-    "name": "demo-postgres",
+    "imageId": "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+    "name": "fixture-postgres-a",
     "portBindings": [
       {
         "hostIp": "127.0.0.1",
@@ -12,15 +12,15 @@
         "containerPort": 5432
       }
     ],
-    "purpose": "Desarrollo y pruebas locales de Demo y Example App; la API pública usa Neon.",
-    "verifiedAt": "2026-10-03"
+    "purpose": "Fixture entry for the audited-database contract; replace with your own audited instances.",
+    "verifiedAt": "2026-01-01"
   },
   {
-    "id": "c8b32e78a6be47aff53e5be1cff830e32fd3e1695d60bd2ed00d4ae1c58d6ff7",
-    "created": "2026-09-20T00:29:14.379668758Z",
+    "id": "0000000000000000000000000000000000000000000000000000000000000002",
+    "created": "2026-01-01T00:00:00.000000000Z",
     "image": "pgvector/pgvector:pg16",
-    "imageId": "sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b",
-    "name": "example-postgres",
+    "imageId": "sha256:0000000000000000000000000000000000000000000000000000000000000002",
+    "name": "fixture-postgres-b",
     "portBindings": [
       {
         "hostIp": "127.0.0.1",
@@ -28,7 +28,7 @@
         "containerPort": 5432
       }
     ],
-    "purpose": "Desarrollo local de Example Studio (example-builder).",
-    "verifiedAt": "2026-10-03"
+    "purpose": "Fixture entry for the audited-database contract; replace with your own audited instances.",
+    "verifiedAt": "2026-01-01"
   }
 ]

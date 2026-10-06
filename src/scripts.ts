@@ -78,7 +78,7 @@ function seedScripts(): void {
     {
       id: crypto.randomUUID(),
       name: 'Backup config',
-      cmd: 'tar czf /tmp/config-backup-$(date +%F).tgz -C "$HOME/server-stack" .',
+      cmd: 'tar czf /tmp/config-backup-$(date +%F).tgz -C "$HOME/compose" .',
       user: 'user',
       hookToken: crypto.randomUUID(),
       enabled: true,

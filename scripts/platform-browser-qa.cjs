@@ -1,4 +1,4 @@
-const {chromium}=require('/home/user/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const {chromium}=require(process.env.AXON_QA_PLAYWRIGHT_ENTRY || 'playwright');
 const fs=require('node:fs/promises');
 const assert=(value,message)=>{if(!value)throw Error(message);};
 const origin='http://127.0.0.1:3459',out='docs/platform-expansion-2026-10-05';

@@ -1,7 +1,9 @@
 node_modules
-data/
+data/*
 !data/config.example.json
 .env
+.env.*
+!.env.example
 *.log
 dist
 .DS_Store
@@ -10,6 +12,70 @@ dist
 .playwright-cli/
 
 .claude/
+.21st/
+.cursor/
+.windsurf/
 __pycache__/
 *.pyc
 .axon-install/
+
+# Test/build artifacts
+coverage/
+test-results/
+playwright-report/
+*.tsbuildinfo
+.cache/
+.turbo/
+out/
+build/
+
+# Runtime data & databases
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sql
+*.dump
+uploads/
+tmp/
+
+# Secrets & certs
+*.pem
+*.key
+*.crt
+*.p12
+*.ovpn
+cloudflared-config.yml
+initial-password.txt
+
+# Installer runtime state
+installation.json
+compose.json
+candidate.json
+
+# Python
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS/editor noise
+Thumbs.db
+desktop.ini
+._*
+*.swp
+*.swo
+*~
+*.orig
+*.bak
+
+# Archives/backups
+*.tgz
+*.tar.gz
+*.zip
+*.7z
+backups/
+dumps/

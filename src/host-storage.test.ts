@@ -31,11 +31,11 @@ test('a disconnected custom mount stays blocked over restart even when its empty
  }finally{await rm(dir,{recursive:true,force:true});}
 });
 test('mount aliases count capacity once but retain independent operation identities',async()=>{
- const original=volume('/mnt/axon-disks/owned'),alias=volume('/mnt/external','alias','66');
+ const original=volume('/mnt/axon-disks/owned'),alias=volume('/mnt/externo','alias','66');
  const disks=new FileVolumes(async()=>({ok:true,devices:[],volumes:[original,alias]}));
  expect(uniqueVolumes([original,alias])).toEqual([alias]);
- expect(await disks.validate('/mnt/external/file','alias:66')).toBe('66');
- await expect(disks.validate('/mnt/external/file','disk:55')).rejects.toThrow('cambió');
+ expect(await disks.validate('/mnt/externo/file','alias:66')).toBe('66');
+ await expect(disks.validate('/mnt/externo/file','disk:55')).rejects.toThrow('cambió');
 });
 test('discovery deduplicates registered directories and skips disconnected roots without deleting configuration',async()=>{
  const dir=await mkdtemp(path.join(tmpdir(),'axon-discovery-'));

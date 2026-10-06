@@ -1,6 +1,6 @@
 import {createRequire} from 'node:module';
 import {mkdir,writeFile} from 'node:fs/promises';
-const {chromium}=createRequire('/home/user/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/package.json')('playwright');
+const {chromium}=createRequire(process.env.AXON_QA_PLAYWRIGHT_ENTRY || require.resolve('playwright/package.json'))('playwright');
 const {default:AxeBuilder}=createRequire(import.meta.url)('@axe-core/playwright');
 const base=process.env.AXON_MENU_QA_BASE||'http://127.0.0.1:3459';
 const production=base.startsWith('https:');

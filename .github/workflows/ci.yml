@@ -45,7 +45,7 @@ jobs:
         env:
           EXPECTED_REVISION: ${{ github.sha }}
         run: |
-          docker run -d --name axon-ci -p 127.0.0.1:34579:3457 -e SESSION_SECRET=ci-isolated-session-secret -e AXON_BIND_HOST=0.0.0.0 axon-ci
+          docker run -d --name axon-ci -p 127.0.0.1:34579:3457 -e "SESSION_SECRET=$(openssl rand -hex 32)" -e AXON_BIND_HOST=0.0.0.0 axon-ci
           python3 - <<'PY'
           import json, os, time, urllib.request
           for attempt in range(45):
@@ -61,4 +61,4 @@ jobs:
           PY
       - name: Runtime logs
         if: always()
-        run: docker logs axon-ci 2>/dev/null || true
+        run: docker logs axon-ci 2>/dev/null | grep -ivE 'secret|token|password|credential' || true

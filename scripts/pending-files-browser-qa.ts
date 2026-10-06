@@ -36,7 +36,7 @@ try {
  assert(trashCalls===1,'Trash was retried automatically');assert(await readFile(from+'/original.txt','utf8')==='Original preservado durante el bloqueo.','Original changed');
  const stoppedAt=statusCalls;await page.waitForTimeout(3300);assert(statusCalls===stoppedAt,'Status polling continued after dialog close');
  results.pendingDialog={mockedBlockedResponse:true,polledTerminalResult:true,requestsToTrash:trashCalls,pollStopped:true,originalPreserved:true};
- await page.evaluate((from:string)=>{void (window as any).AxonTransfers.showError(Object.assign(new Error('El destino exfat no admite 4 enlaces simbólicos'),{raw:{blockers:Array.from({length:4},(_,i)=>({path:from+'/enlace-'+i,reason:'El destino exfat no admite enlaces simbólicos'}))}}),{mode:'move',from,to:'/mnt/external/'+from.split('/').pop()});},from);
+ await page.evaluate((from:string)=>{void (window as any).AxonTransfers.showError(Object.assign(new Error('El destino exfat no admite 4 enlaces simbólicos'),{raw:{blockers:Array.from({length:4},(_,i)=>({path:from+'/enlace-'+i,reason:'El destino exfat no admite enlaces simbólicos'}))}}),{mode:'move',from,to:'/mnt/fixture-disk/'+from.split('/').pop()});},from);
  await modal.waitFor({state:'attached'});await modal.locator('.operation-cancel').waitFor();assert(await modal.locator('.operation-impact li').count()===4,'Missing incompatibility paths');
  await page.setViewportSize({width:320,height:1000});await page.waitForTimeout(200);assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Blocker dialog overflows');await page.screenshot({path:output+'/incompatible-320.png',fullPage:true});
  await page.keyboard.press('Escape');await modal.waitFor({state:'detached'});results.incompatiblePaths=4;

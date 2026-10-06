@@ -84,7 +84,10 @@ const DATA_DIR = path.dirname(process.env.CONFIG_PATH || '/app/data/config.json'
 const LIB_DIR = path.join(DATA_DIR, 'library');
 const STATE_FILE = path.join(LIB_DIR, 'state.json');
 const INDEX_FILE = path.join(LIB_DIR, 'index.json');
-const SECRET = process.env.SESSION_SECRET || 'axon';
+const SECRET = process.env.SESSION_SECRET;
+if (!SECRET) {
+  throw new Error('SESSION_SECRET environment variable is required');
+}
 
 const MAX_ITEMS = 250_000;
 const THUMB_SIZE = 512;

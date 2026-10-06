@@ -2323,7 +2323,7 @@ export async function listAgentDocs(): Promise<AgentDocsResult> {
   // roots (~/Proyectos) the label is the first path segment underneath.
   const roots = new Map<string, boolean>(); // path → isProjectDir
   roots.set(`${H()}/Proyectos`, false);
-  roots.set(`${H()}/server-stack`, false);
+  roots.set(`${H()}/Projects`, false);
   for(const p of await projectSearchRoots(getProjectScanDirs()))roots.set(p,false);
   for (const p of getProjects()) if (p?.cwd) roots.set(p.cwd, true);
   const rootList: string[] = [];

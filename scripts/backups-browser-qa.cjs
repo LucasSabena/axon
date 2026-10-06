@@ -1,4 +1,4 @@
-const {chromium}=require('/home/user/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const {chromium}=require(process.env.AXON_QA_PLAYWRIGHT_ENTRY || 'playwright');
 const {AxeBuilder}=require('@axe-core/playwright');
 const fs=require('node:fs/promises');
 const origin='http://127.0.0.1:3459',out='docs/backups-2026-10-06';

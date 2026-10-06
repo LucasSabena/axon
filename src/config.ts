@@ -23,10 +23,12 @@ export async function loadConfig(): Promise<AppConfig> {
     const content = await readFile(CONFIG_PATH, 'utf-8');
     config = JSON.parse(content);
   } catch {
+    const initialPassword = crypto.randomUUID() + crypto.randomUUID();
     config = {
-      auth: { username: 'admin', passwordHash: await hashPassword('admin') },
+      auth: { username: 'admin', passwordHash: await hashPassword(initialPassword) },
       domains: [],
     } as AppConfig;
+    console.log(`[axon] No config found at ${CONFIG_PATH} — generated one-time admin password: ${initialPassword}`);
   }
   config.settings = { ...DEFAULT_SETTINGS, ...(config.settings || {}) };
   if (process.env.PROJECT_SCAN_DIRS) {

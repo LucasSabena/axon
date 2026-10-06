@@ -1,4 +1,4 @@
-const {chromium}=require('/home/user/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const {chromium}=require(process.env.AXON_QA_PLAYWRIGHT_ENTRY || 'playwright');
 const fs=require('node:fs/promises');
 (async()=>{
  const browser=await chromium.launch({channel:'chrome',headless:true});const context=await browser.newContext({viewport:{width:1440,height:1000}});const page=await context.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));

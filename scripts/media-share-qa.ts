@@ -14,7 +14,7 @@ const host = { ...await import('../src/host') }, realExec = host.hostExec;
 mock.module('../src/host', () => ({ ...host, hostExec: (command: string, opts: any) => command === 'printf %s "$HOME"'
   ? Promise.resolve({ ok: true, code: 0, stdout: dir, stderr: '', command }) : realExec(command, opts) }));
 const { registerLibraryRoutes } = await import('../src/library');
-const playwright = createRequire('/home/user/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/package.json')('playwright');
+const playwright = createRequire(process.env.AXON_QA_PLAYWRIGHT_ENTRY || require.resolve('playwright/package.json'))('playwright');
 const assert = (v: any, message: string) => { if (!v) throw Error(message); };
 async function command(args: string[]) {
   const proc = Bun.spawn(args, { stdout: 'pipe', stderr: 'pipe' });

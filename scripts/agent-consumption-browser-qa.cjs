@@ -1,4 +1,4 @@
-const { chromium } = require('/home/user/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const { chromium } = require(process.env.AXON_QA_PLAYWRIGHT_ENTRY || 'playwright');
 const base = 'http://127.0.0.1:3459';
 const assert = (ok, message) => { if (!ok) throw new Error(message); };
 const now = Date.now() / 1000;

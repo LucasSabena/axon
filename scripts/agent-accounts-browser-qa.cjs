@@ -1,4 +1,4 @@
-const { chromium } = require('/home/user/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const { chromium } = require(process.env.AXON_QA_PLAYWRIGHT_ENTRY || 'playwright');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const base = process.env.AXON_ACCOUNTS_QA_URL || 'http://127.0.0.1:3459';

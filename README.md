@@ -28,7 +28,7 @@ Abrí **http://localhost:3457**. El usuario inicial es `admin`; la contraseña s
 cat "$HOME/.local/share/axon-install/initial-password.txt"
 ```
 
-Cambiala desde Configuración y activá 2FA si lo necesitás. Cada instalación genera su propio secreto de sesión y empieza sin dominios ni proyectos ficticios.
+Guardala en un lugar seguro; podés activar 2FA desde Configuración. Cada instalación genera su propio secreto de sesión y empieza sin dominios ni proyectos ficticios.
 
 El comando queda en `$HOME/.local/bin/axon`. Si esa carpeta no está en tu `PATH`, usá la ruta completa:
 
@@ -171,19 +171,17 @@ El servidor de QA usa un origen y secreto independientes y bloquea operaciones s
 
 La CI comprueba tipos, JavaScript, regresiones, construcción, instalador, recuperación y arranque de la imagen Docker con la revisión exacta. Actualmente la validación de instalación se realiza en Linux x86_64; no se declara soporte verificado para otras arquitecturas.
 
-## Funciones en detalle
-
 ## Navegación y dashboard
 
 **Salud → Diagnóstico y optimización** muestra CPU, memoria y disco del host, consumo por contenedor y programas fuera de Docker, funciones de las aplicaciones y conexiones conocidas. Registra los mayores consumidores cada 30 segundos, conserva hasta 24 horas y muestra las últimas 120 muestras. CPU, espera por disco y tiempo robado por el hipervisor se distinguen; la CPU de los contenedores se normaliza por los núcleos del host.
 
-**Optimizar** permite apagar las dos instancias locales auditadas de `demo-postgres` y `example-postgres`, después de al menos **2 minutos continuos sin conexiones ni actividad detectada**. Cuenta conexiones abiertas aunque estén esperando, consultas breves por TCP mediante contadores de red, escrituras en todas las bases, mantenimiento, replicación y transacciones preparadas. Las comprobaciones son sólo de lectura y se repiten justo antes de cada parada. Una señal de uso, un error o una interrupción de las muestras impiden apagarla y el registro explica el motivo. Una aplicación sin comprobación de uso confiable sigue encendida, incluso si se marca **Sólo cuando la uso**. Authentik, Linkwarden, accesos, autenticación y otras bases quedan protegidos.
+**Optimizar** permite apagar bases de datos locales previamente auditadas, después de al menos **2 minutos continuos sin conexiones ni actividad detectada**. Cuenta conexiones abiertas aunque estén esperando, consultas breves por TCP mediante contadores de red, escrituras en todas las bases, mantenimiento, replicación y transacciones preparadas. Las comprobaciones son sólo de lectura y se repiten justo antes de cada parada. Una señal de uso, un error o una interrupción de las muestras impiden apagarla y el registro explica el motivo. Una aplicación sin comprobación de uso confiable sigue encendida, incluso si se marca **Sólo cuando la uso**. Los servicios de acceso y autenticación quedan protegidos por defecto.
 
 La autorización corresponde al ID completo, creación, imagen y puertos locales de las instancias auditadas; no se transfiere a contenedores nuevos con el mismo nombre. **Siempre encendida** permite excluir una base local. Cada parada se registra antes de actuar y ofrece **Volver a encender**; las aplicaciones omitidas nunca se inician al deshacer. PostgreSQL se apaga con SIGTERM y espera sin plazo de cierre forzado, para dejar terminar conexiones que aparezcan entre comprobación y señal. En ese caso puede rechazar conexiones nuevas mientras termina; una espera no se informa como parada o restauración confirmada.
 
 La limpieza opcional se limita a caché de compilación de Docker sin uso desde hace siete días; nunca usa `system prune`, borra volúmenes ni vacía `/tmp` o la caché de RAM. La vista nueva sólo se habilita cuando el backend anuncia compatibilidad, para soportar el montaje separado de `public/`.
 
-Los datos se guardan en `optimizer.json` y `optimizer-history.json`, junto a `config.json`. Las acciones requieren autenticación. [Inventario y diagnóstico inicial](docs/inventario-servidor-2026-10-03.md). Validación: `pnpm run test`, `pnpm run check`, `pnpm run build`; recorridos de navegador con `scripts/optimizer-browser-qa.js` contra `pnpm run qa:serve` (acciones operativas simuladas). `pnpm exec bun --no-env-file run scripts/optimizer-activity-qa.ts` observa bases locales durante dos minutos y abre una transacción real de sólo lectura después de preparar la propuesta: verifica que se omita la base, con todas las órdenes de apagado/inicio/limpieza bloqueadas. No ejecutarlo mientras otra instancia de QA esté muestreando las mismas bases.
+Los datos se guardan en `optimizer.json` y `optimizer-history.json`, junto a `config.json`. Las acciones requieren autenticación. Validación: `pnpm run test`, `pnpm run check`, `pnpm run build`; recorridos de navegador con `scripts/optimizer-browser-qa.js` contra `pnpm run qa:serve` (acciones operativas simuladas).
 
 Cada sección tiene una URL propia: `/archivos`, `/biblioteca`, `/agentes`, `/configuracion`, etc. El inicio `/` muestra acciones rápidas, archivos abiertos en este navegador, modificaciones recientes de la biblioteca, cambios guardados de agentes y actividad del servidor. Los respaldos existentes se identifican como tales, sin inventar historial de ediciones.
 
@@ -227,33 +225,29 @@ Verificación: `pnpm run test` y `pnpm run build`.
 - **Biblioteca → Links** lista enlaces, archivos originales, vencimiento y actividad; permite editar, silenciar avisos y revocar. Las descargas cuentan inicios observados, no transferencias completadas; los visitantes usan identificadores anónimos y se retienen los últimos 100 eventos de cada link.
 - **ENTREGAS** admite enlaces simbólicos relativos a archivos conocidos dentro de las raíces. No sigue enlaces a directorios. Los links compartidos guardan destinos reales y sobreviven a la regeneración de los accesos directos. Las carpetas vacías también aparecen.
 
-El alcance implementado, mediciones, pruebas y siguientes mejoras están en [docs/mejoras-2026-10-03.md](docs/mejoras-2026-10-03.md).
+### Verificación
 
-### Verificación de las mejoras
+`pnpm run check`, `pnpm run test` y `pnpm run build` verifican tipos, sintaxis y contratos. Los tests usan datos temporales; no se deben ejecutar dentro del servicio montado con `/hostfs`. Para verificar el runtime en una imagen aislada, montar un directorio temporal exclusivo como `/tmp` en un filesystem permitido.
 
-`pnpm run check`, `pnpm run test` y `pnpm run build` verifican tipos, sintaxis y contratos. Los tests usan datos temporales; no se deben ejecutar dentro del servicio montado con `/hostfs`. Para verificar el runtime en una imagen aislada, ver los requisitos de fixtures y herramientas en el informe de Control claro al final de este documento.
-
-`pnpm run qa:serve` inicia una instancia local en `127.0.0.1:3459`, con configuración y sesión independientes. Los recorridos de `scripts/polish-browser-qa.js` y `scripts/expanded-browser-qa.js` prueban navegador con operaciones de host simuladas. `scripts/library-links-qa.ts` prueba videos reales temporales y una copia intacta de `entregas.sh`, sin escribir en la producción audiovisual. Los scripts `production-*-smoke.ts` verifican origen / alias; el de links crea y revoca un enlace corto de QA y descarga su ZIP. No ejecutarlos indiscriminadamente sobre otro entorno.
-
-Para desplegar usar **`axon-deploy`**, seguir `/tmp/axon-deploy.log` y verificar la URL pública. No ejecutar Compose inline desde herramientas de agentes.
+`pnpm run qa:serve` inicia una instancia local en `127.0.0.1:3459`, con configuración y sesión independientes. Los recorridos de `scripts/polish-browser-qa.js` y `scripts/expanded-browser-qa.js` prueban navegador con operaciones de host simuladas. Los recorridos de QA de navegador localizan Playwright mediante `AXON_QA_PLAYWRIGHT_ENTRY`.
 
 ### Chats y memorias de agentes
 
-Agents incluye **Chats** (historial local por proyecto, búsqueda gradual, selección y exportación Markdown) y **Memorias** (Engram y memorias Markdown locales, edición con respaldos y comprobación de revisión). [Almacenes soportados, investigación, límites y validación](docs/chats-y-memorias-2026-10-04.md). Prueba visual local: `scripts/agent-context-browser-qa.js` sobre `pnpm run qa:serve`; las escrituras visuales usan fixtures y la integración real de Engram se verifica con datos aislados.
+Agents incluye **Chats** (historial local por proyecto, búsqueda gradual, selección y exportación Markdown) y **Memorias** (Engram y memorias Markdown locales, edición con respaldos y comprobación de revisión). Prueba visual local: `scripts/agent-context-browser-qa.js` sobre `pnpm run qa:serve`; las escrituras visuales usan fixtures.
 
-**Agents → Limpiar residuales** permite selección múltiple, seleccionar todos los disponibles y una sola confirmación por lote. Cada agente residual tiene un acceso rápido junto a su fila. Conserva respaldos recuperables; archivar no libera espacio en disco. [Flujo y validación](docs/limpieza-residuales-2026-10-04.md).
+**Agents → Limpiar residuales** permite selección múltiple, seleccionar todos los disponibles y una sola confirmación por lote. Cada agente residual tiene un acceso rápido junto a su fila. Conserva respaldos recuperables; archivar no libera espacio en disco.
 
 ## Almacenamiento y migraciones (2026-10-04)
 
 Axon agrega `/almacenamiento` con análisis bajo demanda, limpieza seleccionada de fuentes compatibles, planes e historial SQLite; papelera compartida XDG/legacy; copia/movimiento durable y editor con revisión; accesos de Inicio e inventario físico. Compose separa borradores, revisión, aplicación y recuperación. Las migraciones exigen comparación y pruebas antes de una retirada explícita, conservando los datos.
 
-Casos no soportados tienen bloqueos visibles. La ejecución durable de desinstalación de programas, paridad completa de Filebrowser/Portainer y retención nativa de todos los gestores siguen pendientes. [Funciones, límites y evidencia](docs/maintenance-2026-10-04.md); [ADR 0001](docs/adr/0001-maintenance-ledger.md). Las mutaciones detrás del proxy requieren `AXON_PUBLIC_ORIGIN`. QA usa fixtures independientes.
+Casos no soportados tienen bloqueos visibles. La ejecución durable de desinstalación de programas, paridad completa de Filebrowser/Portainer y retención nativa de todos los gestores siguen pendientes. [ADR 0001](docs/adr/0001-maintenance-ledger.md). Las mutaciones detrás del proxy requieren `AXON_PUBLIC_ORIGIN`. QA usa fixtures independientes.
 
 ## Rediseño Control claro (2026-10-05)
 
-La interfaz usa la dirección A y conserva las veinte secciones, la navegación y los contratos existentes. Web Awesome se integra como componentes web locales; `pnpm run build:ui` genera el bundle desde la dependencia bloqueada. La navegación se agrupa, el tema rápido pasa al sol/luna del encabezado y los temas completos siguen en Apariencia. Los estilos compartidos están en `public/design-system.css` y los tokens en `public/themes.js`.
+La interfaz conserva las secciones, la navegación y los contratos existentes. Web Awesome se integra como componentes web locales; `pnpm run build:ui` genera el bundle desde la dependencia bloqueada. La navegación se agrupa, el tema rápido pasa al sol/luna del encabezado y los temas completos siguen en Apariencia. Los estilos compartidos están en `public/design-system.css` y los tokens en `public/themes.js`.
 
-[Alcance, pruebas, mediciones públicas y reversión](docs/redesign-implementation-2026-10-05/README.md). Para los tests de filesystem dentro de una imagen aislada, usar un directorio temporal exclusivo montado como `/tmp` en un filesystem permitido y añadir tmux/python3-websockets sólo a ese entorno de prueba; no ejecutar tests sobre `/hostfs` productivo.
+Para los tests de filesystem dentro de una imagen aislada, usar un directorio temporal exclusivo montado como `/tmp` en un filesystem permitido y añadir tmux/python3-websockets sólo a ese entorno de prueba; no ejecutar tests sobre `/hostfs` productivo.
 
 ## Licencia
 

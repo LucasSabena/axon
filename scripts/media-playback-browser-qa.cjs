@@ -1,4 +1,4 @@
-const playwright = require('/home/user/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const playwright = require(process.env.AXON_QA_PLAYWRIGHT_ENTRY || 'playwright');
 const fs = require('node:fs/promises');
 const { execFileSync } = require('node:child_process');
 const os = require('node:os');
