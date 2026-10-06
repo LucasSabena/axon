@@ -50,7 +50,7 @@ La búsqueda adicional en Lazyweb tuvo cobertura débil para backups; no se usó
 
 - `pnpm run check`: TypeScript y sintaxis del frontend.
 - `pnpm run build`: assets y servidor compilados.
-- `pnpm run test`: suite completa de la publicación, 280 pruebas aprobadas (2538 aserciones).
+- `pnpm run test`: suite completa de la publicación, 280 pruebas aprobadas (2543 aserciones).
 - `src/platform/backup-plans.test.ts`: calendario de Argentina, varios destinos, exclusión del mismo disco físico, identidad al elegir y ejecutar, desconexión y cambio de montaje, cola, repetición de clics, pausa, programación atrasada, revisión concurrente de ajustes, migración de la configuración y recuperación desde el destino anterior.
 - `src/platform/backups.test.ts`: copias reales cifradas, comprobación de SQLite con WAL, recuperación real preservando originales, múltiples carpetas, archivos ocultos y compilaciones, selección con nombres que contienen caracteres especiales, conservación de versiones y comprobación con poco espacio disponible.
 - `scripts/backups-browser-qa.cjs`: asistente completo, explorador nativo, intervalo personalizado, persistencia, copia real, recarga, recuperación selectiva y comparación de bytes, edición, pausa/reanudación, descarga de clave, error transitorio/reintento y compatibilidad de rutas. Responsive a 320, 390, 768 y 1440 px y auditoría WCAG A/AA del contenido de Backups.

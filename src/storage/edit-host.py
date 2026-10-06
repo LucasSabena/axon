@@ -1,5 +1,5 @@
 """Bounded file edit with inode/content revision and atomic no-overwrite publication."""
-import os,sys,json,stat,hashlib,uuid,ctypes
+import os,sys,json,stat,hashlib,uuid,ctypes,fcntl
 r=json.loads(sys.argv[1]);D=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW;fd=None;stage=None;capture=None
 class Conflict(Exception):pass
 def revision(data,s,parent):
@@ -26,6 +26,10 @@ try:
   if not part:continue
   if part in ('.','..'):raise Conflict()
   n=os.open(part,D,dir_fd=fd);os.close(fd);fd=n
+ # All AXON writers serialize on the stable directory inode. A second worker
+ # must not capture a just-published file while the first reads its receipt.
+ # External writers still use the revision/no-overwrite checks below.
+ fcntl.flock(fd,fcntl.LOCK_EX)
  name=os.path.basename(p);parent=os.fstat(fd);old=None;s=None
  try:old,s=read(name)
  except FileNotFoundError:

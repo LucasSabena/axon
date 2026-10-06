@@ -81,6 +81,8 @@ test('text reads flag binary or invalid UTF-8 and preserve a UTF-8 BOM', async (
 test('server editing rejects stale content and never overwrites an arriving file',async()=>{
   const file=dir+'/shared.txt';await writeFile(file,'before');const first=await (await app.request('/api/files/read?path='+encodeURIComponent(file))).json();
   await writeFile(file,'changed elsewhere');expect((await post('/api/files/write',{path:file,content:'stale edit',revision:first.revision})).status).toBe(409);expect(await readFile(file,'utf8')).toBe('changed elsewhere');
-  const fresh=await (await app.request('/api/files/read?path='+encodeURIComponent(file))).json();const writes=await Promise.all([post('/api/files/write',{path:file,content:'one',revision:fresh.revision}),post('/api/files/write',{path:file,content:'two',revision:fresh.revision})]);expect(writes.map(r=>r.status).sort()).toEqual([200,409]);
+  for(let round=0;round<6;round++){
+    const fresh=await (await app.request('/api/files/read?path='+encodeURIComponent(file))).json();const writes=await Promise.all([post('/api/files/write',{path:file,content:'one',revision:fresh.revision}),post('/api/files/write',{path:file,content:'two',revision:fresh.revision})]);expect(writes.map(r=>r.status).sort()).toEqual([200,409]);
+  }
   expect((await post('/api/files/write',{path:file,content:'arriving',revision:'missing'})).status).toBe(409);expect(['one','two']).toContain(await readFile(file,'utf8'));
 });
