@@ -41,7 +41,7 @@ COPY . .
 # Build local web components from the locked production dependency.
 RUN bun run scripts/build-ui.ts
 
-ARG AXON_VERSION=1.1.0
+ARG AXON_VERSION=1.2.0
 ARG AXON_REVISION=development
 ENV AXON_VERSION=$AXON_VERSION AXON_REVISION=$AXON_REVISION
 LABEL org.opencontainers.image.source="https://github.com/LucasSabena/axon" org.opencontainers.image.version=$AXON_VERSION org.opencontainers.image.revision=$AXON_REVISION

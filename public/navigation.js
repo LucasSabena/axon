@@ -1,12 +1,13 @@
-import { SECTIONS, readRoute, routeUrl, readStored } from './navigation-model.js';
+import { SECTIONS, readRoute, routeUrl, readStored } from './navigation-model.js?v=e4db52b698c7';
 
 const actors = new Map();
-const saved = readStored(localStorage.getItem('axon:locations:v1'));
+let saved = {};
+try { saved = readStored(localStorage.getItem('axon:locations:v1')); } catch {}
 for (const key of Object.keys(saved)) { const route=readRoute(saved[key]?.url || ''); if(!route || route.section!==key) delete saved[key]; }
 
 let current = null, internal = false, serial = 0, maxIndex = 0, ready = false;
 let restoring = false, applying = false;
-let domReady=document.readyState==='complete';
+let domReady=document.readyState!=='loading';
 let historyMax={};try{historyMax=readStored(sessionStorage.getItem('axon:history:v1'));}catch{}
 const pages = () => window.AxonPages || {};
 const main = () => document.querySelector('main.content');

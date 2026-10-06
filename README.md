@@ -71,7 +71,7 @@ tail -f "$HOME/.local/share/axon-install/update.log"
 # O esperar desde la misma terminal:
 axon update --wait
 # Instalar una publicación concreta:
-axon update --ref v1.1.0 --wait
+axon update --ref v1.2.0 --wait
 ```
 
 La actualización obtiene una revisión concreta de GitHub y construye la imagen **antes de detener la versión actual**. Durante el cambio hace una copia de los datos del panel con la aplicación detenida, conserva `.env` y comprueba que `/api/health` responda con la revisión nueva. El frontend y el backend salen de la misma imagen; no se monta `public/` por separado.
@@ -87,6 +87,19 @@ axon rollback --wait
 Los datos siguen montados en la misma carpeta al actualizar o volver de versión. **Rollback cambia el código, no restaura una copia antigua de tus datos.** Para una migración de datos incompatible usá el respaldo y las instrucciones de esa publicación. El actualizador conserva imágenes, versiones y respaldos; no borra volúmenes, credenciales nativas ni aplicaciones del servidor.
 
 Más detalles: [instalación, recuperación y migración](docs/installation.md).
+
+## Backups fáciles de configurar
+
+La página **Backups** guía en cuatro pasos: qué proteger, en qué discos guardar, cada cuánto hacer la copia y revisar los ajustes. Podés elegir varias carpetas, los archivos de un disco, los ajustes de AXON o bases PostgreSQL, y guardar copias independientes en hasta cinco discos físicos diferentes del origen.
+
+- Frecuencia manual o cada 1 a 365 días, con horario de Argentina y conservación de versiones configurable.
+- Estado y última copia comprobada por destino. Si un disco está desconectado, espera y continúa con los disponibles.
+- Recuperación de archivos o carpetas en una carpeta nueva, conservando los originales.
+- Copias cifradas con Restic y descarga de la clave de recuperación para guardarla fuera del servidor.
+
+El host necesita **Restic** y Python; el panel indica si falta Restic. [Preparar el servidor](docs/installation.md#dependencias-para-backups). Copiar los archivos de un disco no crea una imagen arrancable del sistema. [Guía y alcance de Backups](docs/backups-2026-10-06/README.md).
+
+La [publicación 1.2.0](https://github.com/LucasSabena/axon/releases/tag/v1.2.0) incluye Backups, conexiones de almacenamiento en la nube, acceso para agentes por API/MCP, inventario de software e iconos, nuevo login y correcciones de navegación y caché. [Notas y actualización](docs/releases/v1.2.0.md).
 
 ## Si ya tenías AXON instalado con Compose
 
@@ -184,7 +197,7 @@ Flechas, Inicio/Fin, Enter y selección con Shift/Ctrl funcionan sobre los archi
 
 Archivos muestra los discos físicos y sus volúmenes desde el host: internos, USB y otros discos externos, con capacidad, espacio libre y estado. La lista se actualiza al abrir la sección, al volver a la ventana y cada 12 segundos mientras está visible. «Actualizar discos» consulta nuevamente el sistema. Un volumen montado abre su carpeta; uno externo sin montar permite «Montar». Los formatos sin un volumen navegable permanecen visibles.
 
-El botón **Explorar discos** de la barra superior está disponible en todas las secciones. Inicio, Salud, Métricas, Almacenamiento, Proyectos, Agentes, Biblioteca, Compose, Drop y Respaldos muestran el mismo inventario. Los selectores de carpetas permiten recorrer cualquier disco montado, incluso en ubicaciones personalizadas; dos montajes del mismo volumen no duplican la capacidad.
+El botón **Explorar discos** de la barra superior está disponible en todas las secciones. Inicio, Salud, Métricas, Almacenamiento, Proyectos, Agentes, Biblioteca, Compose, Drop y Backups muestran el mismo inventario. Los selectores de carpetas permiten recorrer cualquier disco montado, incluso en ubicaciones personalizadas; dos montajes del mismo volumen no duplican la capacidad.
 
 Proyectos y los documentos de agentes se buscan también en discos montados, con límites de profundidad, tiempo y cantidad de entradas. Biblioteca conserva sus carpetas elegidas: **Configuración → Agregar carpeta de un disco** incorpora otra ubicación; no se indexan discos completos automáticamente. Compose permite abrir YAML de otro disco. Métricas permite elegir el disco del gráfico; el historial de cada volumen empieza con sus primeras muestras reales. Las memorias y conversaciones de agentes registrados usan sus ubicaciones nativas y admiten configuraciones en otros discos.
 
@@ -208,7 +221,8 @@ Verificación: `pnpm run test` y `pnpm run build`.
 
 ### Tienda, apariencia y entregas
 
-- **Tienda** (`/tienda`) instala aplicaciones en el host para todos sus usuarios. Incluye 25 fichas y búsqueda en Flathub; instalación, actualización y desinstalación usan trabajos con progreso. DaVinci usa la descarga oficial del fabricante. Flatpak y Flathub se preparan desde la tienda; las aplicaciones gráficas necesitan el escritorio del host.
+- **Programas** (`/programas`) descubre paquetes y herramientas desde los gestores nativos, con búsqueda por gestor/ámbito, logos de escritorio y AppStream, y planes de actualización por instalación. [Cobertura, configuración y límites](docs/software-inventory.md).
+- **Tienda** (`/tienda`) conserva un catálogo de recomendaciones y búsqueda en Flathub, y muestra otras aplicaciones instaladas desde el mismo inventario. Las nuevas instalaciones usan el ámbito de sistema; las actualizaciones revisan el plan de su instalación concreta. La desinstalación requiere un executor específico y permanece bloqueada cuando no existe. DaVinci usa la descarga oficial del fabricante. Flatpak y Flathub se preparan desde la tienda; las aplicaciones gráficas necesitan el escritorio del host.
 - **Configuración → Apariencia** tiene modo Claro / Oscuro / Sistema y 10 presets de cada modo. Cada preset define colores, fuentes locales, densidad, radios y sombras. Sistema recuerda ambos temas. Las preferencias son de cada navegador.
 - **Biblioteca → Links** lista enlaces, archivos originales, vencimiento y actividad; permite editar, silenciar avisos y revocar. Las descargas cuentan inicios observados, no transferencias completadas; los visitantes usan identificadores anónimos y se retienen los últimos 100 eventos de cada link.
 - **ENTREGAS** admite enlaces simbólicos relativos a archivos conocidos dentro de las raíces. No sigue enlaces a directorios. Los links compartidos guardan destinos reales y sobreviven a la regeneración de los accesos directos. Las carpetas vacías también aparecen.

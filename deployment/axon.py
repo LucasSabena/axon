@@ -86,7 +86,7 @@ def manifest(root, state, release):
         'environment': {'CONFIG_PATH': '/app/data/config.json', 'PORT': str(state['port']),
             'AXON_BIND_HOST': state['bind'], 'HOST_USER': state['hostUser'],
             'AXON_PUBLIC_ORIGIN': state['origin'], 'AXON_VERSION': release['version'],
-            'AXON_REVISION': release['revision']},
+            'AXON_REVISION': release['revision'], 'AXON_CONTAINER_NAME': state['name']},
         'labels': {'io.axon.installation': str(root)},
         'volumes': [{'type': 'bind', 'source': str(root / 'data'), 'target': '/app/data'},
             {'type': 'bind', 'source': '/var/run/docker.sock', 'target': '/var/run/docker.sock'},

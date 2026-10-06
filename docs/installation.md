@@ -19,6 +19,24 @@ La instalación administrada mantiene separados el código y los datos:
 
 Con `--root` cambia la carpeta base; las demás rutas siguen relativas a ella. El acceso a Docker es un requisito. No se necesita Node, Bun o pnpm instalados en el host para instalar el panel: la construcción ocurre en Docker. Algunas herramientas del panel requieren sus dependencias propias en el host.
 
+## Dependencias para Backups
+
+Backups ejecuta Restic y Python 3 en el **host Linux**, fuera del contenedor. El instalador conserva el sistema y no instala paquetes del host automáticamente. Instalá Restic con el gestor de tu distribución:
+
+```bash
+# Debian / Ubuntu
+sudo apt-get update
+sudo apt-get install restic
+# Fedora
+sudo dnf install restic
+# Arch Linux
+sudo pacman -S restic
+```
+
+Ejecutá sólo los comandos de tu distribución. Comprobá `restic version`, abrí **Backups** y elegí las carpetas y otro disco. Si falta la herramienta, AXON lo indica y permite guardar los ajustes. PostgreSQL requiere Docker y una base compatible en funcionamiento.
+
+Los destinos deben estar montados y permitir escritura. AXON no formatea discos ni inicia una copia de todos tus archivos al instalar. Guardá la clave de recuperación fuera del disco del sistema. Los horarios usan `America/Argentina/Buenos_Aires`. [Guía de Backups](backups-2026-10-06/README.md).
+
 ## Transacción de actualización
 
 1. Bloquea actualizaciones concurrentes para esa instalación y valida la propiedad del contenedor.

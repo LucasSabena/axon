@@ -1,19 +1,16 @@
-import { readdir } from 'fs/promises';
 import * as path from 'path';
-import { HOST_FS, HOST_USER, hostExec, readHostFile } from './host';
-import type { DesktopApp, ProgramDef, ProgramView } from './types';
+import { HOST_FS, HOST_USER, hostExec } from './host';
+import type { ProgramDef, ProgramView } from './types';
 
-// Registry of updatable programs. Each step declares which user runs it on the
-// host: root for system package managers, `user` for user-level tools whose
-// binaries live in ~/.local, ~/.bun, etc.
-// `npmPkg` marks pnpm-global packages: their latest version is resolved via
-// `pnpm view` so the card can show "current → latest".
+// Optional account/integration metadata and install recommendations. This list
+// never defines inventory, versions, candidates or update commands. Native
+// installation records live in software.ts and software-host.py.
 function selectedAccountCheck(agent: string, fallback: string): string {
   const decode = "import json,sys;d=json.load(sys.stdin);p=next(p for p in d['profiles'] if p['active']);print((p.get('email') or p['label']) if p['connected'] else '');sys.exit(0 if p['connected'] else 1)";
   return `if [ -x "$HOME/.local/bin/axon-agent" ]; then "$HOME/.local/bin/axon-agent" status ${agent} | python3 -c "${decode}"; else ${fallback}; fi`;
 }
 
-const PROGRAMS: ProgramDef[] = [
+const INTEGRATIONS: ProgramDef[] = [
   // --- AI / dev CLIs ---
   {
     id: 'codex',
@@ -29,7 +26,7 @@ const PROGRAMS: ProgramDef[] = [
       login: [{ label: 'codex login (device)', cmd: 'codex login --device-auth', user: 'user' }],
       logout: [{ label: 'codex logout', cmd: 'codex logout', user: 'user' }],
     },
-    steps: [{ label: 'pnpm update codex', cmd: 'pnpm add -g @openai/codex@latest', user: 'user' }],
+    steps: [],
   },
   {
     id: 'claude-code',
@@ -47,7 +44,7 @@ const PROGRAMS: ProgramDef[] = [
       ],
       loginHint: 'Abrí una terminal, ejecutá `claude` y usá /login',
     },
-    steps: [{ label: 'pnpm update claude-code', cmd: 'pnpm add -g @anthropic-ai/claude-code@latest', user: 'user' }],
+    steps: [],
   },
   {
     id: 'opencode',
@@ -61,9 +58,7 @@ const PROGRAMS: ProgramDef[] = [
       check: { cmd: 'python3 -c "import json,sys;k=list(json.load(open(\'$HOME/.local/share/opencode/auth.json\')).keys());print(\', \'.join(k));sys.exit(0 if k else 1)" 2>/dev/null', user: 'user' },
       loginHint: 'Ejecutá `opencode auth login` en una terminal (es interactivo)',
     },
-    // opencode-sync actualiza el binario Y reinicia los servicios systemd del TUI.
-    // NUNCA usar pnpm add -g opencode-ai directamente (regla del host).
-    steps: [{ label: 'opencode-sync', cmd: 'opencode-sync', user: 'user' }],
+    steps: [],
   },
   {
     id: 'mpcli',
@@ -81,7 +76,7 @@ const PROGRAMS: ProgramDef[] = [
     },
     // Binario standalone en ~/.local/bin: la forma oficial de instalar/actualizar
     // es el install script del tap de Homebrew (también existe mercadopago-cli en npm).
-    steps: [{ label: 'install script mpcli', cmd: 'curl -fsSL https://raw.githubusercontent.com/mercadopago/homebrew-tap/main/install.sh | sh', user: 'user' }],
+    steps: [],
   },
   {
     id: 'devin',
@@ -95,7 +90,7 @@ const PROGRAMS: ProgramDef[] = [
       login: [{ label: 'devin auth login', cmd: 'devin auth login', user: 'user' }],
       logout: [{ label: 'devin auth logout', cmd: 'devin auth logout', user: 'user' }],
     },
-    steps: [{ label: 'devin update', cmd: 'yes | devin update', user: 'user' }],
+    steps: [],
   },
   {
     id: 'openchamber',
@@ -109,7 +104,7 @@ const PROGRAMS: ProgramDef[] = [
       check: { cmd: '[ -f $HOME/.config/openchamber/github-auth.json ] && echo "GitHub vinculado"', user: 'user' },
       loginHint: 'Se gestiona desde la UI de OpenChamber (Integraciones)',
     },
-    steps: [{ label: 'bun update openchamber', cmd: 'bun add -g @openchamber/web@latest', user: 'user' }],
+    steps: [],
   },
   {
     id: 'gemini',
@@ -124,7 +119,7 @@ const PROGRAMS: ProgramDef[] = [
       logout: [{ label: 'Borrar credenciales', cmd: 'rm -f $HOME/.gemini/oauth_creds.json $HOME/.gemini/google_accounts.json', user: 'user' }],
       loginHint: 'Ejecutá `gemini` en una terminal y elegí login con Google',
     },
-    steps: [{ label: 'pnpm update gemini-cli', cmd: 'pnpm add -g @google/gemini-cli@latest', user: 'user' }],
+    steps: [],
   },
   {
     id: 'vercel',
@@ -139,7 +134,7 @@ const PROGRAMS: ProgramDef[] = [
       logout: [{ label: 'vercel logout', cmd: 'vercel logout', user: 'user' }],
       loginHint: 'Ejecutá `vercel login` en una terminal (te manda un mail o abre GitHub)',
     },
-    steps: [{ label: 'pnpm update vercel', cmd: 'pnpm add -g vercel@latest', user: 'user' }],
+    steps: [],
   },
   {
     id: 'supabase',
@@ -154,7 +149,7 @@ const PROGRAMS: ProgramDef[] = [
       logout: [{ label: 'supabase logout', cmd: 'supabase logout', user: 'user' }],
       loginHint: 'Generá un token en supabase.com y ejecutá `supabase login`',
     },
-    steps: [{ label: 'pnpm update supabase', cmd: 'pnpm add -g supabase@latest', user: 'user' }],
+    steps: [],
   },
   {
     id: 'shopify',
@@ -168,7 +163,7 @@ const PROGRAMS: ProgramDef[] = [
       check: { cmd: 'find $HOME/.config/shopify -name "*.json" 2>/dev/null | grep -q . && echo "sesión guardada"', user: 'user' },
       loginHint: 'Ejecutá `shopify app dev` o `shopify theme dev` dentro de un proyecto para autenticar',
     },
-    steps: [{ label: 'pnpm update shopify', cmd: 'pnpm add -g @shopify/cli@latest', user: 'user' }],
+    steps: [],
   },
   {
     id: 'playwright',
@@ -178,7 +173,7 @@ const PROGRAMS: ProgramDef[] = [
     npmPkg: '@playwright/cli',
     detect: [{ cmd: 'command -v playwright-cli || command -v playwright', user: 'user' }],
     version: { cmd: 'playwright-cli --version 2>/dev/null | head -1 || playwright --version 2>/dev/null | head -1', user: 'user' },
-    steps: [{ label: 'pnpm update playwright', cmd: 'pnpm add -g @playwright/cli@latest @playwright/mcp@latest', user: 'user' }],
+    steps: [],
   },
   {
     id: 'gh',
@@ -192,7 +187,7 @@ const PROGRAMS: ProgramDef[] = [
       login: [{ label: 'gh auth login (device)', cmd: 'gh auth login --hostname github.com --web --git-protocol ssh', user: 'user' }],
       logout: [{ label: 'gh auth logout', cmd: 'gh auth logout --hostname github.com --user "$(gh api user --jq .login 2>/dev/null)"', user: 'user' }],
     },
-    steps: [{ label: 'apt upgrade gh', cmd: 'apt-get update -qq 2>/dev/null; DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y gh', user: 'root' }],
+    steps: [],
   },
   // --- Desktop apps ---
   {
@@ -202,7 +197,7 @@ const PROGRAMS: ProgramDef[] = [
     channel: 'apt',
     detect: [{ cmd: 'dpkg -s chatgpt', user: 'root' }],
     version: { cmd: "dpkg-query -W -f='${Version}' chatgpt", user: 'root' },
-    steps: [{ label: 'Actualizar ChatGPT', cmd: 'apt-get update -qq 2>/dev/null; DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y chatgpt', user: 'root' }],
+    steps: [],
   },
   {
     id: 'chrome',
@@ -211,7 +206,7 @@ const PROGRAMS: ProgramDef[] = [
     channel: 'apt',
     detect: [{ cmd: 'dpkg -s google-chrome-stable', user: 'root' }],
     version: { cmd: "dpkg-query -W -f='${Version}' google-chrome-stable", user: 'root' },
-    steps: [{ label: 'Actualizar Chrome', cmd: 'apt-get update -qq 2>/dev/null; DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y google-chrome-stable', user: 'root' }],
+    steps: [],
   },
   {
     id: 'vscode',
@@ -220,7 +215,7 @@ const PROGRAMS: ProgramDef[] = [
     channel: 'apt',
     detect: [{ cmd: 'dpkg -s code', user: 'root' }],
     version: { cmd: "dpkg-query -W -f='${Version}' code", user: 'root' },
-    steps: [{ label: 'Actualizar VS Code', cmd: 'apt-get update -qq 2>/dev/null; DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y code', user: 'root' }],
+    steps: [],
   },
   {
     id: 'code-server',
@@ -229,7 +224,7 @@ const PROGRAMS: ProgramDef[] = [
     channel: 'apt',
     detect: [{ cmd: 'dpkg -s code-server', user: 'root' }],
     version: { cmd: "dpkg-query -W -f='${Version}' code-server", user: 'root' },
-    steps: [{ label: 'Actualizar code-server', cmd: 'apt-get update -qq 2>/dev/null; DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y code-server', user: 'root' }],
+    steps: [],
   },
   {
     id: 'cloudflared',
@@ -238,7 +233,7 @@ const PROGRAMS: ProgramDef[] = [
     channel: 'apt',
     detect: [{ cmd: 'command -v cloudflared', user: 'root' }],
     version: { cmd: 'cloudflared --version 2>/dev/null | head -1', user: 'root' },
-    steps: [{ label: 'Actualizar cloudflared', cmd: 'apt-get update -qq 2>/dev/null; DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y cloudflared || cloudflared update', user: 'root' }],
+    steps: [],
   },
   // --- Runtimes & package managers ---
   {
@@ -248,7 +243,7 @@ const PROGRAMS: ProgramDef[] = [
     channel: 'apt',
     detect: [{ cmd: 'dpkg -s nodejs', user: 'root' }],
     version: { cmd: 'node --version', user: 'user' },
-    steps: [{ label: 'Actualizar Node.js', cmd: 'apt-get update -qq 2>/dev/null; DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y nodejs', user: 'root' }],
+    steps: [],
   },
   {
     id: 'bun',
@@ -257,7 +252,7 @@ const PROGRAMS: ProgramDef[] = [
     channel: 'bun',
     detect: [{ cmd: 'command -v bun', user: 'user' }],
     version: { cmd: 'bun --version', user: 'user' },
-    steps: [{ label: 'bun upgrade', cmd: 'bun upgrade', user: 'user' }],
+    steps: [],
   },
   {
     id: 'uv',
@@ -266,10 +261,7 @@ const PROGRAMS: ProgramDef[] = [
     channel: 'uv',
     detect: [{ cmd: 'command -v uv', user: 'user' }],
     version: { cmd: 'uv --version', user: 'user' },
-    steps: [
-      { label: 'uv self update', cmd: 'uv self update', user: 'user' },
-      { label: 'uv tools', cmd: 'uv tool upgrade --all', user: 'user' },
-    ],
+    steps: [],
   },
   {
     id: 'pipx',
@@ -278,7 +270,7 @@ const PROGRAMS: ProgramDef[] = [
     channel: 'pipx',
     detect: [{ cmd: 'command -v pipx', user: 'user' }],
     version: { cmd: 'pipx --version', user: 'user' },
-    steps: [{ label: 'pipx upgrade-all', cmd: 'pipx upgrade-all', user: 'user' }],
+    steps: [],
   },
   {
     id: 'rustup',
@@ -287,7 +279,7 @@ const PROGRAMS: ProgramDef[] = [
     channel: 'cargo',
     detect: [{ cmd: 'command -v rustup', user: 'user' }],
     version: { cmd: 'rustc --version', user: 'user' },
-    steps: [{ label: 'rustup update', cmd: 'rustup update', user: 'user' }],
+    steps: [],
   },
   {
     id: 'cargo-tools',
@@ -295,7 +287,7 @@ const PROGRAMS: ProgramDef[] = [
     icon: 'wrench',
     channel: 'cargo',
     detect: [{ cmd: 'command -v cargo-install-update', user: 'user' }],
-    steps: [{ label: 'cargo install-update', cmd: 'cargo install-update -a', user: 'user' }],
+    steps: [],
   },
   // --- System-wide ---
   {
@@ -305,12 +297,7 @@ const PROGRAMS: ProgramDef[] = [
     desc: 'Todos los paquetes .deb del sistema operativo, incluyendo phased updates.',
     channel: 'apt',
     detect: [{ cmd: 'command -v apt-get', user: 'root' }],
-    updatesCheck: { cmd: "apt list --upgradable 2>/dev/null | tail -n +2 | wc -l", user: 'root' },
-    steps: [
-      { label: 'apt update', cmd: 'apt-get update', user: 'root' },
-      { label: 'apt upgrade', cmd: 'DEBIAN_FRONTEND=noninteractive apt-get -o APT::Get::Always-Include-Phased-Updates=true upgrade -y', user: 'root' },
-      { label: 'autoremove', cmd: 'DEBIAN_FRONTEND=noninteractive apt-get autoremove -y', user: 'root' },
-    ],
+    steps: [],
   },
   {
     id: 'snap',
@@ -319,8 +306,7 @@ const PROGRAMS: ProgramDef[] = [
     desc: 'Firefox, Chromium y otros snaps.',
     channel: 'snap',
     detect: [{ cmd: 'command -v snap', user: 'root' }],
-    updatesCheck: { cmd: "snap refresh --list 2>/dev/null | tail -n +2 | wc -l", user: 'root' },
-    steps: [{ label: 'snap refresh', cmd: 'snap refresh', user: 'root' }],
+    steps: [],
   },
   {
     id: 'docker',
@@ -330,11 +316,7 @@ const PROGRAMS: ProgramDef[] = [
     desc: 'docker.io + containerd + compose (paquetes Ubuntu).',
     detect: [{ cmd: 'dpkg -s docker.io || command -v docker', user: 'root' }],
     version: { cmd: 'docker --version', user: 'root' },
-    steps: [{
-      label: 'apt upgrade docker',
-      cmd: 'apt-get update -qq 2>/dev/null; DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y docker.io docker-compose-v2 containerd runc',
-      user: 'root',
-    }],
+    steps: [],
   },
   {
     id: 'pnpm-globals',
@@ -344,20 +326,18 @@ const PROGRAMS: ProgramDef[] = [
     channel: 'pnpm',
     detect: [{ cmd: 'command -v pnpm', user: 'user' }],
     version: { cmd: 'pnpm --version', user: 'user' },
-    updatesCheck: { cmd: "pnpm outdated -g --format json 2>/dev/null | grep -c '\"latest\"'", user: 'user' },
     auth: {
       check: { cmd: 'pnpm whoami 2>/dev/null', user: 'user' },
       loginHint: 'Ejecutá `pnpm login` en una terminal',
     },
-    steps: [
-      { label: 'Actualizar pnpm', cmd: 'pnpm self-update 2>/dev/null || pnpm add -g pnpm@latest', user: 'user' },
-      { label: 'pnpm update -g', cmd: 'pnpm update -g --latest', user: 'user' },
-    ],
+    steps: [],
   },
 ];
 
+export function programDefinitions(): readonly ProgramDef[] { return INTEGRATIONS; }
+
 export function programById(id: string): ProgramDef | undefined {
-  return PROGRAMS.find((p) => p.id === id);
+  return INTEGRATIONS.find((p) => p.id === id);
 }
 
 // Program id → icon path. Prefer real product icons: vendored Simple Icons
@@ -392,76 +372,9 @@ const BRAND_ICONS: Record<string, string> = {
   'pnpm-globals': '/icons/pnpm.svg',
 };
 
-function semverOf(s: string): string | null {
-  return s.match(/\d+\.\d+\.\d+(?:[-+][0-9a-zA-Z.-]*)?/)?.[0] ?? null;
-}
-
-// a > b for dotted numeric versions (1.2.10 > 1.2.9)
-function newerThan(a: string, b: string): boolean {
-  const pa = a.split(/[.+-]/).map((x) => parseInt(x, 10) || 0);
-  const pb = b.split(/[.+-]/).map((x) => parseInt(x, 10) || 0);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const d = (pa[i] || 0) - (pb[i] || 0);
-    if (d !== 0) return d > 0;
-  }
-  return false;
-}
-
-// --- pnpm minimumReleaseAge ---
-// pnpm ≥11 defaults to a 24h minimum release age (anti supply-chain): a bare
-// `pkg@latest` resolves to the newest version OLDER than that window, not the
-// registry's dist-tag. `npm view` ignores the policy, so the card used to show
-// "current → latest" for a version pnpm refused to install — updates looked
-// green but nothing changed. We mirror the policy: read the resolved setting
-// inside the global pnpm workspace (where minimumReleaseAgeExclude lives) and
-// pick the newest version whose publish time clears the window.
-interface ReleasePolicy { minutes: number; excludes: string[] }
-let policyCache: { at: number; pol: ReleasePolicy } | null = null;
-
-async function pnpmReleasePolicy(): Promise<ReleasePolicy> {
-  if (policyCache && Date.now() - policyCache.at < 10 * 60_000) return policyCache.pol;
-  const pol: ReleasePolicy = { minutes: 0, excludes: [] };
-  const r = await hostExec(
-    'v=$(pnpm --version 2>/dev/null); ' +
-    'g=$(ls -d "$PNPM_HOME"/global/*/ 2>/dev/null | head -1); m=""; e=""; ' +
-    'if [ -n "$g" ]; then m=$(cd "$g" && pnpm config get minimumReleaseAge 2>/dev/null); ' +
-    'e=$(cd "$g" && pnpm config get minimumReleaseAgeExclude 2>/dev/null); fi; ' +
-    "printf '%s\\n--POLICY--\\n%s\\n--POLICY--\\n%s\\n' \"$v\" \"$m\" \"$e\"",
-    { user: 'user', timeoutMs: 25_000 }
-  );
-  const [ver, cfg, exRaw] = r.stdout.split('\n--POLICY--\n');
-  if (parseInt((ver || '').trim().split('.')[0], 10) >= 11) pol.minutes = 1440;
-  const cfgN = parseFloat((cfg || '').trim());
-  if (Number.isFinite(cfgN)) pol.minutes = cfgN;
-  for (const m of (exRaw || '').matchAll(/"([^"\n]+)"/g)) pol.excludes.push(m[1]);
-  for (const m of (exRaw || '').matchAll(/^\s*-\s*(\S+)\s*$/gm)) pol.excludes.push(m[1]);
-  policyCache = { at: Date.now(), pol };
-  return pol;
-}
-
-// The version `pnpm add -g <pkg>@latest` would actually install right now.
-async function npmLatestInstallable(pkg: string, pol: ReleasePolicy): Promise<string | null> {
-  if (!/^[@a-zA-Z0-9._/-]+$/.test(pkg)) return null;
-  if (pol.minutes <= 0 || pol.excludes.includes(pkg)) {
-    const r = await hostExec(`pnpm view ${pkg} version 2>/dev/null`, { user: 'user', timeoutMs: 30_000 });
-    return semverOf(r.stdout.trim());
-  }
-  const r = await hostExec(`pnpm view ${pkg} time --json 2>/dev/null`, { user: 'user', timeoutMs: 30_000 });
-  let times: Record<string, string>;
-  try { times = JSON.parse(r.stdout); } catch { return null; }
-  const cutoff = Date.now() - pol.minutes * 60_000;
-  let best: string | null = null;
-  for (const [ver, iso] of Object.entries(times)) {
-    if (ver === 'created' || ver === 'modified' || ver.includes('-')) continue; // dist-tag targets are stable
-    const allowed = pol.excludes.includes(`${pkg}@${ver}`) || Date.parse(iso) <= cutoff;
-    if (allowed && (!best || newerThan(ver, best))) best = ver;
-  }
-  return best;
-}
-
-async function programMetadata(p: ProgramDef) {
+async function programMetadata(p: ProgramDef,inspectVersion=true) {
   const [v, a] = await Promise.all([
-    p.version ? hostExec(p.version.cmd, { user: p.version.user, timeoutMs: 15_000 }) : null,
+    p.version && inspectVersion ? hostExec(p.version.cmd, { user: p.version.user, timeoutMs: 15_000 }) : null,
     p.auth ? hostExec(p.auth.check.cmd, { user: p.auth.check.user, timeoutMs: 15_000 }) : null,
   ]);
   return {
@@ -476,8 +389,7 @@ async function programMetadata(p: ProgramDef) {
 }
 
 export async function detectPrograms(checkUpdates = false, inspect = true, probe = hostExec): Promise<ProgramView[]> {
-  const policy = checkUpdates ? pnpmReleasePolicy().catch(() => ({minutes:0,excludes:[] as string[]})) : null;
-  return Promise.all(PROGRAMS.map(async p => {
+  return Promise.all(INTEGRATIONS.map(async p => {
     let installed = true;
     for (const d of p.detect) {
       if (!(await probe(d.cmd, { user:d.user, timeoutMs:15_000 })).ok) { installed=false; break; }
@@ -491,15 +403,6 @@ export async function detectPrograms(checkUpdates = false, inspect = true, probe
     };
     if (!installed || !inspect) return view;
     Object.assign(view, await programMetadata(p));
-    if (checkUpdates && p.updatesCheck) {
-      const r=await hostExec(p.updatesCheck.cmd,{user:p.updatesCheck.user,timeoutMs:60_000});
-      const n=r.ok ? parseInt(r.stdout.trim(),10) : 0;
-      if(n>0)view.pendingUpdates=String(n);
-    }
-    if (checkUpdates && p.npmPkg) {
-      const latest=await npmLatestInstallable(p.npmPkg,await policy!);
-      if(latest && view.version && newerThan(latest,semverOf(view.version) || '0.0.0'))view.latestVersion=latest;
-    }
     return view;
   }));
 }
@@ -511,219 +414,53 @@ export async function detectPrograms(checkUpdates = false, inspect = true, probe
 // data immediately and recompute in the background.
 let progCache: { at: number; data: ProgramView[] } | null = null;
 let progGeneration = 0;
-let updateInflight: Promise<void> | null = null;
 let metadataInflight: Promise<void> | null = null;
-let updateCheckedAt = 0;
 let progInflight: Promise<ProgramView[]> | null = null;
 const PROG_TTL_MS = 60_000;
-const PROG_STALE_MS = 10 * 60_000;
 
 export function invalidateProgramsCache(): void {
   progGeneration++;
   progCache = null;
   progInflight = null;
   metadataInflight = null;
-  updateInflight = null;
-  updateCheckedAt = 0;
 }
 
 export function peekPrograms(): ProgramView[] { return progCache?.data || []; }
-export function programsStatus() { return { checkingMetadata: !!metadataInflight, checkingUpdates: !!updateInflight, checkedAt: updateCheckedAt }; }
+export function programsStatus() { return { checkingMetadata: !!metadataInflight, checkingUpdates: false, checkedAt: progCache?.at || 0 }; }
 function hydratePrograms(data: ProgramView[], generation: number): void {
   const flight=Promise.all(data.filter(p=>p.installed && p.metadataPending).map(async view=>{
-    const next=await programMetadata(programById(view.id)!);
-    if(generation===progGeneration && progCache?.data===data)Object.assign(view,next);
-  })).then(()=>{
-    if(generation===progGeneration && progCache?.data===data)checkUpdates();
-  }).finally(()=>{if(metadataInflight===flight)metadataInflight=null;});
+    const next=await programMetadata(programById(view.id)!,false);
+    if(generation===progGeneration && progCache?.data===data)Object.assign(view,{auth:next.auth,metadataPending:false});
+  })).then(()=>{}).finally(()=>{if(metadataInflight===flight)metadataInflight=null;});
   metadataInflight=flight;
-}
-function checkUpdates(): void {
-  if (updateInflight || !progCache || Date.now() - updateCheckedAt < 5 * 60_000) return;
-  const generation = progGeneration;
-  const data = progCache.data;
-  const flight = (async () => {
-    const policy = await pnpmReleasePolicy().catch(() => ({ minutes: 0, excludes: [] as string[] }));
-    await Promise.all(data.filter(p => p.installed).map(async view => {
-      const def = programById(view.id)!;
-      const next = { ...view };
-      if (def.npmPkg) {
-        const latest = await npmLatestInstallable(def.npmPkg, policy);
-        const current = view.version ? semverOf(view.version) : null;
-        if (latest && current) next.latestVersion = newerThan(latest, current) ? latest : undefined;
-      }
-      if (def.updatesCheck) {
-        const r = await hostExec(def.updatesCheck.cmd, { user: def.updatesCheck.user, timeoutMs: 60_000 });
-        if (r.ok) { const n = parseInt(r.stdout.trim(), 10); next.pendingUpdates = n > 0 ? String(n) : undefined; }
-      }
-      if (generation === progGeneration && progCache?.data === data) Object.assign(view, next);
-    }));
-    if (generation === progGeneration && progCache?.data === data) updateCheckedAt = Date.now();
-  })().catch(() => {}).finally(() => { if(updateInflight===flight)updateInflight = null; });
-  updateInflight=flight;
 }
 function refreshPrograms(): Promise<ProgramView[]> {
   if (!progInflight) {
     const generation = progGeneration;
-    const previous = new Map(peekPrograms().map(p=>[p.id,p]));
-    const flight = detectPrograms(false, false).then(data => {
-      for (const p of data) { const old=previous.get(p.id);if(old?.installed && p.installed){p.version=old.version;p.auth=old.auth;} }
-      if (generation === progGeneration) { progCache = { at: Date.now(), data }; hydratePrograms(data,generation); }
+    const flight = import('./software').then(async ({software}) => {
+      const inventory = await software.get();
+      const data: ProgramView[] = INTEGRATIONS.map(def => {
+        const records = inventory.installations.filter(p => p.integrationId === def.id);
+        const selected = records.find(p => p.user === HOST_USER && p.scope === 'user') || records[0];
+        return {id:def.id,name:def.name,desc:def.desc,icon:def.icon,channel:(selected?.manager || def.channel) as ProgramView['channel'],steps:[],installed:!!selected,version:selected?.version || undefined,brandIcon:selected?.iconUrl || BRAND_ICONS[def.id],metadataPending:!!selected && !!def.auth,installable:!!def.npmPkg && def.channel==='pnpm' && def.id!=='opencode',packageName:def.npmPkg,latestVersion:records.length===1&&selected?.canUpdate?selected.targetVersion:undefined};
+      });
+      if(generation === progGeneration) {progCache={at:Date.now(),data};hydratePrograms(data,generation);}
       return data;
-    }).finally(() => { if (progInflight === flight) progInflight = null; });
-    progInflight = flight;
+    }).finally(() => {if(progInflight===flight)progInflight=null;});
+    progInflight=flight;
   }
   return progInflight;
 }
-
-export async function getPrograms(force = false): Promise<ProgramView[]> {
-  if (force) updateCheckedAt = 0;
-  if (!force && progCache) {
-    const age = Date.now() - progCache.at;
-    if (age < PROG_TTL_MS) { if(!metadataInflight)checkUpdates(); return progCache.data; }
-    if (age < PROG_STALE_MS) {
-      // Serve stale instantly; refresh for the next caller.
-      refreshPrograms().catch(() => {});
-      return progCache.data;
-    }
-  }
+// Accounts remain optional integrations. Installation and update state comes
+// exclusively from native package records, not from this list of integrations.
+export async function getPrograms(force=false):Promise<ProgramView[]> {
+  if(force)invalidateProgramsCache();
+  if(progCache && Date.now()-progCache.at<PROG_TTL_MS)return progCache.data;
   return refreshPrograms();
 }
+export function warmProgramsCache():void {refreshPrograms().catch(()=>{});}
 
-// Warm the cache at server start so the first Programs/Agents page load
-// doesn't pay the full detection cost.
-export function warmProgramsCache(): void {
-  refreshPrograms().catch(() => {});
-}
-
-// --- Installed programs inventory ---
-
-export async function listDesktopApps(): Promise<DesktopApp[]> {
-  const apps: DesktopApp[] = [];
-  const dirs = [
-    `${HOST_FS}/usr/share/applications`,
-    `${HOST_FS}/var/lib/snapd/desktop/applications`,
-    `${HOST_FS}/var/lib/flatpak/exports/share/applications`,
-    `${HOST_FS}${HOST_USER === 'root' ? '/root' : `/home/${HOST_USER}`}/.local/share/applications`,
-    `${HOST_FS}${HOST_USER === 'root' ? '/root' : `/home/${HOST_USER}`}/.local/share/flatpak/exports/share/applications`,
-  ];
-  const seen = new Set<string>();
-  for (const dir of dirs) {
-    let files: string[] = [];
-    try {
-      files = await readdir(dir);
-    } catch {
-      continue;
-    }
-    for (const file of files) {
-      if (!file.endsWith('.desktop')) continue;
-      try {
-        const content = await readHostFile(path.join(dir.slice(HOST_FS.length), file));
-        const name = content.match(/^Name=(.+)$/m)?.[1]?.trim();
-        const exec = content.match(/^Exec=(.+)$/m)?.[1]?.trim();
-        const icon = content.match(/^Icon=(.+)$/m)?.[1]?.trim();
-        const noDisplay = /^NoDisplay=true/m.test(content);
-        const hidden = /^Hidden=true/m.test(content);
-        const isSnap = dir.includes('snapd');
-        if (!name || noDisplay || hidden) continue;
-        if (seen.has(name)) continue;
-        seen.add(name);
-        apps.push({
-          name,
-          icon,
-          exec: exec?.replace(/\s+%[a-zA-Z]/g, ''),
-          source: isSnap ? 'snap' : 'desktop',
-          packageName: file.replace(/\.desktop$/, ''),
-        });
-      } catch { /* unreadable file */ }
-    }
-  }
-  apps.sort((a, b) => a.name.localeCompare(b.name));
-  return apps;
-}
-
-export async function installedPackagesSummary(): Promise<{
-  apt: { total: number };
-  snaps: { name: string; version: string }[];
-  pnpmGlobals: { name: string; version: string }[];
-  bunGlobals: { name: string; version: string }[];
-}> {
-  const [aptRes, snapRes, pnpmRes, bunRes] = await Promise.all([
-    hostExec("dpkg-query -f='${binary:Package}\n' -W 2>/dev/null | wc -l", { user: 'root', timeoutMs: 30_000 }),
-    hostExec('snap list 2>/dev/null | tail -n +2', { user: 'root', timeoutMs: 15_000 }),
-    hostExec('pnpm ls -g --depth=0 --json 2>/dev/null || echo "[]"', { user: 'user', timeoutMs: 30_000 }),
-    hostExec('bun pm ls -g 2>/dev/null', { user: 'user', timeoutMs: 30_000 }),
-  ]);
-  const snaps = snapRes.stdout
-    .split('\n')
-    .filter(Boolean)
-    .map((l) => {
-      const p = l.split(/\s+/);
-      return { name: p[0], version: p[1] || '' };
-    });
-  let pnpmGlobals: { name: string; version: string }[] = [];
-  const seenGlobal = new Set<string>();
-  const pushGlobal = (name: string, version: string) => {
-    if (!name || seenGlobal.has(name)) return;
-    seenGlobal.add(name);
-    pnpmGlobals.push({ name, version });
-  };
-  try {
-    // `pnpm ls -g --depth=0 --json` → [{ path, private, dependencies: { name: {version,...} } }]
-    // but the dep dict can also appear under `unsavedDependencies` or nested
-    // inside other objects, so walk the whole structure.
-    const ls = JSON.parse(pnpmRes.stdout);
-    const visit = (node: unknown) => {
-      if (!node || typeof node !== 'object') return;
-      if (Array.isArray(node)) {
-        for (const item of node) visit(item);
-        return;
-      }
-      for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
-        if (
-          (key === 'dependencies' || key === 'unsavedDependencies') &&
-          value && typeof value === 'object' && !Array.isArray(value)
-        ) {
-          for (const [name, info] of Object.entries(value as Record<string, unknown>)) {
-            const version = info && typeof info === 'object'
-              ? String((info as Record<string, unknown>).version || '')
-              : typeof info === 'string' ? info : '';
-            pushGlobal(name, version);
-          }
-        } else if (value && typeof value === 'object') {
-          visit(value);
-        }
-      }
-    };
-    visit(ls);
-  } catch {
-    // Fallback for non-JSON output: tree lines like `+ pkg@1.2.3` / `- pkg 1.2.3`.
-    for (const line of pnpmRes.stdout.split('\n')) {
-      const m = line.match(/^\s*(?:[+\-`│├└]*\s*)?(\S+)\s*$/);
-      const token = m?.[1];
-      if (!token || token.endsWith(':') || token === 'Legend:') continue;
-      const at = token.lastIndexOf('@');
-      if (at > 0) pushGlobal(token.slice(0, at), token.slice(at + 1));
-      else pushGlobal(token, '');
-    }
-  }
-  const bunGlobals: { name: string; version: string }[] = [];
-  // `bun pm ls -g` prints tree lines like `├── pkg@1.2.3` / `└── pkg@1.2.3`
-  for (const line of bunRes.stdout.split('\n')) {
-    const m = line.match(/[├└]──\s+(\S+)/);
-    if (!m) continue;
-    const token = m[1];
-    const at = token.lastIndexOf('@');
-    if (at > 0) bunGlobals.push({ name: token.slice(0, at), version: token.slice(at + 1) });
-    else bunGlobals.push({ name: token, version: '' });
-  }
-  return {
-    apt: { total: parseInt(aptRes.stdout.trim(), 10) || 0 },
-    snaps,
-    pnpmGlobals,
-    bunGlobals,
-  };
-}
+// Legacy package search and icon endpoints used by optional integrations.
 
 export async function searchAptPackages(filter: string): Promise<{ name: string; version: string }[]> {
   const safe = filter.replace(/[^a-zA-Z0-9._+-]/g, '');

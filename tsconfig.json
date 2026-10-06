@@ -8,6 +8,7 @@
     "strict": false,
     "noEmit": true,
     "allowJs": true,
+    "resolveJsonModule": true,
     "checkJs": false
   },
   "include": ["src/**/*.ts", "scripts/**/*.ts"],

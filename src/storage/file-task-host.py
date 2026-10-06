@@ -81,7 +81,7 @@ def rename(src,name,dst,new):
 def snapshot(parent,name):
  result=[];start=time.monotonic();device=os.stat(name,dir_fd=parent,follow_symlinks=False).st_dev
  def walk(fd,n,rel,depth):
-  if len(result)>=10000 or depth>40 or time.monotonic()-start>15:raise Guard('Árbol excedido: seleccioná una carpeta más pequeña')
+  if len(result)>=300000 or depth>40 or time.monotonic()-start>(15 if req.get('action')=='prepare' else 120):raise Guard('Árbol excedido: seleccioná una carpeta más pequeña')
   s=os.stat(n,dir_fd=fd,follow_symlinks=False)
   if s.st_dev!=device:raise Guard('El árbol cruza un montaje; seleccioná cada filesystem por separado')
   if not (stat.S_ISREG(s.st_mode) or stat.S_ISDIR(s.st_mode) or stat.S_ISLNK(s.st_mode)):raise Guard('El árbol contiene archivos especiales; operación bloqueada')

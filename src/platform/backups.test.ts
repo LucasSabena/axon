@@ -54,3 +54,42 @@ test('a chosen repository stores encrypted snapshots separately and survives pol
   const rejected=await wait(home,wrong);expect(rejected.state).toBe('failed');expect(rejected.message).toContain('desconectado');expect(await Bun.file(path.join(missingRepo,'config')).exists()).toBe(false);
  }finally{await rm(home,{recursive:true,force:true});}
 },120000);
+
+test('multiple folders include hidden and build files by default; browser and selective recovery handle literal wildcard names',async()=>{
+ const home=await mkdtemp(path.join(tmpdir(),'axon-backup-selected-')),a=path.join(home,'documents'),b=path.join(home,'photos'),repository=path.join(home,'disk','backups');
+ await mkdir(path.join(a,'dist'),{recursive:true});await mkdir(b);await writeFile(path.join(a,'.private'),'Hidden original');await writeFile(path.join(a,'dist','result.txt'),'Build output');await writeFile(path.join(a,'report[1]*.txt'),'Chosen original');await writeFile(path.join(a,'report1x.txt'),'Must not recover');await writeFile(path.join(b,'picture.txt'),'Picture');
+ try{
+  const id=crypto.randomUUID();await backupWorker({action:'start',home,id,policy:{id:'selected',kind:'files',source:a,sources:[a,b],repository,exclusions:[],enabled:true}});const backed=await wait(home,id);expect(backed.state).toBe('verified');expect(backed.files).toBe(5);
+  const listing=await backupWorker({action:'browse',home,id,folder:a});expect(listing.entries.map((e:any)=>e.name)).toContain('report[1]*.txt');expect(listing.entries.map((e:any)=>e.name)).toContain('.private');
+  await writeFile(path.join(a,'report[1]*.txt'),'Current original');const restoredId=crypto.randomUUID();await backupWorker({action:'start',home,id:restoredId,mode:'restore',originalId:id,paths:[path.join(a,'report[1]*.txt'),path.join(a,'dist')]});
+  const restored=await wait(home,restoredId);expect(restored.state).toBe('verified');expect(await readFile(path.join(restored.restoredPath,a.slice(1),'report[1]*.txt'),'utf8')).toBe('Chosen original');expect(await readFile(path.join(restored.restoredPath,a.slice(1),'dist/result.txt'),'utf8')).toBe('Build output');
+  expect(await Bun.file(path.join(restored.restoredPath,a.slice(1),'report1x.txt')).exists()).toBe(false);expect(await readFile(path.join(a,'report[1]*.txt'),'utf8')).toBe('Current original');
+  const missing=crypto.randomUUID();await backupWorker({action:'start',home,id:missing,mode:'restore',originalId:id,paths:[a+'/absent.txt']});expect((await wait(home,missing)).state).toBe('failed');
+ }finally{await rm(home,{recursive:true,force:true});}
+},120000);
+
+test('retention forgets only old verified versions of this plan after a new verified capture, preserving unverified and unrelated versions',async()=>{
+ const home=await mkdtemp(path.join(tmpdir(),'axon-backup-retention-')),source=path.join(home,'documents'),repository=path.join(home,'disk','backups');await mkdir(source);await writeFile(source+'/note.txt','Original');
+ try{
+  const initial=crypto.randomUUID();await backupWorker({action:'start',home,id:initial,policy:{id:'retention',kind:'files',source,repository,exclusions:[],enabled:true}});expect((await wait(home,initial)).state).toBe('verified');
+  const base=home+'/.local/share/axon/backups',env={...process.env,RESTIC_REPOSITORY:repository,RESTIC_PASSWORD_FILE:base+'/repository-password'};
+  const command=async(args:string[])=>{const p=Bun.spawn(['restic',...args],{env,stdout:'pipe',stderr:'pipe'});const out=await new Response(p.stdout).text();if(await p.exited)throw new Error(await new Response(p.stderr).text());return out;};
+  const old=async(tag:string)=>{const lines=(await command(['backup','--json','--time','2020-01-01 00:00:00','--tag',tag,source])).trim().split('\n');return JSON.parse(lines.at(-1)!).snapshot_id;};
+  const verified=await old('axon-policy:retention'),unverified=await old('axon-policy:retention'),other=await old('axon-policy:other');
+  await command(['restore',verified,'--target',home+'/proof','--verify']);
+  await writeFile(base+'/jobs/'+crypto.randomUUID()+'.json',JSON.stringify({mode:'backup',state:'verified',snapshot:verified,policy:{id:'retention',repository}}),{mode:0o600});
+  const next=crypto.randomUUID();await backupWorker({action:'start',home,id:next,policy:{id:'retention',kind:'files',source,repository,exclusions:[],retentionDays:30,enabled:true}});const result=await wait(home,next);expect(result.state).toBe('verified');expect(result.forgottenSnapshots).toContain(verified);
+  const remaining=JSON.parse(await command(['snapshots','--json'])).map((s:any)=>s.id);expect(remaining).not.toContain(verified);expect(remaining).toContain(unverified);expect(remaining).toContain(other);expect(remaining).toContain(result.snapshot);
+ }finally{await rm(home,{recursive:true,force:true});}
+},120000);
+
+test('large-backup verification reads all encrypted data and exercises recovery when a second full copy does not fit on the server',async()=>{
+ const home=await mkdtemp(path.join(tmpdir(),'axon-backup-stream-')),source=home+'/documents',repository=home+'/disk/backups';await mkdir(source);await writeFile(source+'/note.txt','Verified bytes');
+ try{
+  const originalId=crypto.randomUUID(),policy={id:'stream',kind:'files',source,repository,exclusions:[],enabled:true};await backupWorker({action:'start',home,id:originalId,policy});const original=await wait(home,originalId);expect(original.state).toBe('verified');
+  const id=crypto.randomUUID(),receipt=home+'/.local/share/axon/backups/jobs/'+id+'.json';await writeFile(receipt,JSON.stringify({id,policy,mode:'verify',snapshot:original.snapshot,bytes:original.bytes,state:'queued'}),{mode:0o600});
+  const python="import sys, importlib.util, collections, json; spec=importlib.util.spec_from_file_location('backup',sys.argv[1]); module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); module.shutil.disk_usage=lambda path: collections.namedtuple('Space','total used free')(100,99,1); request=json.load(sys.stdin); module.worker(request)";
+  const worker=Bun.spawn(['python3','-c',python,path.resolve('src/platform/backup-host.py')],{stdin:'pipe',stdout:'pipe',stderr:'pipe'});worker.stdin.write(JSON.stringify({id,home}));worker.stdin.end();expect(await worker.exited).toBe(0);
+  const result=JSON.parse(await readFile(receipt,'utf8'));expect(result.state).toBe('verified');expect(result.verification).toBe('full-data-read-and-file-recovery');expect(result.recoveredSample).toBe(source+'/note.txt');expect(await readFile(source+'/note.txt','utf8')).toBe('Verified bytes');expect(await Bun.file(home+'/.local/share/axon/backups/verification/'+id+'/documents/note.txt').exists()).toBe(false);
+ }finally{await rm(home,{recursive:true,force:true});}
+},120000);

@@ -1,5 +1,5 @@
 import {test,expect} from 'bun:test';
-import {STORE_APPS,storeSteps} from './app-store';
+import {STORE_APPS,storeSteps,detectInstaller,installerSlug,installerSteps} from './app-store';
 import '../public/themes.js';
 import {Hono} from 'hono';
 import {registerStoreRoutes,removalSimulation} from './app-store';
@@ -19,6 +19,40 @@ test('system store recipes install on the host with fixed package names and reta
  }
  expect(()=>storeSteps(STORE_APPS.find(a=>a.id==='davinci')!,'install')).toThrow('fabricante');
  expect(storeSteps(STORE_APPS.find(a=>a.id==='ffmpeg')!,'remove')[0].cmd).toContain('apt-get remove');
+});
+test('uploaded installers are detected by extension, sniffed content, and foreign formats are rejected',()=>{
+ expect(detectInstaller('Brave.deb').kind).toBe('deb');
+ expect(detectInstaller('app.AppImage').kind).toBe('appimage');
+ expect(detectInstaller('x.flatpakref').kind).toBe('flatpak');
+ expect(detectInstaller('programa.tar.gz').kind).toBe('archive');
+ expect(detectInstaller('programa.zip').kind).toBe('archive');
+ expect(detectInstaller('DaVinci_Resolve_Linux.run').kind).toBe('run');
+ expect(detectInstaller('setup.sh').kind).toBe('run');
+ expect(detectInstaller('paquete.rpm').kind).toBe('rpm');
+ expect(detectInstaller('app.snap').kind).toBe('snap');
+ expect(detectInstaller('setup.exe').error).toBeTruthy();
+ expect(detectInstaller('app.dmg').error).toBeTruthy();
+ expect(detectInstaller('sin-extension').kind).toBeNull();
+ expect(detectInstaller('sin-extension','ELF 64-bit LSB pie executable, x86-64').kind).toBe('run');
+ expect(detectInstaller('sin-extension','Debian binary package (format 2.0)').kind).toBe('deb');
+ expect(detectInstaller('datos','ASCII text').error).toBeTruthy();
+});
+test('installer steps run as root, keep the file on failure, and honor the forced mode',()=>{
+ const deb=installerSteps("/home/u/Descargas/Fast App.deb",'deb');
+ expect(deb.every(s=>s.user==='root'&&s.group==='store')).toBe(true);
+ expect(deb[0].cmd).toContain("apt-get install -y -- '/home/u/Descargas/Fast App.deb'");
+ expect(deb.at(-1)!.cmd).toContain('rm -f');
+ const run=installerSteps('/tmp/x/instalar.run','run');
+ expect(run[1].cmd).toContain('< /dev/null');expect(run[1].cmd).not.toContain('yes |');
+ const forced=installerSteps('/tmp/x/instalar.run','run',{force:true});
+ expect(forced[1].cmd).toContain('yes |');
+ const sh=installerSteps('/tmp/x/setup.sh','run');expect(sh[1].cmd).toContain('bash');
+ const app=installerSteps('/tmp/x/Mi_App.AppImage','appimage');
+ expect(app[0].cmd).toContain('/opt/appimages/mi-app.AppImage');expect(app[0].cmd).toContain('/usr/share/applications/mi-app.desktop');
+ const zip=installerSteps('/tmp/x/tool.zip','archive');
+ expect(zip[0].cmd).toContain('unzip');expect(zip[1].cmd).toContain('/opt/tool');
+ expect(installerSlug('DaVinci_Resolve_20.2_Linux.run')).toBe('davinci-resolve-20-2-linux');
+ expect(installerSlug('x.tar.gz')).toBe('x');
 });
 function luminance(hex:string){const rgb=hex.slice(1).match(/../g)!.map(x=>parseInt(x,16)/255).map(x=>x<=0.04045?x/12.92:((x+.055)/1.055)**2.4);return rgb[0]*.2126+rgb[1]*.7152+rgb[2]*.0722;}
 function contrast(a:string,b:string){const x=luminance(a),y=luminance(b);return(Math.max(x,y)+.05)/(Math.min(x,y)+.05);}

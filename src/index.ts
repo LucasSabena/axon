@@ -20,7 +20,7 @@ import { loadConfig, saveConfig } from './config';
 import { domainsForPorts, domainsForProject } from './domain-associations';
 import { validateSettings } from './settings-validation';
 import { getServerStats, getServerHosts } from './stats';
-import { setHostUser, hostExec, hostToContainer, hostSpawnInteractive } from './host';
+import { HOST_USER, setHostUser, hostExec, hostToContainer, hostSpawnInteractive } from './host';
 import {
   configurePorts,
   listPortProcesses,
@@ -34,8 +34,6 @@ import {
   invalidateProgramsCache,
   warmProgramsCache,
   programsStatus,
-  installedPackagesSummary,
-  listDesktopApps,
   programById,
   resolveIcon,
   searchAptPackages,
@@ -67,6 +65,7 @@ import {
   listDnsRecords,
   listAllDnsRecords,
   getRemoteTunnelConfig,
+  purgeCachePrefixes,
 } from './cloudflare';
 import type { AppConfig, DomainMapping, DomainStatus, Project } from './types';
 import { notify, setNotifyUrl, notifyConfigured } from './notify';
@@ -74,6 +73,7 @@ import { generateTotpSecret, verifyTotp, totpUri } from './totp';
 import { loadHeartbeats, recordHeartbeat, lastState, allHeartbeats, uptimePct, pruneHeartbeats } from './heartbeats';
 import { registerFilesRoutes } from './files';
 import { registerNavigationRoutes } from './navigation';
+import { privateApiResponses } from './response-cache';
 import { registerEventRoutes, loadEvents, recordEvent } from './events';
 import { registerAlertRoutes, startAlertLoop } from './alerts';
 import { registerScriptRoutes, startScriptScheduler } from './scripts';
@@ -90,7 +90,8 @@ import {MigrationRetirement} from './migration-retirement';
 import {HomepageMigration} from './homepage-migration';
 import {ComposeReleases} from './compose-releases';
 import { registerComposeRoutes } from './compose';
-import { registerStoreRoutes } from './app-store';
+import { registerStoreRoutes, invalidateStoreCache } from './app-store';
+import { software, registerSoftwareRoutes, runSoftwareJob, softwareCommand, softwareConfig, softwareInstallSpec } from './software';
 import { registerAgentRoutes, listAgents, invalidateAgentsCache, agentPathReferences } from './agents';
 import { registerAgentAccounts } from './agent-accounts';
 import { registerAgentUsage } from './agent-usage';
@@ -121,6 +122,9 @@ import { contextWorker } from './agent-context';
 import { consumptionWorker } from './agent-consumption';
 import { Backups, registerBackups, hostDataDirectory } from './platform/backups';
 import { Desktop, registerDesktop } from './platform/desktop';
+import { registerCloudRoutes, createCloudProviders } from './cloud/routes';
+import { CloudVault } from './cloud/vault';
+import { CloudAgents } from './cloud/agents';
 const maintenanceQaRoot = await qaRoot();
 
 const PORT = parseInt(process.env.PORT || '3457', 10);
@@ -149,7 +153,11 @@ const platformHome = maintenanceQaRoot ? async() => maintenanceQaRoot : fileHost
 const platformBackups = new Backups(platformStore,projectHub,platformHome,() => hostDataDirectory(path.dirname(process.env.CONFIG_PATH || '/app/data/config.json')));
 await platformBackups.ensureConfiguration();
 const platformDesktop = new Desktop(platformHome,platformStore);
-const platformDependencies = {store:platformStore,hub:projectHub,diagnostics:projectDiagnostics,logs:(id:string) => projectLogs(projectHub.project(id),200),backups:{list:(id:string) => platformBackups.list(id),run:(id:string,actor:string,credentialId?:string) => platformBackups.forProject(id,actor,credentialId)}};
+const cloudVaultDir=path.join(path.dirname(process.env.CONFIG_PATH || '/app/data/config.json'),'cloud');
+const cloudVault=new CloudVault(cloudVaultDir);
+const cloudProviders=createCloudProviders(platformStore,cloudVault);
+const cloudAgents=new CloudAgents(platformStore,cloudProviders,cloudVault);
+const platformDependencies = {cloud:cloudAgents,cloudLocalUrl:'http://127.0.0.1:'+PORT,store:platformStore,hub:projectHub,diagnostics:projectDiagnostics,logs:(id:string) => projectLogs(projectHub.project(id),200),backups:{list:(id:string) => platformBackups.list(id),run:(id:string,actor:string,credentialId?:string) => platformBackups.forProject(id,actor,credentialId)}};
 
 // ---------- Heartbeat monitor ----------
 // Lightweight public probe per domain every 90s; records history and fires a
@@ -191,6 +199,7 @@ setInterval(() => { heartbeatTick().catch(() => {}); }, HB_INTERVAL_MS).unref();
 heartbeatTick().catch(() => {});
 
 const app = new Hono();
+app.use('/api/*', privateApiResponses);
 registerQaBoundary(app, maintenanceQaRoot);
 
 // gzip text responses (JS/CSS/HTML/JSON ~500KB → ~150KB). Skips
@@ -351,7 +360,7 @@ app.use('/api/*', async (c,next)=>{if(/^\/api\/(storage|maintenance|home|compose
 app.route('/api/v1',machineApi(platformDependencies));
 app.get('/api/health', c => {
   c.header('Cache-Control', 'no-store');
-  return c.json({ ok: true, version: process.env.AXON_VERSION || '1.1.0', revision: process.env.AXON_REVISION || 'development' });
+  return c.json({ ok: true, version: process.env.AXON_VERSION || '1.2.0', revision: process.env.AXON_REVISION || 'development' });
 });
 app.use('/api/*', requireAuth);
 app.use('/api/*',async(c,next)=>{
@@ -543,29 +552,21 @@ app.get('/api/programs', async (c) => {
   return c.json({ ok: true, programs, ...programsStatus() });
 });
 
-app.post('/api/programs/:id/install', c => {
+app.post('/api/programs/:id/install', async c => {
+  try {
   const def = programById(c.req.param('id'));
   if (!def?.npmPkg || def.channel !== 'pnpm' || def.id === 'opencode' || !/^[@a-zA-Z0-9._/-]+$/.test(def.npmPkg)) return fail(c, 400, 'Este programa no tiene instalación gestionada');
   const active = listJobs().find(j => j.status === 'running' && (j.title === def.name || j.title === `Instalar ${def.name}`));
   if (active) return c.json({ ok: true, job: active });
   invalidateProgramsCache(); invalidateAgentsCache();
-  const job = runJob(`Instalar ${def.name}`, [{ label: `Instalar ${def.npmPkg}`, cmd: `pnpm add -g ${shq(def.npmPkg)}`, user: 'user', group: def.name }]);
+  const spec = await softwareInstallSpec(def.npmPkg);
+  const cfg=await softwareConfig();const cmd=await softwareCommand({action:'install-global',user:HOST_USER,settings:cfg.contexts?.[HOST_USER]||{},spec});
+  const job = runSoftwareJob(`Instalar ${def.name}`, [{ label: `Instalar y verificar ${def.npmPkg}`, cmd,displayCommand:'pnpm add -g '+spec,user:'root',group:'software:pnpm'}]);
   return c.json({ ok: true, job });
+  }catch(e){return fail(c,409,(e as Error).message);}
 });
 
-app.get('/api/programs/installed', async (c) => {
-  const [desktopApps, packages] = await Promise.all([
-    listDesktopApps().catch(() => []),
-    installedPackagesSummary().catch(() => ({ apt: { total: 0 }, snaps: [], pnpmGlobals: [] })),
-  ]);
-  // Resolve icon availability server-side so the frontend never requests
-  // /api/icons/<name> that would 404 (console noise on every render).
-  const resolved = await Promise.all(
-    desktopApps.map(async (a: { icon?: string | null }) =>
-      a.icon && !(await resolveIcon(a.icon)) ? { ...a, icon: null } : a),
-  );
-  return c.json({ ok: true, desktopApps: resolved, packages });
-});
+app.get('/api/programs/installed', async c => c.json(await software.get()));
 
 app.get('/api/programs/packages', async (c) => {
   const q = c.req.query('q') || '';
@@ -573,17 +574,14 @@ app.get('/api/programs/packages', async (c) => {
   return c.json({ ok: true, packages });
 });
 
-app.post('/api/programs/:id/update', async (c) => {
-  const def = programById(c.req.param('id'));
-  if (!def) return fail(c, 404, 'Programa desconocido');
-  const running = listJobs().find((j) => j.status === 'running' && (j.title === def.name || j.title === `Instalar ${def.name}` || j.steps.some(s=>s.group===def.name)));
-  if (running) return c.json({ ok: true, job: running, already: true });
-  // Versions/pending counts change under the job — drop the cached snapshots
-  // so the next read recomputes instead of serving pre-update state.
-  invalidateProgramsCache();
-  invalidateAgentsCache();
-  const job = runJob(def.name, def.steps.map((s) => ({ ...s, group: def.name })));
-  return c.json({ ok: true, job });
+app.post('/api/programs/:id/update', async c => {
+  try {
+    const body=await c.req.json().catch(()=>({}));if(body.review!==true)return fail(c,409,'Recargá AXON y revisá el plan desde Programas antes de actualizar');
+    const snapshot=await software.settled(), id=c.req.param('id');
+    const matches=snapshot.installations.filter(p=>p.id===id || p.integrationId===id);
+    if(matches.length!==1)return fail(c,409,'Elegí la instalación y su gestor desde Programas');
+    return c.json({ok:true,plan:await software.plan([matches[0].id])});
+  }catch(e){return fail(c,409,(e as Error).message);}
 });
 
 app.post('/api/programs/:id/login', async (c) => {
@@ -602,21 +600,7 @@ app.post('/api/programs/:id/logout', async (c) => {
   return c.json({ ok: true, job });
 });
 
-app.post('/api/programs/update-all', async (c) => {
-  const programs = await getPrograms();
-  // Only programs with a known pending update — don't reinstall everything.
-  const status = programsStatus();
-  if (status.checkingMetadata || status.checkingUpdates) return fail(c, 409, 'La comprobación de versiones sigue en curso. Esperá a que termine.');
-  const pending = programs.filter((p) => p.installed && (p.latestVersion || p.pendingUpdates));
-  const steps = pending.flatMap((p) =>
-    (programById(p.id)?.steps || []).map((s) => ({ ...s, label: `${p.name} — ${s.label}`, group: p.name }))
-  );
-  if (!steps.length) return fail(c, 400, 'Todo está al día — no hay actualizaciones pendientes');
-  invalidateProgramsCache();
-  invalidateAgentsCache();
-  const job = runJob('Actualización completa', steps);
-  return c.json({ ok: true, job });
-});
+app.post('/api/programs/update-all', c => fail(c,409,'Recargá AXON y revisá las instalaciones seleccionadas desde Programas'));
 
 app.get('/api/jobs', async (c) => c.json({ ok: true, jobs: listJobs() }));
 
@@ -1190,6 +1174,7 @@ app.put('/api/config', async (c) => {
     config.settings = settings;
     configurePorts(settings);
     setHostUser(settings.hostUser);
+    software.invalidate(); invalidateStoreCache();
     invalidateProgramsCache(); invalidateAgentsCache();
     setNotifyUrl(settings.notifyUrl, settings.notifyProvider);
     return settings;
@@ -1322,14 +1307,23 @@ app.get('/p/:port', (c) => c.redirect(`/p/${c.req.param('port')}/`));
 
 // ---------- Static ----------
 
-// Static assets must not be served stale — index.html/app.js change on every deploy.
+// Static assets must not be served stale — index.html/app.js change on every
+// deploy. Explicit per-route Cache-Control wins; these defaults only cover
+// the statics that set none (brand assets, fonts, manifest).
 app.use('/*', async (c, next) => {
   await next();
+  if (c.res.headers.has('Cache-Control')) return;
   const p = c.req.path;
-  if (p === '/' || p.endsWith('.html') || p.endsWith('.js') || p.endsWith('.css')) {
-    c.header('Cache-Control', 'no-cache');
-  } else if (p.includes('/vendor/')) {
+  if (p === '/' || p.endsWith('.html')) {
+    c.header('Cache-Control', 'private, no-store');
+  } else if (p.endsWith('.js') || p.endsWith('.css') || p.endsWith('.webmanifest')) {
+    c.header('Cache-Control', 'no-store');
+  } else if (p.startsWith('/icons/') || p.startsWith('/marca/') || p.startsWith('/fonts/') || p.includes('/vendor/')) {
     c.header('Cache-Control', 'public, max-age=86400');
+  }
+  if (p.endsWith('.js') || p.endsWith('.css') || p.endsWith('.webmanifest')) {
+    c.header('CDN-Cache-Control', 'no-store');
+    c.header('Cloudflare-CDN-Cache-Control', 'no-store');
   }
 });
 
@@ -1471,7 +1465,7 @@ fileTransfers.onReview(async(mode,from,to)=>{
     ...config.settings.scanDirs.map(p=>({title:'Búsqueda de proyectos',path:p,detail:'La búsqueda automática seguirá usando el origen. Actualizá esta carpeta en Configuración después del movimiento.'})),
     ...Object.keys(config.composeNotes||{}).map(p=>({title:'Compose con notas guardadas',path:p,detail:'Las notas guardadas seguirán asociadas al archivo de origen. Los servicios que usan rutas de este Compose pueden necesitar ajustes.'})),
     ...agentPathReferences(),...dropPathReferences(),
-    ...platformBackups.policies().flatMap(p=>[...(p.source?[{title:`Respaldo: ${p.name} · origen`,path:p.source,tree:true,detail:'El respaldo seguirá buscando el origen configurado. Revisá la política y su proyecto después del movimiento.'}]:[]),...(p.repository?[{title:`Respaldo: ${p.name} · repositorio`,path:p.repository,detail:'El repositorio seguirá configurado en el origen. Los respaldos y las restauraciones pueden fallar; revisá la política y conservá el acceso al repositorio original.'}]:[])])
+    ...platformBackups.policies().flatMap(p=>[...platformBackups.sources(p).map(source=>({title:`Backup: ${p.name} · origen`,path:source,tree:true,detail:'El backup seguirá buscando la carpeta configurada. Actualizá su origen después del movimiento.'})),...platformBackups.targets(p).filter(t=>t.path).map(t=>({title:`Backup: ${p.name} · ${t.label}`,path:t.path,tree:true,detail:'Este destino contiene copias de seguridad. Conservar su ubicación permite recuperar las versiones anteriores.'}))])
   ];
   return includeConfiguredReferences(review,from,to,references);
 });
@@ -1479,6 +1473,7 @@ fileOperations.onBeforeWrite(()=>fileTransfers.reconcilePending());
 setInterval(()=>{void fileTransfers.reconcilePending().catch(()=>{});},5000).unref();
 fileTransfers.onChanged(async(mode,from,to,review)=>{await libraryFileOperation(mode,from,to,review);recordEvent('file',mode==='move'?'Movimiento verificado':'Copia verificada','Operación durable; no implica ahorro de disco');});
 registerFilesRoutes(app, fileOperations,fileTransfers,maintenanceQaRoot||undefined);
+registerCloudRoutes(app, platformStore, cloudVaultDir, cloudProviders, cloudAgents);
 registerEventRoutes(app);
 registerAlertRoutes(app);
 registerScriptRoutes(app);
@@ -1494,6 +1489,7 @@ registerAgentRoutes(app);
 registerAgentAccounts(app, maintenanceQaRoot ? async () => maintenanceQaRoot : fileHostHome, () => { invalidateProgramsCache(); invalidateAgentsCache(); });
 registerAgentUsage(app, maintenanceQaRoot ? async () => maintenanceQaRoot : fileHostHome);
 registerAgentConsumption(app, maintenanceQaRoot ? async () => maintenanceQaRoot : fileHostHome);
+registerSoftwareRoutes(app);
 registerStoreRoutes(app);
 const hostCleaner = maintenanceQaRoot?new HostCleaner(async()=>maintenanceQaRoot,async()=>({complete:true,references:[],tools:[],unknownProcesses:0,examined:0,elapsedMs:0}),undefined,maintenanceQaRoot):new HostCleaner(fileHostHome);
 const storageService = new StorageService(maintenanceRepo, () => maintenanceQaRoot ? Promise.resolve([{id:'qa-cache',path:path.join(maintenanceQaRoot,'scan-fixture'),title:'Caché de prueba aislada',adapterId:'packages'}]) : scanRoots(config.projects), scanRoot,undefined,hostCleaner);
@@ -1565,9 +1561,22 @@ if (!maintenanceQaRoot) platformBackups.scheduler();
 
 // Warm the expensive caches in the background so the first Programs/Agents
 // page load doesn't pay the full host-scan cost.
-setJobCompletionHook(() => { invalidateProgramsCache(); invalidateAgentsCache(); warmProgramsCache(); });
+setJobCompletionHook(() => { software.invalidate(); invalidateStoreCache(); invalidateProgramsCache(); invalidateAgentsCache(); warmProgramsCache(); });
 warmProgramsCache();
 listAgents().catch(() => {});
+
+// A fresh deploy replaces this process — drop the edge-cached copies of the
+// panel's assets so Cloudflare can't serve the previous build to reloads
+// that land mid-restart. Non-fatal: the app works without CF credentials.
+{
+  try {
+    const origin = process.env.AXON_PUBLIC_ORIGIN;
+    if (origin) {
+      const host = new URL(origin).host;
+      purgeCachePrefixes([`${host}/`]).then((r) => { if (!r.success) console.warn('Cloudflare cache purge:', r.error); }).catch(() => {});
+    }
+  } catch { /* malformed origin — purge is best-effort */ }
+}
 
 registerNavigationRoutes(app);
 app.get('/*', serveStatic({ root: './public' }));

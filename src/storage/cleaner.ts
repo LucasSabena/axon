@@ -35,7 +35,7 @@ export class HostCleaner {
     if(root.adapterId==='trash-xdg')payload.metadataPath=path.join(path.dirname(root.path),'info',path.basename(c.identity.canonicalPath)+'.trashinfo');
     if(root.adapterId==='trash-legacy')payload.metadataPath=path.join(root.path,'.manifest.json');
    }
-   const r=await this.run(payload);if(!r.ok)throw new Error('No se pudo congelar el árbol: propietario, permisos, tamaño o metadatos incompatibles');
+   const r=await this.run(payload);if(!r.ok)throw new Error((r as {error?:string}).error?.replace(/\. Se conservaron los datos\.$/,'')||'No se pudo congelar el árbol: propietario, permisos, tamaño o metadatos incompatibles');
    return {taskId,root};
   }catch(e){return {blocker:e instanceof Error?e.message:'Precondiciones no verificadas'};}
  }

@@ -102,3 +102,15 @@ html[data-density=comfortable] td { padding-top:14px; padding-bottom:14px; }
 .store-detail{border:0;padding:0;text-align:left;background:transparent;color:var(--text);cursor:pointer;font-family:var(--font-sans);flex:1}.store-app-icon{display:grid;place-items:center;width:48px;height:48px;background:var(--accent-soft);border-radius:var(--radius);color:var(--accent);margin-bottom:14px}.store-app-icon svg{width:26px;height:26px}.store-detail h3{font-size:16px;margin:0 0 8px}.store-detail p{color:var(--text-dim);line-height:1.5;margin:0 0 16px}.store-card-meta{display:flex;flex-direction:column;gap:6px;color:var(--text-dim);font-size:12px}.store-card-actions{display:flex;gap:8px;margin-top:16px}.store-card-actions>:first-child{flex:1;justify-content:center}.store-setup{padding:12px;background:var(--bg-elevated);border-radius:var(--radius);display:flex;align-items:center;gap:12px;flex-wrap:wrap}.store-facts{display:grid;grid-template-columns:auto 1fr;gap:10px 16px}.store-facts dt{color:var(--text-dim)}.store-facts dd{margin:0;overflow-wrap:anywhere}
 @media(max-width:560px){.store-grid{grid-template-columns:1fr}.store-toolbar{gap:12px}.store-toolbar>a{width:100%;justify-content:center}}
 .store-app-icon img{width:40px;height:40px;object-fit:contain}
+.store-installer{margin-top:16px}
+.store-dropzone{display:flex;align-items:center;gap:16px;width:100%;padding:18px 20px;border:1.5px dashed var(--border);border-radius:var(--radius-lg);background:var(--bg-panel);color:var(--text);font-family:var(--font-sans);cursor:pointer;text-align:left}
+.store-dropzone:hover,.store-dropzone.drag{border-color:var(--accent);background:var(--accent-soft)}
+.store-dropzone svg{width:30px;height:30px;color:var(--accent);flex-shrink:0}
+.store-dropzone small{display:block;color:var(--text-dim);margin-top:4px}
+.store-upload{display:flex;align-items:center;gap:12px;margin-top:10px}
+.store-upload-bar{flex:1;height:8px;background:var(--bg-elevated);border-radius:99px;overflow:hidden}
+.store-upload-bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
+.store-upload span{font-size:12px;color:var(--text-dim);white-space:nowrap}
+.store-pathrow{display:flex;gap:8px;margin-top:10px}
+.store-pathrow input{flex:1;min-width:0;padding:10px;background:var(--bg-panel);color:var(--text);border:1px solid var(--border);border-radius:var(--radius)}
+@media(max-width:560px){.store-pathrow{flex-direction:column}}

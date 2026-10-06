@@ -22,12 +22,8 @@ export async function dockerInstallations():Promise<Installation[]> {
   });
 }
 
-export async function physicalInstallations(programs:ProgramView[]):Promise<Installation[]>{
- const supported=programs.filter(p=>p.installed).map(p=>{const d=programById(p.id);const command=d?.detect.map(v=>v.cmd.match(/^command -v ([a-zA-Z0-9_.+-]+)$/)?.[1]).find(Boolean);return {id:p.id,name:p.name,version:p.version,backend:p.channel,command};});
- const store=STORE_APPS.filter(p=>p.bin).map(p=>({id:p.id,name:p.name,backend:p.backend,command:p.bin,references:[`store:${p.id}`]}));
- const script=await readFile(new URL('./storage/installations-host.py',import.meta.url),'utf8');
- let found:Installation[]=[];
- try{const result=JSON.parse(await boundedCommand(hostArgv('python3',['-c',script]),JSON.stringify({programs:[...supported,...store],catalog:STORE_APPS.filter(p=>p.backend==='flatpak').map(p=>({id:p.id,package:p.package}))})));found=result.installations;}catch{/* Explicit unresolved records remain visible below. */}
- const represented=new Set(found.flatMap(i=>i.references));
- return [...found,...programs.filter(p=>p.installed&&!represented.has(`programs:${p.id}`)).map(programInstallation)];
+export async function physicalInstallations(_programs:ProgramView[]=[]):Promise<Installation[]> {
+ const {software}=await import('./software');
+ const snapshot=await software.get();
+ return snapshot.installations.map(p=>({id:p.id,name:p.name,backend:p.manager,scope:p.scope,version:p.version,executablePath:p.executablePath||null,coverage:p.canUpdate?'Actualización mediante su gestor nativo':p.reason,references:[...(p.integrationId?[`programs:${p.integrationId}`]:[]),...STORE_APPS.filter(a=>a.backend===p.manager&&(a.package===p.packageName.split(':')[0]||a.package===p.applicationId)).map(a=>`store:${a.id}`)],blockers:['La retirada requiere revisión específica; este inventario no autoriza desinstalación',...(snapshot.error||snapshot.sources.find(s=>s.id===p.sourceId)?.error?['La fuente no pudo comprobarse por completo']:[])]}));
 }

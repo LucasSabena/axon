@@ -23,12 +23,16 @@ jobs:
           version: 12.5.1
       - name: Python test dependencies
         run: python3 -m pip install websockets==15.0.1
+      - name: Restic integration test dependency
+        run: sudo apt-get update && sudo apt-get install -y restic
       - name: Install locked packages
         run: pnpm install --frozen-lockfile
       - name: Typecheck and frontend syntax
         run: pnpm run check
       - name: Application regressions
         run: pnpm run test
+      - name: Native software discovery and transaction contracts
+        run: pnpm run test:software
       - name: Installer and recovery contracts
         run: pnpm run test:installer
       - name: Build application

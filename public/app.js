@@ -1,6 +1,10 @@
 /* AXON — frontend */
 'use strict';
 
+// Marks app.js as loaded so the inline boot watchdog knows its retry button
+// can call initAuth() instead of reloading the page.
+window.__axonApp = true;
+
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -69,16 +73,32 @@ function fmtUptime(sec) {
 // ---------- Auth ----------
 
 // Deferred feature scripts register their hooks before the authenticated boot event.
-const axonDomReady = document.readyState === 'complete' ? Promise.resolve()
+const axonDomReady = document.readyState !== 'loading' ? Promise.resolve()
   : new Promise(resolve => document.addEventListener('DOMContentLoaded', resolve, { once:true }));
-async function initAuth() {
+// Deploys restart the container: the server is unreachable for a few seconds
+// and the first reload used to die on a stuck boot screen. Retry the whole
+// auth+asset boot with backoff so a restart window reads as a slow load, not
+// a broken page. bootRetryTimer keeps manual retries from stacking flows.
+const BOOT_RETRY_LIMIT = 5;
+const BOOT_RETRY_DELAY_MS = 1500;
+let bootRetryTimer = null;
+let bootDone = false;
+function setLoginSecondFactor(enabled) {
+  $('#login-code').classList.toggle('hidden', !enabled);
+  $('#login-code-label').classList.toggle('hidden', !enabled);
+  $('#login-code-help').classList.toggle('hidden', !enabled);
+  $('#login-code').required = enabled;
+}
+async function initAuth(attempt = 0) {
+  clearTimeout(bootRetryTimer);
   try {
     const me = await api('/api/me');
     await axonDomReady;
-    $('#login-code').classList.toggle('hidden', !me.totpEnabled);
-    $('#login-code-label').classList.toggle('hidden', !me.totpEnabled);
+    setLoginSecondFactor(Boolean(me.totpEnabled));
     if (me.authenticated) {
       await AxonAssets.features();
+      if (bootDone) return;
+      bootDone = true;
       scanIntervalMs = me.scanIntervalMs || 5000;
       $('#boot-screen').classList.add('hidden');
       $('#login-screen').classList.add('hidden');
@@ -89,6 +109,11 @@ async function initAuth() {
   } catch (err) {
     await axonDomReady;
     if (err.status !== 401) {
+      if (attempt < BOOT_RETRY_LIMIT) {
+        $('#boot-message').textContent = 'El servidor no responde — reintentando…';
+        bootRetryTimer = setTimeout(() => void initAuth(attempt + 1), BOOT_RETRY_DELAY_MS * (attempt + 1));
+        return;
+      }
       $('#boot-message').textContent = err.message + '. Tus datos se conservan. Podés reintentar.';
       $('#boot-retry').classList.remove('hidden');
       return;
@@ -106,21 +131,35 @@ $('#password-toggle').addEventListener('click', () => {
   $('#password').type = visible ? 'text' : 'password';
   $('#password-toggle').setAttribute('aria-label', visible ? 'Ocultar contraseña' : 'Mostrar contraseña');
   $('#password-toggle').setAttribute('aria-pressed', String(visible));
+  $('#password-toggle').innerHTML = icon(visible ? 'eye-off' : 'eye');
+  refreshIcons();
 });
 
 $('#login-form').addEventListener('submit', async (e) => {
   e.preventDefault();
+  const form = $('#login-form'), submit = $('#login-submit');
+  if (submit.disabled) return;
   $('#login-error').textContent = '';
+  submit.disabled = true;
+  form.setAttribute('aria-busy', 'true');
+  $('#login-submit-label').textContent = 'Ingresando…';
+  $('#login-status').textContent = 'Verificando tu acceso…';
   try {
     await api('/api/login', {
       method: 'POST',
       body: { username: $('#username').value, password: $('#password').value, code: $('#login-code').value.trim() },
     });
+    $('#login-submit-label').textContent = 'Abriendo tu espacio…';
+    $('#login-status').textContent = 'Acceso verificado. Abriendo tu espacio.';
     location.reload();
   } catch (err) {
     $('#login-error').textContent = err.message;
+    submit.disabled = false;
+    form.setAttribute('aria-busy', 'false');
+    $('#login-submit-label').textContent = 'Ingresar';
+    $('#login-status').textContent = '';
     // Server says the 2FA code is wrong/required — make sure the field is visible.
-    if ((err.message || '').toLowerCase().includes('código')) { $('#login-code').classList.remove('hidden'); $('#login-code-label').classList.remove('hidden'); $('#login-code').focus(); }
+    if ((err.message || '').toLowerCase().includes('código')) { setLoginSecondFactor(true); $('#login-code').focus(); }
   }
 });
 
@@ -629,181 +668,15 @@ $('#detail-domain-btn').addEventListener('click', () => {
 });
 
 // ---------- Programs / updater ----------
-
-let jobPollTimer = null;
-let currentJobId = null;
-let programsData = [];
-let programsRefreshTimer = null;
-let programsChecking = false;
-
-async function loadPrograms(fresh = false) {
-  try {
-    const { programs, checkingUpdates, checkingMetadata } = await api(fresh ? '/api/programs?fresh=1' : '/api/programs');
-    programsChecking = checkingUpdates || checkingMetadata;
-    $('#update-all-btn').disabled = !!programsChecking;
-    programsData = programs || [];
-    $('#programs-updated').textContent = checkingMetadata ? 'Comprobando versiones y cuentas…' : checkingUpdates ? 'Buscando nuevas versiones en segundo plano…' : `Actualizado ${new Date().toLocaleTimeString()}`;
-    clearTimeout(programsRefreshTimer);
-    if(programsChecking && activeTabName === 'programs' && !document.hidden) programsRefreshTimer=setTimeout(()=>loadPrograms(),checkingMetadata ? 1000 : 5000);
-    renderPrograms(programsData);
-    const pending = programsData.filter((p) => p.pendingUpdates || p.latestVersion).length;
-    const nc = $('#nav-count-programs');
-    if (nc) { nc.textContent = pending || ''; nc.classList.toggle('nav-alert', pending > 0); }
-    // Cargar el inventario una sola vez al entrar a la sección
-    // Installed inventory is loaded explicitly in its own section.
-  } catch (err) {
-    errToast(err);
-  }
-  loadJobsHistory();
+let jobPollTimer=null;
+let currentJobId=null;
+let programsData=[];
+async function loadPrograms(fresh=false){
+ const snapshot=await window.AxonSoftware.load(fresh);
+ programsData=(snapshot?.installations||[]).map(p=>({...p,installed:true,latestVersion:p.canUpdate?p.targetVersion:undefined}));
+ loadJobsHistory();
 }
-
-function renderPrograms(programs) {
-  const grid = $('#programs-grid');
-  grid.innerHTML = '';
-  const installed = programs.filter((p) => p.installed);
-  const notInstalled = programs.filter((p) => !p.installed);
-  $('#programs-empty').classList.toggle('hidden', installed.length > 0);
-
-  for (const p of [...installed, ...notInstalled]) {
-    const card = document.createElement('div');
-    const hasUpdate = !!(p.latestVersion || p.pendingUpdates);
-    card.className = `program-card ${p.installed ? '' : 'program-off'} ${hasUpdate ? 'has-update' : ''}`;
-    const stepsInfo = p.steps.map((s) => `<code>${esc(s.cmd)}</code> <span class="listener-note">${esc(s.user)}</span>`).join('<br>');
-    const versionBadge = p.latestVersion
-      ? `<span class="badge badge-bun" title="Hay una versión nueva">${icon('arrow-up')} ${esc(p.version || '?')} → ${esc(p.latestVersion)}</span>`
-      : p.pendingUpdates ? `<span class="badge badge-bun">${esc(p.pendingUpdates)} updates</span>` : '';
-    const authHtml = p.metadataPending ? `<div class="program-auth listener-note">${icon('loader','spin')} Comprobando versión y cuenta…</div>` : p.auth ? `
-      <div class="program-auth">
-        <span class="health-dot ${p.auth.loggedIn ? 'health-ok' : 'health-bad'}"></span>
-        <span class="${p.auth.loggedIn ? 'auth-account' : 'listener-note'}">${p.auth.loggedIn ? esc(p.auth.account || 'Sesión activa') : 'Sin sesión'}</span>
-        ${['codex', 'claude-code'].includes(p.id) ? `<a class="auth-btn" href="/agentes?id=${p.id === 'codex' ? 'codex' : 'claude'}&tab=provider">${icon('users')} Cuentas</a>` : `${p.auth.loggedIn && p.auth.canLogout ? `<button class="auth-btn program-auth-act" data-id="${esc(p.id)}" data-act="logout" title="Cerrar sesión">${icon('log-out')} Salir</button>` : ''}${!p.auth.loggedIn && p.auth.canLogin ? `<button class="auth-btn program-auth-act" data-id="${esc(p.id)}" data-act="login" title="Inicia el flujo de login — la URL/código aparece en el log del job">${icon('log-in')} Entrar</button>` : ''}`}
-        ${!p.auth.loggedIn && !p.auth.canLogin && p.auth.loginHint ? `<span class="auth-hint" title="${esc(p.auth.loginHint)}">${icon('info')} cómo entrar</span>` : ''}
-      </div>` : '';
-    card.innerHTML = `
-      <div class="program-head">
-        <span class="program-icon">${p.brandIcon
-          ? `<img class="brand-svg" src="${esc(p.brandIcon)}" alt="" onerror="this.nextElementSibling.classList.remove('hidden'); this.remove()"><span class="hidden">${icon(lucideName(p.icon, 'package'))}</span>`
-          : icon(lucideName(p.icon, 'package'))}</span>
-        <div>
-          <strong>${esc(p.name)}</strong>
-          <div class="program-meta">
-            <span class="badge badge-${p.channel === 'apt' ? 'docker' : p.channel === 'pnpm' ? 'node' : 'other'}">${esc(p.channel)}</span>
-            ${p.version && !p.latestVersion ? `<span class="listener-note">${esc(p.version)}</span>` : ''}
-            ${versionBadge}
-          </div>
-        </div>
-      </div>
-      ${p.desc ? `<p class="program-desc">${esc(p.desc)}</p>` : ''}
-      ${authHtml}
-      <details class="program-steps"><summary>Comandos</summary>${stepsInfo}</details>
-      <div class="program-actions">
-        ${p.installed ? (hasUpdate
-          ? `<button class="btn-primary program-update" data-id="${esc(p.id)}">${icon('arrow-up-circle')} Actualizar</button>`
-          : `<span class="program-ok">${icon(programsChecking ? 'loader' : 'check-circle-2', programsChecking ? 'spin' : '')} ${programsChecking ? 'Comprobando versiones…' : 'Sin actualizaciones detectadas'}</span>`)
-          : p.installable ? `<button class="btn-action program-install" data-id="${esc(p.id)}">${icon('download')} Instalar</button>` : '<span class="listener-note">No instalado</span>'}
-      </div>`;
-    grid.appendChild(card);
-  }
-  refreshIcons();
-}
-
-$('#programs-grid').addEventListener('click', async (e) => {
-  const authBtn = e.target.closest('.program-auth-act');
-  if (authBtn) {
-    try {
-      const { job } = await api(`/api/programs/${authBtn.dataset.id}/${authBtn.dataset.act}`, { method: 'POST' });
-      openJobModal(job);
-      if (authBtn.dataset.act === 'login') {
-        toast('Seguí el log del job: ahí aparece la URL o código para autorizar', 'ok');
-      }
-    } catch (err) { errToast(err); }
-    return;
-  }
-  const btn = e.target.closest('.program-update, .program-install');
-  if (!btn || btn.disabled) return;
-  try {
-    const install=btn.classList.contains('program-install');
-    if(install && !(await confirmDialog('Instalar programa', `Se instala ${programsData.find(p=>p.id===btn.dataset.id)?.name} en el host con pnpm.`, 'Instalar')))return;
-    const { job } = await api(`/api/programs/${btn.dataset.id}/${install?'install':'update'}`, { method: 'POST', busy:btn });
-    openJobModal(job);
-  } catch (err) {
-    errToast(err);
-  }
-});
-
-$('#update-all-btn').addEventListener('click', async () => {
-  const pending=programsData.filter(p=>p.installed&&(p.latestVersion||p.pendingUpdates));
-  if(!pending.length){toast('No hay actualizaciones detectadas','ok');return;}
-  if(!await confirmDialog(`Actualizar ${pending.length} programas`,pending.map(p=>p.name).join(', '),'Actualizar'))return;
-  try {
-    const { job } = await api('/api/programs/update-all', { method: 'POST',busy:$('#update-all-btn') });
-    openJobModal(job);
-  } catch (err) {
-    errToast(err);
-  }
-});
-
-$('#programs-refresh').addEventListener('click', () => loadPrograms(true));
-
-$('#installed-load').addEventListener('click', loadInstalled);
-$('#installed-filter').addEventListener('input', () => renderInstalledFilter());
-
-let installedData = null;
-
-async function loadInstalled() {
-  try {
-    installedData = await api('/api/programs/installed');
-    renderInstalled();
-  } catch (err) {
-    errToast(err);
-  }
-}
-
-function renderInstalled() {
-  if (!installedData) return;
-  const { desktopApps, packages } = installedData;
-  const sum = $('#installed-summary');
-  sum.classList.remove('hidden');
-  sum.innerHTML = `
-    <span class="listener-note">${icon('package')} ${packages.apt.total} paquetes apt</span>
-    <span class="listener-note">${icon('archive')} ${packages.snaps.length} snaps</span>
-    <span class="listener-note">${icon('terminal')} ${packages.pnpmGlobals.length} globales pnpm</span>
-    <span class="listener-note">${icon('cookie')} ${(packages.bunGlobals || []).length} globales bun</span>
-    <span class="listener-note">${icon('monitor')} ${desktopApps.length} apps desktop</span>`;
-  renderInstalledFilter();
-}
-
-function renderInstalledFilter() {
-  if (!installedData) return;
-  const q = ($('#installed-filter').value || '').toLowerCase();
-  const grid = $('#installed-apps');
-  const { desktopApps, packages } = installedData;
-  const cliItems = [
-    ...(packages.pnpmGlobals || []).map((g) => ({ name: g.name, version: g.version, source: 'pnpm' })),
-    ...(packages.bunGlobals || []).map((g) => ({ name: g.name, version: g.version, source: 'bun' })),
-    ...(packages.snaps || []).map((s) => ({ name: s.name, version: s.version, source: 'snap' })),
-  ];
-  const cliHtml = cliItems
-    .filter((c) => c.name.toLowerCase().includes(q))
-    .map((c) => `
-      <div class="app-chip" title="${esc(c.name)}">
-        ${icon('terminal')}
-        <span class="mono">${esc(c.name)}</span>
-        ${c.version ? `<span class="listener-note">${esc(c.version)}</span>` : ''}
-        <span class="chip-src">${esc(c.source)}</span>
-      </div>`).join('');
-  const apps = desktopApps.filter((a) => a.name.toLowerCase().includes(q));
-  const desktopHtml = apps.map((a) => `
-    <div class="app-chip" title="${esc(a.exec || '')}">
-      ${a.icon
-        ? `<img src="/api/icons/${encodeURIComponent(a.icon)}" onerror="this.nextElementSibling.classList.remove('hidden'); this.remove()" alt=""><span class="hidden">${icon('monitor')}</span>`
-        : icon('monitor')}
-      <span>${esc(a.name)}</span>
-      <span class="chip-src">${esc(a.source)}</span>
-    </div>`).join('');
-  grid.innerHTML = cliHtml + desktopHtml;
-  refreshIcons();
-}
+async function loadInstalled(){await loadPrograms();window.AxonSoftware.installed();}
 
 // ---------- Jobs (live update logs + history) ----------
 
@@ -1654,12 +1527,11 @@ function cmdkCommands() {
       cmds.push({ icon: 'power', label: `Cerrar ${label} (PID ${p.pid})`, hint: 'proceso', run: () => openKillModal(p.pid) });
     }
   }
-  for (const pr of programsData.filter((x) => x.installed)) {
+  for (const pr of programsData.filter((x) => x.canUpdate)) {
     cmds.push({ icon: 'arrow-up-circle', label: `Actualizar ${pr.name}`, hint: 'programa', run: async () => {
       try {
-        const { job } = await api(`/api/programs/${pr.id}/update`, { method: 'POST' });
         gotoTab('programs');
-        openJobModal(job);
+        await window.AxonSoftware.review([pr.id]);
       } catch (err) { errToast(err); }
     }});
   }
@@ -1720,7 +1592,7 @@ initAuth();
 
 // PWA: installable from laptop/phone (secure context: https tunnel or localhost)
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || isLocalClient())) {
-  navigator.serviceWorker.register('/sw.js').catch(() => {});
+  navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).then(registration => registration.update()).catch(() => {});
 }
 
 // ---------- Row context menu ----------

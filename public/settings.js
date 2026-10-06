@@ -6,6 +6,7 @@
   const sections = [
     ['general', 'Servidor', 'server', 'Servidor y detección', 'Definí qué carpetas explorar y cómo identificar los servicios.'],
     ['appearance', 'Apariencia', 'palette', 'Tu espacio de trabajo', 'Elegí un tema, la densidad y el movimiento. Se guardan en este navegador.'],
+    ['connections', 'Conexiones', 'plug', 'Tus cuentas en la nube', 'Conectá tus plataformas para explorar archivos a demanda. En Archivos sólo aparecen las cuentas conectadas que elijas mostrar.'],
     ['notifications', 'Notificaciones', 'bell', 'Avisos y actividad', 'El centro de notificaciones conserva los eventos hasta que los marques como leídos.'],
     ['security', 'Seguridad', 'shield-check', 'Protección y acceso', 'Protegé procesos esenciales y configurá la verificación de tu cuenta.'],
     ['advanced', 'Avanzado', 'sliders-horizontal', 'Herramientas y mantenimiento', 'Preferencias de terminal, datos del navegador y energía del servidor.'],
@@ -38,18 +39,24 @@
   panes.notifications.insertAdjacentHTML('beforeend', '<div class="settings-power"><span class="settings-power-label" id="settings-notif-state"></span><button type="button" class="btn-secondary" id="settings-notif-permission">Activar avisos del navegador</button></div><button type="button" class="btn-secondary" id="settings-notif-test">Probar webhook guardado</button><p id="settings-notif-result" role="status"></p>');
   panes.advanced.insertAdjacentHTML('afterbegin', '<label>Tamaño de letra de la terminal<select id="settings-terminal-font"><option>12</option><option>14</option><option>16</option><option>18</option><option>20</option></select></label><button type="button" class="btn-secondary" id="settings-clear-recent">Limpiar archivos recientes de este navegador</button>');
   const footer = form.querySelector('.modal-actions'); footer.className = 'settings-savebar';
+  window.AxonConnections?.mount(panes.connections);
   footer.insertAdjacentHTML('afterbegin', '<span id="settings-save-state" role="status">Sin cambios pendientes</span>');
   const error = document.querySelector('#settings-error');
   layout.append(tabs, content); form.prepend(layout); form.append(error, footer);
   let saved = '';
   const snapshot = () => JSON.stringify([...form.querySelectorAll('.settings-pane input:not([data-local]), .settings-pane textarea, #settings-notify-provider')].filter(n=>!['settings-motion'].includes(n.id)).map(n=>[n.id,n.value]));
   function dirty() { document.querySelector('#settings-save-state').textContent = snapshot() === saved ? 'Sin cambios pendientes' : 'Tenés cambios sin guardar'; }
+  let selected='general';
   function select(key) {
+    if(!panes[key])key='general';selected=key;
     for (const [id] of sections) {
       panes[id].hidden = id !== key;
       const tab = document.querySelector(`#settings-tab-${id}`); tab.setAttribute('aria-selected', String(id === key)); tab.tabIndex = id === key ? 0 : -1;
     }
     try { sessionStorage.setItem('axon:settings-tab', key); } catch {}
+    footer.hidden=key==='connections';
+    if(key==='connections')void window.AxonConnections?.refresh();
+    if(window.AxonNavigation?.ready&&window.AxonNavigation.current?.section==='settings'&&!window.AxonNavigation.applying)window.AxonNavigation.update('settings',{section:key});
   }
   tabs.addEventListener('keydown', e => {
     if (!['ArrowRight','ArrowLeft','ArrowDown','ArrowUp','Home','End'].includes(e.key)) return;
@@ -104,6 +111,9 @@
     saved=snapshot();dirty();return true;
   };
   window.addEventListener('beforeunload',e=>{if(window.AxonSettings.dirty()){e.preventDefault();e.returnValue='';}});
+  const restoreSettings=window.AxonPages.settings.restore;
+  window.AxonPages.settings.restore=async(params={})=>{await restoreSettings();select(params.section||sessionStorage.getItem('axon:settings-tab')||'general');if(selected==='connections'&&params.connection)await window.AxonConnections?.refresh(params);};
+  window.AxonPages.settings.params=()=>({section:selected});
   select(sections.some(s=>s[0]===sessionStorage.getItem('axon:settings-tab')) ? sessionStorage.getItem('axon:settings-tab') : 'general');
   permissionState(); syncThemes(); refreshIcons();
 })();

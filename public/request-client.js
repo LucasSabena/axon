@@ -21,7 +21,7 @@
         try {
           const { cacheMs, fresh, busy, timeoutMs, ...init } = opts;
           response = await fetcher(path, {
-            credentials: 'same-origin', ...init, method,
+            credentials: 'same-origin', cache: 'no-store', ...init, method,
             headers: { ...(opts.body != null ? { 'Content-Type': 'application/json' } : {}), ...opts.headers },
             body: opts.body != null ? JSON.stringify(opts.body) : undefined,
             signal: opts.signal || AbortSignal.timeout(timeoutMs || 90_000),
@@ -29,7 +29,13 @@
         } catch (cause) {
           throw new Error(cause.name === 'TimeoutError' ? 'El servidor está tardando demasiado. Podés reintentar.' : 'Sin conexión con el servidor', { cause });
         }
-        const data = await response.json().catch(() => ({}));
+        let data;
+        try { data = await response.json(); }
+        catch {
+          if (response.status === 401) { invalidate(); onAuth(); }
+          throw Object.assign(new Error('El servidor devolvió una respuesta incompleta. Podés reintentar.'), { status: response.status });
+        }
+        if (!data || typeof data !== 'object') throw new Error('El servidor devolvió una respuesta incompleta. Podés reintentar.');
         if (!response.ok || data.ok === false) {
           const error = Object.assign(new Error(data.error || `HTTP ${response.status}`), {
             status: response.status, detail: data.detail, command: data.command, raw: data,

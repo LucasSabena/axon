@@ -1,15 +1,21 @@
 import { Hono } from 'hono';
 import { requestOriginAllowed } from '../browser-security';
-import { PlatformError, SCOPES, type PlatformStore, type ApiIdentity, type Scope } from './store';
+import { PlatformError, SCOPES, CLOUD_SCOPES, type PlatformStore, type ApiIdentity, type Scope } from './store';
 import type { ProjectHub } from './projects';
 import type { Diagnostics } from './diagnostics';
+import type { CloudAgents } from '../cloud/agents';
+import { registerCloudMachineRoutes, callCloudTool, cloudError } from '../cloud/agent-api';
+import { ApiLimiter, ApiThrottle, apiLane, leasedResponse } from './api-limits';
+import { AGENT_INSTRUCTIONS, agentTools, agentCapabilities, permittedProjectTools, permittedCloudTools } from './api-discovery';
 
 export interface PlatformApiDependencies {
+  cloud?:CloudAgents;
+  cloudLocalUrl?:string;
   store: PlatformStore; hub: ProjectHub; diagnostics: Diagnostics;
   logs: (projectId:string) => Promise<string[]>;
   backups?: { list:(projectId:string) => Promise<any>; run:(projectId:string,actor:string,credentialId?:string) => Promise<any> };
 }
-type ApiEnv = { Variables: { identity: ApiIdentity } };
+type ApiEnv = { Variables: { identity: ApiIdentity; rpcRequest: any } };
 async function input(c:any) {
   if (Number(c.req.header('content-length') || 0) > 16384) throw new PlatformError('Solicitud demasiado grande',413);
   const raw = await c.req.text();
@@ -29,20 +35,24 @@ async function machineResources(hub:ProjectHub,id:string) {
 }
 export function machineApi(deps: PlatformApiDependencies) {
   const {store,hub,diagnostics} = deps, app = new Hono<ApiEnv>();
-  const windows = new Map<string,{at:number;n:number}>();
-  app.onError((e,c) => c.json({ok:false,error:e instanceof PlatformError ? e.message : 'No se pudo completar la operación'},e instanceof PlatformError ? e.status as any : 503));
+  const limiter = new ApiLimiter();
+  app.onError((e,c) => {
+    if(e instanceof ApiThrottle){c.header('Retry-After',String(e.retryAfter));c.header('X-Axon-Limit-Lane',e.lane);return c.json({ok:false,error:e.message,code:'axon-api-limit',lane:e.lane,reason:e.reason,retryAfter:e.retryAfter},429);}
+    return c.json({ok:false,error:cloudError(e).message},cloudError(e).status as any);
+  });
   app.use('*',async(c,next) => {
     c.header('Cache-Control','private, no-store');
     if (!requestOriginAllowed(c.req.raw)) throw new PlatformError('Origen no permitido',403);
     const bearer = c.req.header('authorization')?.match(/^Bearer (\S+)$/i)?.[1];
     const identity = bearer ? store.authenticate(bearer) : null;
     if (!identity) throw new PlatformError('Token inválido, revocado o vencido',401);
-    const now = Date.now();
-    let window = windows.get(identity.id);
-    if (!window || now-window.at >= 60000) { window = {at:now,n:0}; windows.set(identity.id,window); }
-    if (++window.n > 120) { c.header('Retry-After','60'); throw new PlatformError('Demasiadas solicitudes; reintentá en un minuto',429); }
-    if (windows.size > 2000) for (const [id,value] of windows) if (now-value.at > 60000) windows.delete(id);
-    c.set('identity',identity);await next();
+    c.set('identity',identity);
+    const route=c.req.path.replace(/^\/api\/v1(?=\/|$)/,'');
+    let rpc:any;if(c.req.method==='POST'&&route==='/mcp'){rpc=await input(c);c.set('rpcRequest',rpc);}
+    const lane=apiLane(c.req.method,route,rpc),release=limiter.acquire(identity.id,lane);
+    c.header('X-Axon-Limit-Lane',lane);c.header('X-Axon-Limit-Per-Minute',String(limiter.limits[lane].perMinute));
+    let leased=false;
+    try{await next();c.header('X-Axon-Limit-Lane',lane);c.header('X-Axon-Limit-Per-Minute',String(limiter.limits[lane].perMinute));if(lane==='transfer'&&c.req.method==='GET'&&c.res.ok){c.res=leasedResponse(c.res,release,c.req.raw.signal);leased=true;}}finally{if(!leased)release();}
   });
   const check = (c:any,projectId:string,scope:Scope) => { const identity = c.get('identity') as ApiIdentity;store.require(identity,projectId,scope);hub.project(projectId);return identity; };
   app.get('/projects',c => {
@@ -72,31 +82,32 @@ export function machineApi(deps: PlatformApiDependencies) {
     if (!deps.backups) throw new PlatformError('Backups no disponibles',503);
     return c.json({ok:true,backup:await deps.backups.run(c.req.param('id'),identity.owner,identity.id)},202);
   });
-  const tools = [
-    {name:'axon_list_projects',description:'Lista los proyectos permitidos por este token.',scope:'projects:read'},
-    {name:'axon_project_status',description:'Lee recursos y estado de un proyecto.',scope:'projects:read'},
-    {name:'axon_diagnose_project',description:'Comprueba proceso, puerto, Docker, dominio y dependencias. No modifica servicios.',scope:'diagnostics:run'},
-    {name:'axon_project_logs',description:'Lee hasta 200 líneas de logs del proyecto.',scope:'logs:read'},
-    {name:'axon_project_audit',description:'Lee operaciones recientes del proyecto.',scope:'audit:read'},
-    {name:'axon_list_backups',description:'Lee respaldos de un proyecto.',scope:'backups:read'},
-    {name:'axon_backup_project',description:'Ejecuta la política de respaldo previamente configurada para el proyecto.',scope:'backups:run'},
-  ];
+  if(deps.cloud)registerCloudMachineRoutes(app,deps.cloud,input);
+  app.get('/capabilities',c=>c.json({ok:true,...agentCapabilities(c.get('identity'),deps.cloud,!!deps.backups)}));
   app.get('/mcp',c => c.body(null,405,{'Allow':'POST'}));
   app.post('/mcp',async c => {
     const version = c.req.header('mcp-protocol-version');
     if (version && !['2025-03-26','2025-06-18','2025-11-25'].includes(version)) throw new PlatformError('Versión MCP no soportada');
     const accept = c.req.header('accept') || '';
     if (!accept.includes('application/json') || !accept.includes('text/event-stream')) throw new PlatformError('MCP requiere Accept application/json y text/event-stream',406);
-    const request = await input(c);
+    const request = c.get('rpcRequest') || await input(c);
     if (request.jsonrpc !== '2.0' || typeof request.method !== 'string' || (request.id !== undefined && typeof request.id !== 'string' && typeof request.id !== 'number')) throw new PlatformError('Solicitud JSON-RPC inválida');
-    const identity = c.get('identity'), available = tools.filter(t => identity.grants.some(g => g.scopes.includes(t.scope as Scope)));
+    const identity = c.get('identity'), available = permittedProjectTools(identity,!!deps.backups);
+    const availableCloud=permittedCloudTools(identity,deps.cloud);
     const success = (result:any) => c.json({jsonrpc:'2.0',id:request.id,result});
     const rpcError = (code:number,message:string) => c.json({jsonrpc:'2.0',id:request.id ?? null,error:{code,message}});
     if (request.id === undefined) return request.method.startsWith('notifications/') ? c.body(null,202) : rpcError(-32600,'La solicitud necesita id');
-    if (request.method === 'initialize') return success({protocolVersion:['2025-03-26','2025-06-18','2025-11-25'].includes(request.params?.protocolVersion) ? request.params.protocolVersion : '2025-11-25',capabilities:{tools:{listChanged:false}},serverInfo:{name:'axon',version:'1.0.0'}});
+    if (request.method === 'initialize') return success({protocolVersion:['2025-03-26','2025-06-18','2025-11-25'].includes(request.params?.protocolVersion) ? request.params.protocolVersion : '2025-11-25',capabilities:{tools:{listChanged:false}},serverInfo:{name:'axon',version:process.env.AXON_VERSION||'1.2.0'},instructions:AGENT_INSTRUCTIONS});
     if (request.method === 'ping') return success({});
-    if (request.method === 'tools/list') return success({tools:available.map(t => ({name:t.name,description:t.description,inputSchema:{type:'object',properties:t.name === 'axon_list_projects' ? {} : {projectId:{type:'string'}},required:t.name === 'axon_list_projects' ? [] : ['projectId'],additionalProperties:false},annotations:{readOnlyHint:t.scope !== 'backups:run',destructiveHint:false,idempotentHint:t.scope !== 'backups:run',openWorldHint:false}}))});
+    if (request.method === 'tools/list') return success({tools:agentTools(identity,deps.cloud,!!deps.backups)});
     if (request.method !== 'tools/call') return rpcError(-32601,'Método no soportado');
+    if(request.params?.name==='axon_capabilities'){
+      const args=request.params?.arguments||{};
+      if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).length)return rpcError(-32602,'Argumentos inválidos');
+      const result=agentCapabilities(identity,deps.cloud,!!deps.backups);return success({content:[{type:'text',text:JSON.stringify(result)}],structuredContent:result,isError:false});
+    }
+    const cloudTool=availableCloud.find(t=>t.name===request.params?.name);
+    if(cloudTool&&deps.cloud){try{const result=await callCloudTool(deps.cloud,identity,cloudTool.name,request.params?.arguments||{});return success({content:[{type:'text',text:JSON.stringify(result)}],structuredContent:result,isError:false});}catch(e){return success({content:[{type:'text',text:cloudError(e).message}],isError:true});}}
     const tool = available.find(t => t.name === request.params?.name);
     if (!tool) return rpcError(-32602,'Herramienta no disponible para este token');
     const args = request.params?.arguments || {};
@@ -130,7 +141,7 @@ export function registerPlatformRoutes(app:Hono,deps:PlatformApiDependencies) {
   for (const prefix of ['/api/access/*','/api/audit','/api/project-hub/*','/api/project-hub-inventory']) app.use(prefix,async(c,next)=>{c.header('Cache-Control','private, no-store');await next();});
   const handle = (fn:(c:any) => Promise<any> | any) => async(c:any) => {
     try { return await fn(c); }
-    catch (e) { return c.json({ok:false,error:e instanceof PlatformError ? e.message : 'No se pudo completar la operación'},e instanceof PlatformError ? e.status : 503); }
+    catch (e) { return c.json({ok:false,error:cloudError(e).message},cloudError(e).status); }
   };
   app.get('/api/project-hub-inventory',handle(async c => c.json({ok:true,containers:(await hub.sources.containers()).map(({id,name,state}) => ({id,name,state})),domains:hub.sources.domains().map(({id,fullDomain}) => ({id,fullDomain}))})));
   app.get('/api/project-hub/:id',handle(async c => c.json({ok:true,...await hub.overview(c.req.param('id'))})));
@@ -139,10 +150,12 @@ export function registerPlatformRoutes(app:Hono,deps:PlatformApiDependencies) {
   app.post('/api/project-hub/:id/diagnose',handle(async c => { const body = await input(c);if (Object.keys(body).length) throw new PlatformError('El diagnóstico no acepta parámetros');return c.json({ok:true,diagnostic:await diagnostics.run(c.req.param('id'),c.get('user'))}); }));
   app.get('/api/project-hub/:id/diagnostic',handle(c => { hub.project(c.req.param('id'));return c.json({ok:true,diagnostic:store.get('diagnostic',c.req.param('id')) || null}); }));
   app.get('/api/audit',handle(c => c.json({ok:true,...store.audit(c.req.query('project'),Number(c.req.query('before')) || undefined)})));
-  app.get('/api/access/tokens',c => c.json({ok:true,tokens:store.tokens(),scopes:SCOPES,projects:hub.sources.projects().map(({id,name}) => ({id,name}))}));
+  app.get('/api/access/tokens',c => c.json({ok:true,tokens:store.tokens().filter(t=>t.owner===c.get('user')),scopes:SCOPES,cloudScopes:CLOUD_SCOPES,cloudConnections:deps.cloud?.available(c.get('user'))||[],cloudLocalUrl:deps.cloudLocalUrl,projects:hub.sources.projects().map(({id,name}) => ({id,name}))}));
   app.post('/api/access/tokens',handle(async c => {
-    const value = await input(c);if (Object.keys(value).some(k => !['name','days','grants'].includes(k))) throw new PlatformError('Campo no permitido');
-    return c.json({ok:true,...store.createToken(value,c.get('user'),hub.sources.projects().map(p => p.id))},201);
+    const value = await input(c);if (Object.keys(value).some(k => !['name','days','grants','cloudGrants'].includes(k))) throw new PlatformError('Campo no permitido');
+    const cloudGrants=value.cloudGrants===undefined?[]:await deps.cloud?.grants(c.get('user'),value.cloudGrants);
+    if(!cloudGrants)throw new PlatformError('Conexiones no disponibles',503);
+    return c.json({ok:true,...store.createToken({...value,grants:value.grants||[],cloudGrants},c.get('user'),hub.sources.projects().map(p => p.id))},201);
   }));
-  app.delete('/api/access/tokens/:id',handle(c => { store.revoke(c.req.param('id'),c.get('user'));return c.json({ok:true}); }));
+  app.delete('/api/access/tokens/:id',handle(c => { store.revoke(c.req.param('id'),c.get('user'));deps.cloud?.retireCredentials();return c.json({ok:true}); }));
 }

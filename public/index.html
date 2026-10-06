@@ -12,41 +12,79 @@
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>AXON</title>
-  <link rel="stylesheet" href="/app.css?v=20261005f">
-  <link rel="axon-feature" data-axon-style="/feat-files.css?v=20261004maintenance">
-  <link rel="axon-feature" data-axon-style="/feat-scripts.css?v=18">
-  <link rel="axon-feature" data-axon-style="/feat-metrics.css?v=18">
-  <link rel="axon-feature" data-axon-style="/feat-drop.css?v=18">
-  <link rel="axon-feature" data-axon-style="/feat-ops.css?v=18">
-  <link rel="axon-feature" data-axon-style="/feat-notify.css?v=18">
-  <link rel="axon-feature" data-axon-style="/feat-compose.css?v=20261004maintenance">
-  <link rel="axon-feature" data-axon-style="/feat-agents.css?v=20">
-  <link rel="axon-feature" data-axon-style="/agent-context.css?v=1">
+  <link rel="stylesheet" href="/app.css?v=8c2eb1ee0364">
+  <link rel="axon-feature" data-axon-style="/feat-files.css?v=fe57b96c1ed2">
+  <link rel="axon-feature" data-axon-style="/feat-dropbox.css?v=fda01f602aac">
+  <link rel="axon-feature" data-axon-style="/feat-scripts.css?v=ab0005571a94">
+  <link rel="axon-feature" data-axon-style="/feat-metrics.css?v=f13a73b573bc">
+  <link rel="axon-feature" data-axon-style="/feat-drop.css?v=b5d7bf6f588e">
+  <link rel="axon-feature" data-axon-style="/feat-ops.css?v=a7379242a5b2">
+  <link rel="axon-feature" data-axon-style="/feat-notify.css?v=bce6078e91f0">
+  <link rel="axon-feature" data-axon-style="/feat-compose.css?v=6f871c921466">
+  <link rel="axon-feature" data-axon-style="/feat-agents.css?v=03143ea26d1e">
+  <link rel="axon-feature" data-axon-style="/agent-context.css?v=41d2320e73be">
   <link rel="axon-feature" data-axon-style="/feat-library.css?v=7481e71e1c95">
-  <link rel="axon-feature" data-axon-style="/navigation.css?v=1">
-  <link rel="axon-feature" data-axon-style="/dashboard.css?v=1">
-  <link rel="axon-feature" data-axon-style="/polish.css?v=1">
-  <link rel="axon-feature" data-axon-style="/maintenance.css?v=1">
-  <link rel="axon-feature" data-axon-style="/platform.css?v=1">
-  <link rel="axon-feature" data-axon-style="/vendor/webawesome/styles/themes/default.css?v=3.14.0">
-  <link rel="stylesheet" href="/design-system.css?v=20261005-menu">
+  <link rel="axon-feature" data-axon-style="/navigation.css?v=5f9ea34490fd">
+  <link rel="axon-feature" data-axon-style="/dashboard.css?v=9c0cbcfa963d">
+  <link rel="axon-feature" data-axon-style="/polish.css?v=3886aca50e96">
+  <link rel="axon-feature" data-axon-style="/maintenance.css?v=c01ec4727f7f">
+  <link rel="axon-feature" data-axon-style="/backups.css?v=6f6c4143ee69">
+  <link rel="axon-feature" data-axon-style="/platform.css?v=d22264619241">
+  <link rel="axon-feature" data-axon-style="/vendor/webawesome/styles/themes/default.css?v=e19fff39b8c9">
+  <link rel="stylesheet" href="/design-system.css?v=2f3d13b40e07">
+  <link rel="stylesheet" href="/login.css?v=3eab62086046">
 </head>
 <body>
   <div id="app">
     <div id="boot-screen" class="boot-screen" role="status"><img src="/marca/Isotipo.svg" alt=""><span class="boot-spinner" aria-hidden="true"></span><p id="boot-message">Preparando tu espacio…</p><button type="button" id="boot-retry" class="btn-secondary hidden">Reintentar</button></div>
     <div id="login-screen" class="login-screen hidden">
-      <div class="login-box">
-        <div class="brand"><img src="/marca/isologotipo.svg" alt="AXON" class="brand-logo"></div>
-        <span class="login-eyebrow">TU ESPACIO DE CONTROL</span><h1>Bienvenido a Axon</h1><p class="login-intro">Proyectos, archivos y servidor. Todo en un lugar.</p>
-        <form id="login-form">
-          <label for="username">Usuario</label>
-          <input type="text" id="username" placeholder="Usuario" autocomplete="username" required>
-          <label for="password">Contraseña</label><div class="password-field"><input type="password" id="password" placeholder="Contraseña" autocomplete="current-password" required><button type="button" id="password-toggle" class="icon-btn" aria-label="Mostrar contraseña" aria-pressed="false"><i data-lucide="eye"></i></button></div>
-          <label for="login-code" id="login-code-label" class="hidden">Código de tu autenticador</label><input type="text" id="login-code" class="hidden" placeholder="Código de verificación" autocomplete="one-time-code" inputmode="numeric" maxlength="6">
-          <button type="submit" class="btn-primary">Ingresar</button>
-          <div id="login-error" class="error" role="alert" aria-live="polite"></div><p class="login-security"><i data-lucide="shield-check"></i> Acceso privado a tu servidor</p>
-        </form>
-      </div>
+      <header class="login-header">
+        <img src="/marca/isologotipo.svg" alt="AXON" class="brand-logo">
+        <button type="button" id="login-theme" class="login-icon-button" aria-label="Cambiar a tema claro"><i data-lucide="sun" aria-hidden="true"></i></button>
+      </header>
+      <main class="login-layout">
+        <section class="login-story" aria-labelledby="login-story-title">
+          <p class="login-eyebrow">TU SERVIDOR. TU ESPACIO.</p>
+          <h2 id="login-story-title">Todo conectado.<br><span>Todo bajo control.</span></h2>
+          <p class="login-story-copy">De la idea al despliegue. Tus proyectos, tu infraestructura y tus agentes de IA, en un mismo espacio.</p>
+          <div class="login-network" role="img" aria-label="AXON conecta proyectos, archivos, servidor y agentes de IA">
+            <div class="login-network-grid" aria-hidden="true"></div>
+            <svg class="login-connections" viewBox="0 0 560 290" fill="none" aria-hidden="true">
+              <path d="M112 65H185Q210 65 210 90V120Q210 145 235 145H280"/>
+              <path d="M448 65H375Q350 65 350 90V120Q350 145 325 145H280"/>
+              <path d="M112 225H185Q210 225 210 200V170Q210 145 235 145H280"/>
+              <path d="M448 225H375Q350 225 350 200V170Q350 145 325 145H280"/>
+              <g class="login-signal"><path pathLength="1" d="M112 65H185Q210 65 210 90V120Q210 145 235 145H280"/><path pathLength="1" d="M448 65H375Q350 65 350 90V120Q350 145 325 145H280"/><path pathLength="1" d="M112 225H185Q210 225 210 200V170Q210 145 235 145H280"/><path pathLength="1" d="M448 225H375Q350 225 350 200V170Q350 145 325 145H280"/></g>
+            </svg>
+            <div class="login-node login-node-projects" aria-hidden="true"><i data-lucide="folder-git-2"></i><span>Proyectos</span></div>
+            <div class="login-node login-node-agents" aria-hidden="true"><i data-lucide="sparkles"></i><span>Agentes de IA</span></div>
+            <div class="login-node login-node-files" aria-hidden="true"><i data-lucide="files"></i><span>Archivos</span></div>
+            <div class="login-node login-node-server" aria-hidden="true"><i data-lucide="server"></i><span>Servidor</span></div>
+            <div class="login-network-core" aria-hidden="true"><img src="/marca/Isotipo.svg" alt=""></div>
+          </div>
+          <div class="login-story-footer"><span>Un espacio. Todas las conexiones.</span><button type="button" id="login-motion" class="login-icon-button" aria-label="Pausar animación" aria-pressed="false"><i data-lucide="pause" aria-hidden="true"></i></button></div>
+        </section>
+        <section class="login-box" aria-labelledby="login-title">
+          <div class="login-form-mark" aria-hidden="true"><i data-lucide="log-in"></i></div>
+          <h1 id="login-title">Entrá a tu espacio</h1>
+          <p class="login-intro" id="login-help">Usá el usuario configurado en tu servidor.</p>
+          <form id="login-form" aria-describedby="login-help">
+            <label for="username">Usuario</label>
+            <input type="text" id="username" name="username" placeholder="Tu usuario" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+            <label for="password">Contraseña</label>
+            <div class="password-field"><input type="password" id="password" name="password" placeholder="Tu contraseña" autocomplete="current-password" required><button type="button" id="password-toggle" class="icon-btn" aria-label="Mostrar contraseña" aria-controls="password" aria-pressed="false"><i data-lucide="eye" aria-hidden="true"></i></button></div>
+            <label for="login-code" id="login-code-label" class="hidden">Código de tu autenticador</label>
+            <input type="text" id="login-code" name="code" class="hidden" placeholder="000000" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" aria-describedby="login-code-help">
+            <p id="login-code-help" class="login-code-help hidden">Ingresá los 6 dígitos de tu app de autenticación.</p>
+            <button type="submit" id="login-submit" class="btn-primary"><span id="login-submit-label">Ingresar</span><i data-lucide="arrow-right" class="login-submit-arrow" aria-hidden="true"></i><span class="login-submit-spinner" aria-hidden="true"></span></button>
+            <p id="login-status" class="login-sr-only" role="status" aria-live="polite"></p>
+            <div id="login-error" class="error" role="alert" aria-live="polite"></div>
+          </form>
+          <p class="login-security"><i data-lucide="shield-check" aria-hidden="true"></i> Acceso privado a tu servidor</p>
+          <p class="login-ownership">Tu infraestructura. Tus datos. Tu control.</p>
+        </section>
+      </main>
+      <footer class="login-footer"><span>El centro de control de tu servidor.</span><span>Creá. Conectá. Administrá.</span></footer>
     </div>
 
     <div id="main-screen" class="hidden">
@@ -70,7 +108,7 @@
               <span class="nav-label">Proyectos</span>
               <span class="nav-count" id="nav-count-projects"></span>
             </button>
-            <button class="nav-item tab-btn" data-tab="backups"><i data-lucide="archive" class="lucide-icon"></i><span class="nav-label">Respaldos</span></button>
+            <button class="nav-item tab-btn" data-tab="backups"><i data-lucide="archive" class="lucide-icon"></i><span class="nav-label">Backups</span></button>
             <button class="nav-item tab-btn" data-tab="audit"><i data-lucide="history" class="lucide-icon"></i><span class="nav-label">Historial</span></button>
             <button class="nav-item tab-btn" data-tab="access"><i data-lucide="key-round" class="lucide-icon"></i><span class="nav-label">Integraciones</span></button>
             <button class="nav-item tab-btn" data-tab="desktop"><i data-lucide="monitor" class="lucide-icon"></i><span class="nav-label">Escritorio</span></button>
@@ -193,13 +231,30 @@
               <div class="section-header">
                 <h2>Actualizar programas</h2>
                 <div class="section-actions">
-                  <button id="update-all-btn" class="btn-primary btn-inline"><i data-lucide="arrow-up-circle" class="lucide-icon"></i> Actualizar todo</button>
+                  <button id="update-all-btn" class="btn-primary btn-inline"><i data-lucide="arrow-up-circle" class="lucide-icon"></i> Revisar actualizaciones</button>
                   <button id="programs-refresh" class="btn-secondary" title="Recargar"><i data-lucide="refresh-cw" class="lucide-icon"></i></button>
                   <span class="last-updated" id="programs-updated"></span>
                 </div>
               </div>
-              <div id="programs-grid" class="programs-grid"></div>
-              <div id="programs-empty" class="empty-state hidden">No se detectaron programas actualizables</div>
+              <p id="software-summary" class="software-summary" role="status">Leyendo los gestores del servidor…</p>
+              <div id="software-modes" class="software-modes" role="group" aria-label="Vista de programas">
+                <button type="button" class="btn-secondary active" data-mode="updates" aria-pressed="true">Actualizaciones</button>
+                <button type="button" class="btn-secondary" data-mode="installed" aria-pressed="false">Instalados</button>
+                <button type="button" class="btn-secondary" data-mode="sources" aria-pressed="false">Fuentes</button>
+              </div>
+              <div id="software-notice" role="status"></div>
+              <div id="software-toolbar" class="software-toolbar">
+                <input type="search" id="software-query" placeholder="Buscar programa o paquete…" aria-label="Buscar programa o paquete">
+                <select id="software-manager" aria-label="Filtrar por gestor"><option value="">Todos los gestores</option></select>
+                <select id="software-scope" aria-label="Filtrar por ámbito"><option value="">Todos los ámbitos</option><option value="system">Sistema</option><option value="user">Usuario</option></select>
+              </div>
+              <div id="programs-grid" class="software-list"></div>
+              <div id="software-pagination" class="software-pagination">
+                <span id="software-page"></span>
+                <button type="button" id="software-select-page" class="btn-secondary">Seleccionar página</button>
+                <button type="button" id="software-prev" class="btn-secondary" aria-label="Página anterior">Anterior</button>
+                <button type="button" id="software-next" class="btn-secondary" aria-label="Página siguiente">Siguiente</button>
+              </div>
 
               <div class="section-header" style="margin-top:2rem">
                 <h2>Historial</h2>
@@ -210,15 +265,6 @@
               <div id="jobs-history" class="jobs-history"></div>
               <div id="jobs-empty" class="empty-state hidden">Sin trabajos recientes</div>
 
-              <div class="section-header" style="margin-top:2rem">
-                <h2>Programas instalados</h2>
-                <div class="section-actions">
-                  <input type="text" id="installed-filter" placeholder="Filtrar apps…" class="filter-input">
-                  <button id="installed-load" class="btn-secondary"><i data-lucide="list" class="lucide-icon"></i> Cargar lista</button>
-                </div>
-              </div>
-              <div id="installed-summary" class="installed-summary hidden"></div>
-              <div id="installed-apps" class="apps-grid"></div>
             </section>
 
             <!-- PROJECTS -->
@@ -325,7 +371,7 @@
                 <iframe id="browser-frame" title="Navegador del servidor" allow="clipboard-read; clipboard-write"></iframe>
               </div>
             </section>
-            <section id="tab-backups" class="tab-content"><div class="section-header"><h2>Respaldos</h2></div><div id="backup-content" class="platform-view"></div></section>
+            <section id="tab-backups" class="tab-content"><div class="section-header"><div><h2>Backups</h2><p class="section-sub">Copias de tus archivos, listas para cuando las necesites.</p></div></div><div id="backup-content" class="backups-view"></div></section>
             <section id="tab-audit" class="tab-content"><div class="section-header"><h2>Historial de operaciones</h2></div><div id="audit-content" class="platform-view"></div></section>
             <section id="tab-access" class="tab-content"><div class="section-header"><h2>Integraciones</h2></div><div id="access-content" class="platform-view"></div></section>
             <section id="tab-desktop" class="tab-content"><div class="section-header"><h2>Escritorio del servidor</h2></div><div id="desktop-content" class="platform-view"></div></section>
@@ -589,48 +635,73 @@
 
   <div id="toast-container"></div>
 
-  <script type="text/axon-feature" data-src="/vendor/qrcode.js"></script>
-  <script defer src="/vendor/lucide.min.js?v=18"></script>
-  <script defer src="/assets.js?v=20261005a"></script>
-  <script defer src="/request-client.js?v=1"></script>
-  <script defer src="/interaction.js?v=1"></script>
-  <script defer src="/themes.js?v=1"></script>
-  <link rel="axon-feature" data-axon-style="/agent-accounts.css?v=3">
-  <link rel="axon-feature" data-axon-style="/agent-usage.css?v=1">
-  <link rel="axon-feature" data-axon-style="/agent-consumption.css?v=1">
-  <script type="text/axon-feature" data-src="/terminal-tools.js?v=1"></script>
-  <script defer src="/app.js?v=20261005f"></script>
-  <link rel="stylesheet" href="/host-storage.css?v=1">
-  <script defer src="/host-storage.js?v=1"></script>
-  <link rel="stylesheet" href="/transfer-review.css?v=20261005f">
-  <script defer src="/transfer-review.js?v=20261005f"></script>
-  <script type="text/axon-feature" data-src="/feat-files.js?v=20261005f"></script>
-  <script type="text/axon-feature" data-src="/feat-scripts.js?v=18"></script>
-  <script type="text/axon-feature" data-src="/feat-logs.js?v=18"></script>
-  <script type="text/axon-feature" data-src="/feat-metrics.js?v=18"></script>
-  <script type="text/axon-feature" data-src="/feat-drop.js?v=18"></script>
-  <script type="text/axon-feature" data-src="/feat-ops.js?v=18"></script>
-  <link rel="axon-feature" data-axon-style="/optimizer.css?v=1">
-  <script type="text/axon-feature" data-src="/optimizer.js?v=2"></script>
-  <script type="text/axon-feature" data-src="/feat-notify.js?v=19"></script>
-  <script type="text/axon-feature" data-src="/feat-compose.js?v=20261004maintenance"></script>
-  <script type="text/axon-feature" data-src="/agent-context.js?v=1"></script>
-  <script type="text/axon-feature" data-src="/agent-usage.js?v=1"></script>
-  <script type="text/axon-feature" data-src="/agent-consumption.js?v=1"></script>
-  <script type="text/axon-feature" data-src="/agent-accounts.js?v=3"></script>
-  <script type="text/axon-feature" data-src="/feat-agents.js?v=20261004consumption"></script>
+  <script type="text/axon-feature" data-src="/vendor/qrcode.js?v=18ae399f8118"></script>
+  <script defer src="/vendor/lucide.min.js?v=344d31835187"></script>
+  <script defer src="/assets.js?v=4b3b47dc2cf3"></script>
+  <script defer src="/request-client.js?v=9e06d92f3fee"></script>
+  <script defer src="/interaction.js?v=1ec3321185e4"></script>
+  <script defer src="/themes.js?v=e4b0488469e9"></script>
+  <script defer src="/login.js?v=5d86afbc57e9"></script>
+  <link rel="axon-feature" data-axon-style="/agent-accounts.css?v=5fc13ad7526f">
+  <link rel="axon-feature" data-axon-style="/agent-usage.css?v=e5b7cbc5b5db">
+  <link rel="axon-feature" data-axon-style="/agent-consumption.css?v=8a0451936c0f">
+  <script type="text/axon-feature" data-src="/terminal-tools.js?v=dfff049a9a58"></script>
+  <link rel="stylesheet" href="/software.css?v=aa231f6eb768">
+  <script defer src="/software.js?v=a1f07389f852"></script>
+  <script defer src="/app.js?v=7d6e833d63fa"></script>
+  <link rel="stylesheet" href="/host-storage.css?v=f6a41912b754">
+  <script defer src="/host-storage.js?v=aa6cbdc9ae5d"></script>
+  <link rel="stylesheet" href="/transfer-review.css?v=98bc9c35eadc">
+  <script defer src="/transfer-review.js?v=c3660b2e92ce"></script>
+  <script type="text/axon-feature" data-src="/feat-files.js?v=654bc634f358"></script>
+  <script type="text/axon-feature" data-src="/feat-dropbox.js?v=fefbb2bafdfb"></script>
+  <script type="text/axon-feature" data-src="/feat-scripts.js?v=940634079aa1"></script>
+  <script type="text/axon-feature" data-src="/feat-logs.js?v=d840b157703e"></script>
+  <script type="text/axon-feature" data-src="/feat-metrics.js?v=e4a2c01e4e3d"></script>
+  <script type="text/axon-feature" data-src="/feat-drop.js?v=99ee78b1b0c1"></script>
+  <script type="text/axon-feature" data-src="/feat-ops.js?v=02ca922b0bf7"></script>
+  <link rel="axon-feature" data-axon-style="/optimizer.css?v=128ae12f8225">
+  <script type="text/axon-feature" data-src="/optimizer.js?v=d61022fbcc03"></script>
+  <script type="text/axon-feature" data-src="/feat-notify.js?v=82542edeb1ae"></script>
+  <script type="text/axon-feature" data-src="/feat-compose.js?v=6bff3b32367a"></script>
+  <script type="text/axon-feature" data-src="/agent-context.js?v=e4ca47eee189"></script>
+  <script type="text/axon-feature" data-src="/agent-usage.js?v=396909dfd87e"></script>
+  <script type="text/axon-feature" data-src="/agent-consumption.js?v=2eea796742b5"></script>
+  <script type="text/axon-feature" data-src="/agent-accounts.js?v=e83a6b57d1b9"></script>
+  <script type="text/axon-feature" data-src="/feat-agents.js?v=cda7a8eb9563"></script>
   <script type="text/axon-feature" data-src="/feat-library.js?v=10ddf49bbe08"></script>
-  <script type="text/axon-feature" data-src="/dashboard.js?v=1"></script>
-  <script type="text/axon-feature" data-src="/storage.js?v=20261005f"></script>
-  <script type="text/axon-feature" data-src="/home-links.js?v=1"></script>
-  <script type="text/axon-feature" data-src="/app-migrations.js?v=1"></script>
-  <script type="text/axon-feature" data-src="/app-store.js?v=20261004maintenance"></script>
-  <script type="text/axon-feature" data-src="/settings.js?v=1"></script>
-  <script type="text/axon-feature" data-src="/view-controls.js?v=20261004accounts"></script>
-  <script type="text/axon-feature" data-src="/platform.js?v=1"></script>
-  <script type="text/axon-feature" data-src="/platform-operations.js?v=1"></script>
-  <script type="text/axon-feature" data-src="/shell.js?v=20261005f"></script>
-  <script type="text/axon-feature" data-module="true" data-src="/navigation.js?v=1"></script>
-  <script type="text/axon-feature" data-src="/mobile.js?v=19"></script>
+  <script type="text/axon-feature" data-src="/dashboard.js?v=0e46d02e9f75"></script>
+  <script type="text/axon-feature" data-src="/storage.js?v=c4284df86692"></script>
+  <script type="text/axon-feature" data-src="/home-links.js?v=232c75cba96d"></script>
+  <script type="text/axon-feature" data-src="/app-migrations.js?v=8afd3fef3a2a"></script>
+  <script type="text/axon-feature" data-src="/app-store.js?v=d8e9ea9f5d12"></script>
+  <script type="text/axon-feature" data-src="/connections.js?v=6b388ec8dd23"></script>
+  <script type="text/axon-feature" data-src="/settings.js?v=9070ceb3dcfd"></script>
+  <script type="text/axon-feature" data-src="/view-controls.js?v=a65cc71fb1b8"></script>
+  <script type="text/axon-feature" data-src="/platform.js?v=e659e6646da7"></script>
+  <script type="text/axon-feature" data-src="/backups.js?v=6f88ea9536bf"></script>
+  <script type="text/axon-feature" data-src="/platform-operations.js?v=95d2b4d80124"></script>
+  <script type="text/axon-feature" data-src="/shell.js?v=9032f2c848e8"></script>
+  <script type="text/axon-feature" data-module="true" data-src="/navigation.js?v=28e95931d809"></script>
+  <script type="text/axon-feature" data-src="/mobile.js?v=66906ef2ce44"></script>
+  <script>
+    // Boot watchdog — runs even if app.js itself failed to load (deploy
+    // restart, SW offline fallback). If the boot screen is still up after a
+    // while and no error surfaced, offer a manual retry instead of a stuck
+    // spinner.
+    window.__axonBootWatchdog = setTimeout(function () {
+      var boot = document.getElementById('boot-screen');
+      var retry = document.getElementById('boot-retry');
+      if (!boot || boot.classList.contains('hidden')) return;
+      if (retry && !retry.classList.contains('hidden')) return;
+      var msg = document.getElementById('boot-message');
+      if (msg) msg.textContent = 'La carga está tardando más de lo habitual — el servidor puede estar reiniciándose.';
+      if (retry) retry.classList.remove('hidden');
+    }, 15000);
+    // If app.js never ran there is no initAuth handler — retry must reload.
+    document.addEventListener('click', function (ev) {
+      if (ev.target && ev.target.id === 'boot-retry' && !window.__axonApp) location.reload();
+    });
+  </script>
 </body>
 </html>

@@ -150,6 +150,12 @@ def listing(rs):
     result.append(item)
  return dict(items=result,complete=complete,dirs=[r[1] for r in rs])
 handles=[];lock=None
+def reason(e):
+ if isinstance(e,BlockingIOError):return 'Hay otra operación de archivos en curso; esperá unos segundos y reintentá'
+ if isinstance(e,PermissionError):return 'Sin permiso: el elemento pertenece a otro usuario (por ejemplo root) o su carpeta no es modificable. Axon no lo mueve a la papelera'
+ if isinstance(e,FileNotFoundError):return 'El elemento ya no existe; actualizá la vista'
+ if isinstance(e,OSError):return 'El sistema rechazó la operación: '+(e.strerror or str(e))
+ return 'Metadatos de la papelera inválidos o incompletos; revisalos antes de reintentar'
 try:
  if action=='probe':
   p=req['path'];fd=anchor(os.path.dirname(p));handles.append(fd);s=os.stat(os.path.basename(p),dir_fd=fd,follow_symlinks=False);out={'ok':True,'identity':identity(s)}
@@ -234,7 +240,7 @@ try:
    out=dict(ok=True,state='restored',fromPath=p+'/'+key,toPath=original,id=selection['id'],retiredBytes='0',message='Original restaurado sin sobrescribir archivos.')
   else:raise Guard('Operación no admitida')
 except (Guard,OSError,ValueError,KeyError,StopIteration) as e:
- out={'ok':False,'state':'interrupted' if changed else 'failed','error':str(e) if isinstance(e,Guard) else 'No se pudo completar: permisos, herramienta, metadatos o recurso ocupado. Se requiere revisión.'}
+ out={'ok':False,'state':'interrupted' if changed else 'failed','error':str(e) if isinstance(e,Guard) else reason(e)}
 finally:
  for fd in handles:
   try:os.close(fd)

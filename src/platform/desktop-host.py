@@ -28,6 +28,14 @@ def folder(home):
                       DBUS_SESSION_BUS_ADDRESS='unix:path=/run/user/' + str(os.getuid()) + '/bus')
     return base
 
+PHYSICAL = ':0'
+
+def physical_authority():
+    uid = os.getuid()
+    for candidate in (Path('/run/user/%d/gdm/Xauthority' % uid), Path(os.path.expanduser('~/.Xauthority'))):
+        if candidate.is_file() and not candidate.is_symlink() and candidate.stat().st_uid == uid and Path('/tmp/.X11-unix/X0').exists(): return candidate
+    return None
+
 def unit(command):
     p = subprocess.run(['systemctl', '--user', *command], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
     if p.returncode: raise RuntimeError('No se pudo gestionar la sesión gráfica del usuario')
@@ -42,10 +50,10 @@ def status(home):
     base = folder(home)
     p = subprocess.run(['systemctl', '--user', 'show', 'axon-desktop.service', '-p', 'ActiveState', '-p', 'MainPID'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
     props = dict(line.split('=', 1) for line in p.stdout.decode().splitlines() if '=' in line)
-    missing = [name for name in ['Xvfb', 'x11vnc', 'websockify', 'openbox', 'xauth'] if not subprocess.run(['/usr/bin/which', name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0]
+    missing = [name for name in (['x11vnc', 'websockify'] if physical_authority() else ['Xvfb', 'x11vnc', 'websockify', 'openbox', 'xauth']) if not subprocess.run(['/usr/bin/which', name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0]
     return dict(ok=True, state=props.get('ActiveState', 'not-installed'), pid=int(props.get('MainPID', '0')), connected=connected(WS_PORT) and connected(VNC_PORT),
                 applications=[dict(id=k, name={'terminal':'Terminal', 'browser':'Chrome', 'files':'Archivos', 'editor':'Editor de texto', 'firefox':'Firefox'}[k]) for k,v in APPS.items() if Path(v[0]).is_file()],
-                missing=missing, display=DISPLAY, session='Sesión dedicada de AXON', websocketPort=WS_PORT)
+                missing=missing, display=PHYSICAL if physical_authority() else DISPLAY, session='Pantalla real del servidor' if physical_authority() else 'Sesión dedicada de AXON', websocketPort=WS_PORT)
 
 def install(home, source):
     base = folder(home)
@@ -70,11 +78,7 @@ def supervise(home):
     base = folder(home); lock = os.open(base / 'session.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     if Path('/tmp/.X11-unix/X117').exists() or connected(VNC_PORT) or connected(WS_PORT): raise RuntimeError('El display o puerto de AXON está ocupado por otra sesión')
-    authority = base / 'Xauthority'
-    if authority.is_symlink(): raise ValueError('Xauthority enlazado no permitido')
-    authority.touch(mode=0o600, exist_ok=True); os.chmod(authority, 0o600)
-    subprocess.run(['xauth', '-f', str(authority), 'add', DISPLAY, '.', secrets.token_hex(16)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    env = dict(os.environ, DISPLAY=DISPLAY, XAUTHORITY=str(authority))
+    mirror = physical_authority()
     children = []
     def cleanup():
         for child in reversed(children):
@@ -87,13 +91,21 @@ def supervise(home):
         cleanup(); sys.exit(0)
     signal.signal(signal.SIGTERM, stop); signal.signal(signal.SIGINT, stop)
     try:
-        children.append(subprocess.Popen(['Xvfb', DISPLAY, '-screen', '0', '1440x900x24', '-nolisten', 'tcp', '-auth', str(authority)], env=env))
-        for _ in range(50):
-            if Path('/tmp/.X11-unix/X117').exists(): break
-            if children[0].poll() is not None: raise RuntimeError('Xvfb no inició')
-            time.sleep(.1)
-        children.append(subprocess.Popen(['openbox'], env=env))
-        children.append(subprocess.Popen(['x11vnc', '-display', DISPLAY, '-auth', str(authority), '-localhost', '-rfbport', str(VNC_PORT), '-forever', '-shared', '-nopw', '-quiet'], env=env))
+        if mirror:
+            env = dict(os.environ, DISPLAY=PHYSICAL, XAUTHORITY=str(mirror))
+        else:
+            authority = base / 'Xauthority'
+            if authority.is_symlink(): raise ValueError('Xauthority enlazado no permitido')
+            authority.touch(mode=0o600, exist_ok=True); os.chmod(authority, 0o600)
+            subprocess.run(['xauth', '-f', str(authority), 'add', DISPLAY, '.', secrets.token_hex(16)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            env = dict(os.environ, DISPLAY=DISPLAY, XAUTHORITY=str(authority))
+            children.append(subprocess.Popen(['Xvfb', DISPLAY, '-screen', '0', '1440x900x24', '-nolisten', 'tcp', '-auth', str(authority)], env=env))
+            for _ in range(50):
+                if Path('/tmp/.X11-unix/X117').exists(): break
+                if children[0].poll() is not None: raise RuntimeError('Xvfb no inició')
+                time.sleep(.1)
+            children.append(subprocess.Popen(['openbox'], env=env))
+        children.append(subprocess.Popen(['x11vnc', '-display', env['DISPLAY'], '-auth', env['XAUTHORITY'], '-localhost', '-rfbport', str(VNC_PORT), '-forever', '-shared', '-nopw', '-quiet', '-noxdamage'], env=env))
         children.append(subprocess.Popen(['websockify', '127.0.0.1:' + str(WS_PORT), '127.0.0.1:' + str(VNC_PORT)], env=env))
         while all(child.poll() is None for child in children): time.sleep(1)
         raise RuntimeError('Una herramienta de la sesión gráfica terminó')
@@ -112,11 +124,13 @@ def main(request):
         if app == 'browser': argv += ['--user-data-dir=' + str(base / 'chrome'), '--no-first-run', '--disable-session-crashed-bubble']
         if app == 'firefox':
             profile = base / 'firefox'; profile.mkdir(exist_ok=True, mode=0o700); argv += ['--no-remote', '--profile', str(profile)]
-        env = dict(os.environ, DISPLAY=DISPLAY, XAUTHORITY=str(base / 'Xauthority'))
+        mirror = physical_authority()
+        disp, auth = (PHYSICAL, str(mirror)) if mirror else (DISPLAY, str(base / 'Xauthority'))
+        env = dict(os.environ, DISPLAY=disp, XAUTHORITY=auth)
         name = 'axon-desktop-app-' + secrets.token_hex(8)
         result = subprocess.run(['systemd-run', '--user', '--collect', '--quiet', '--unit=' + name,
                                  '--property=BindsTo=axon-desktop.service', '--property=After=axon-desktop.service',
-                                 '/usr/bin/env', 'DISPLAY=' + DISPLAY, 'XAUTHORITY=' + str(base / 'Xauthority'), *argv],
+                                 '/usr/bin/env', 'DISPLAY=' + disp, 'XAUTHORITY=' + auth, *argv],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
         if result.returncode: raise RuntimeError('La aplicación no pudo abrirse')
         return dict(ok=True, app=app, unit=name)

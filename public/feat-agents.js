@@ -1006,8 +1006,8 @@
     box.querySelector('.agd-update')?.addEventListener('click', async (e) => {
       const pid = e.currentTarget.dataset.pid;
       try {
-        const { job } = await api(`/api/programs/${pid}/update`, { method: 'POST' });
-        openJobModal(job);
+        const { plan } = await api(`/api/programs/${pid}/update`, { method: 'POST',body:{review:true} });
+        await window.AxonSoftware.confirmPlan(plan);
       } catch (err) { errToast(err); }
     });
     box.querySelectorAll('.agd-auth').forEach((b) => b.addEventListener('click', async () => {

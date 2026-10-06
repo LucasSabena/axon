@@ -6,7 +6,10 @@ import { timingSafeEqual, randomBytes, createHash } from 'node:crypto';
 export const SCOPES = ['projects:read', 'diagnostics:run', 'logs:read', 'backups:read', 'backups:run', 'audit:read'] as const;
 export type Scope = typeof SCOPES[number];
 export interface Grant { projectId: string; scopes: Scope[] }
-export interface ApiIdentity { id: string; name: string; owner: string; grants: Grant[]; expiresAt: number }
+export const CLOUD_SCOPES = ['cloud:read','cloud:upload'] as const;
+export type CloudScope = typeof CLOUD_SCOPES[number];
+export interface CloudGrant { provider:string; source:string; root:string; scopes:CloudScope[]; connectionId:string }
+export interface ApiIdentity { id: string; name: string; owner: string; grants: Grant[]; cloudGrants?:CloudGrant[]; expiresAt: number }
 export interface AuditEntry {
   id: string; at: number; actor: string; credentialId?: string; action: string; resource: string;
   projectId?: string; status: 'running' | 'ok' | 'failed' | 'interrupted'; httpStatus?: number;
@@ -39,10 +42,20 @@ export class PlatformStore {
     const versions = this.db.query('SELECT version FROM platform_version').all() as {version:number}[];
     if (versions.length !== 1 || versions[0].version !== 1) { this.db.close(); throw new Error('Versión operativa no compatible'); }
   }
-  createToken(input: { name: unknown; days: unknown; grants: unknown }, owner: string, projects: string[]) {
+  createToken(input: { name: unknown; days: unknown; grants: unknown; cloudGrants?:unknown }, owner: string, projects: string[]) {
     const name = text(input.name, 80), days = Number(input.days);
     if (!Number.isInteger(days) || days < 1 || days > 365) throw new PlatformError('La duración debe ser de 1 a 365 días');
-    if (!Array.isArray(input.grants) || !input.grants.length || input.grants.length > 100) throw new PlatformError('Seleccioná al menos un proyecto y permiso');
+    if (!Array.isArray(input.grants) || input.grants.length > 100) throw new PlatformError('Permisos de proyecto inválidos');
+    const cloudGrants:CloudGrant[]=[];
+    if(input.cloudGrants!==undefined){
+      if(!Array.isArray(input.cloudGrants)||input.cloudGrants.length>100)throw new PlatformError('Permisos de conexión inválidos');
+      for(const g of input.cloudGrants){
+        if(!g||Object.keys(g).some(k=>!['provider','source','root','scopes','connectionId'].includes(k))||!['dropbox','gdrive','onedrive'].includes(g.provider)||typeof g.source!=='string'||!g.source||g.source.length>100||typeof g.root!=='string'||g.root.length>4096||/[\x00-\x1f\x7f\\]/.test(g.root)||(g.root&&(!g.root.startsWith('/')||g.root.endsWith('/')||g.root.includes('//')))||g.root.split('/').some((p:string)=>p==='.'||p==='..')||typeof g.connectionId!=='string'||!g.connectionId||g.connectionId.length>200||!Array.isArray(g.scopes)||!g.scopes.length||g.scopes.some((s:any)=>!CLOUD_SCOPES.includes(s)))throw new PlatformError('Permiso de conexión inválido');
+        if(cloudGrants.some(v=>v.provider===g.provider&&v.source===g.source&&v.root===g.root))throw new PlatformError('Carpeta de conexión duplicada');
+        cloudGrants.push({provider:g.provider,source:g.source,root:g.root,connectionId:g.connectionId,scopes:[...new Set<CloudScope>(g.scopes)]});
+      }
+    }
+    if(!input.grants.length&&!cloudGrants.length)throw new PlatformError('Seleccioná al menos un proyecto o conexión y permiso');
     const seen = new Set<string>();
     const grants: Grant[] = input.grants.map((g: any) => {
       if (!g || Object.keys(g).some(k => !['projectId', 'scopes'].includes(k)) || !projects.includes(g.projectId) || seen.has(g.projectId)) throw new PlatformError('Proyecto inválido o duplicado');
@@ -50,7 +63,7 @@ export class PlatformStore {
       if (!Array.isArray(g.scopes) || !g.scopes.length || g.scopes.some((s: any) => !SCOPES.includes(s))) throw new PlatformError('Permiso inválido');
       return { projectId: g.projectId, scopes: [...new Set<Scope>(g.scopes)] };
     });
-    const identity: ApiIdentity = { id: crypto.randomUUID(), name, owner, grants, expiresAt: Date.now() + days * 86400000 };
+    const identity: ApiIdentity = { id: crypto.randomUUID(), name, owner, grants,...(cloudGrants.length?{cloudGrants}:{}), expiresAt: Date.now() + days * 86400000 };
     const token = `axon_${identity.id}_${randomBytes(32).toString('base64url')}`;
     this.db.query('INSERT INTO tokens(id,hash,payload) VALUES(?,?,?)').run(identity.id, digest(token), JSON.stringify(identity));
     this.append({actor: owner,action:'token.create',resource:identity.id,status:'ok',detail:name});
@@ -72,6 +85,7 @@ export class PlatformStore {
   require(identity: ApiIdentity, projectId: string, scope: Scope) {
     if (!this.permits(identity,projectId,scope)) throw new PlatformError('El token no tiene permiso para este proyecto y acción',403);
   }
+  assertActive(identity:ApiIdentity){const row=this.db.query('SELECT revoked,payload FROM tokens WHERE id=?').get(identity.id) as {revoked:number;payload:string}|null;if(!row||row.revoked||JSON.parse(row.payload).expiresAt<=Date.now())throw new PlatformError('Token revocado o vencido',401);}
   tokens() {
     return (this.db.query('SELECT payload,revoked,last_used FROM tokens ORDER BY rowid DESC').all() as any[]).map(r => ({...JSON.parse(r.payload),revoked:!!r.revoked,lastUsed:r.last_used}));
   }

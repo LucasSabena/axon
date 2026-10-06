@@ -2,7 +2,7 @@
   'use strict';
   // Filters operate on the current snapshot and survive live refreshes.
   for (const [section, label] of [['ports','puertos, proceso o carpeta'],['projects','proyecto o carpeta'],['docker','contenedor o imagen'],['domains','dominio o destino'],['programs','programa o herramienta']]) {
-    const sec=document.querySelector(`#tab-${section}`); if(!sec)continue;
+    const sec=document.querySelector(`#tab-${section}`); if(!sec||section==='programs')continue;
     const bar=document.createElement('div'); bar.className='view-tools';
     bar.innerHTML=`<input type="search" class="filter-input" aria-label="Buscar ${label}" placeholder="Buscar ${label}…"><select aria-label="Filtrar ${section}">${section==='programs'?'<option value="all">Todos los programas</option><option value="installed">Instalados</option><option value="updates">Con actualizaciones</option><option value="available">Disponibles</option>':section==='docker'||section==='projects'?'<option value="all">Todos los estados</option><option value="running">En ejecución</option><option value="stopped">Detenidos</option>':'<option value="all">Todos</option>'}</select><span class="last-updated" role="status"></span>`;
     sec.querySelector('.section-header').after(bar);
@@ -42,7 +42,7 @@
   document.addEventListener('axon:section',e=>{
     const section=e.detail;
     const sec=document.querySelector(`#tab-${section}`);
-    const empty=!sec?.querySelector('tbody tr, .program-card, .lib-tile, .fm-row, .agent-row');
+    const empty=!sec?.querySelector('tbody tr, .program-card, .software-row, .software-source, .lib-tile, .fm-row, .agent-row');
     if(!['ports','projects','docker','domains','programs'].includes(section)){progress.classList.add('hidden');return;}
     progress.classList.toggle('hidden',!empty);
     const target=sec.querySelector('tbody, #programs-grid');

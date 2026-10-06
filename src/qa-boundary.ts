@@ -25,11 +25,13 @@ export function registerQaBoundary(app:Hono,root:string|null){
    const fixtureLibrary=/^\/api\/library\/(favorite|shares|collections|rescan|settings)$/.test(p);
    const fixtureProject=/^\/api\/projects$/.test(p);
    const fixtureAgentDoc=p==='/api/agent-docs/create';
+   // Icon assignments and uploads only write the QA-owned AXON cache.
+   const fixtureSoftwareIcons=/^\/api\/software\/icons\/[^/]+(?:\/upload)?$/.test(p);
    // Account metadata and launcher writes use the QA-owned home. Logins remain
    // blocked: they would run real agent binaries and contact external accounts.
    const fixtureAccounts=/^\/api\/agent-accounts\/(codex|claude)(?:\/(activate|rename|install))?$/.test(p);
-   const fixturePlatform=/^\/api\/(access\/tokens(?:\/[^/]+)?|project-hub\/[^/]+\/(diagnose|bindings)|backups\/(policies(?:\/[^/]+\/run)?|jobs\/[^/]+\/(restore|verify)))$/.test(p);
-   if(!safe&&!fixtureTrash&&!fixtureTransfer&&!fixtureFile&&!fixtureLibrary&&!fixtureAccounts&&!fixturePlatform&&!fixtureProject&&!fixtureAgentDoc)return c.json({ok:false,error:'QA: mutación de host bloqueada por el servidor; usá pruebas con fixtures inyectadas'},403);
+   const fixturePlatform=/^\/api\/(access\/tokens(?:\/[^/]+)?|project-hub\/[^/]+\/(diagnose|bindings)|backups\/(recovery-kit|policies(?:\/[^/]+(?:\/run)?)?|jobs\/[^/]+\/(restore|verify)))$/.test(p);
+   if(!safe&&!fixtureTrash&&!fixtureTransfer&&!fixtureFile&&!fixtureLibrary&&!fixtureAccounts&&!fixturePlatform&&!fixtureProject&&!fixtureAgentDoc&&!fixtureSoftwareIcons)return c.json({ok:false,error:'QA: mutación de host bloqueada por el servidor; usá pruebas con fixtures inyectadas'},403);
   }
   await next();
  });

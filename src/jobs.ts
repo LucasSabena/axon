@@ -93,6 +93,8 @@ function appendLog(job: Job, chunk: string) {
   }
 }
 
+export function runningJobs(): Job[] { return [...jobs.values()].filter(j=>j.status==='running'); }
+
 export function listJobs(): Job[] {
   return Array.from(jobs.values())
     .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
@@ -108,6 +110,7 @@ export function getJob(id: string): Job | undefined {
 
 export interface JobStep extends ProgramStep {
   group?: string;
+  displayCommand?: string;
 }
 
 export function runJob(title: string, steps: JobStep[], options: { transient?: boolean } = {}): Job {
@@ -151,7 +154,7 @@ async function execute(job: Job, steps: JobStep[], options: { transient?: boolea
     failedGroup = undefined;
 
     state.status = 'running';
-    appendLog(job, `\n$ [${state.label}] (${step.user}) ${step.cmd}\n`);
+    appendLog(job, `\n$ [${state.label}] (${step.user}) ${step.displayCommand || step.cmd}\n`);
     try {
       const proc = hostSpawn(step.cmd, { user: step.user });
       const reader = async (stream: ReadableStream<Uint8Array>) => {

@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { HOST_USER, readHostFile } from './host';
+import { HOST_USER, ON_HOST, readHostFile } from './host';
 import { MaintenanceRepository } from './storage/repository';
 import { hostArgv, boundedCommand } from './storage/host-argv';
 import { hash, policyRevision, within } from './storage/policy';
@@ -231,6 +231,14 @@ export function registerSharedTrashRoutes(app:Hono,operations:FileOperations){
  app.post('/api/files/trash/restore',async c=>{const b=await body(c);only(b,['ids']);if(!Array.isArray(b.ids)||!b.ids.length||b.ids.length>100||b.ids.some(id=>typeof id!=='string'))throw new MaintenanceError('Selección inválida',400);const restored:unknown[]=[],failed:unknown[]=[];
   for(const id of b.ids){try{const r=await operations.restore(id,actor(c));restored.push({from:r.fromPath,to:r.toPath,operationId:r.operationId});}catch(e){failed.push({id,...(e instanceof MaintenanceError?await e.getResponse().json():{error:'Resultado pendiente de revisión'})});break;}}
   return c.json({ok:true,restored,failed});
+ });
+ app.use('/api/files/delete-now',async(c,next)=>{c.header('Cache-Control','private, no-store');actor(c);if(c.req.method!=='POST'||c.req.header('origin')!==requestOrigin(c)||c.req.header('sec-fetch-site')==='cross-site'||!c.req.header('content-type')?.startsWith('application/json'))return c.json({ok:false,error:'Solicitud no permitida'},403);await next();});
+ app.post('/api/files/delete-now',async c=>{const b=await body(c);only(b,['paths']);if(!Array.isArray(b.paths)||!b.paths.length||b.paths.length>200||b.paths.some(p=>typeof p!=='string'||!p.startsWith('/')||p.length>4096))throw new MaintenanceError('Selección inválida',400);
+  const by=actor(c);const script=await readFile(new URL('./storage/force-delete-host.py',import.meta.url),'utf8');
+  const argv=ON_HOST&&process.getuid?.()===0?['python3','-c',script]:['nsenter','-t','1','-m','-u','-i','-n','-p','--','/usr/bin/env','-i','PATH=/usr/local/bin:/usr/bin:/bin','python3','-c',script];
+  const out=JSON.parse(await boundedCommand(argv,JSON.stringify({paths:b.paths,home:await operations.location()}),undefined,600000));
+  console.log('[files] delete-now',by.actorId,JSON.stringify({done:out.done.map((d:{path:string})=>d.path),failed:out.failed}));
+  return c.json(out);
  });
  app.post('/api/files/trash/purge',async c=>{const b=await body(c);only(b,['ids']);return c.json(await operations.purge(b.ids,actor(c)),202);});
  app.get('/api/files/trash/operations/:id',async c=>c.json(await operations.operationStatus(c.req.param('id'),actor(c))));

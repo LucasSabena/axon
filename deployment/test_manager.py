@@ -41,6 +41,9 @@ class UpgradeContracts(unittest.TestCase):
         service = json.loads(m.manifest(self.root, self.state, self.new))['services']['axon']
         self.assertEqual(service['environment']['AXON_BIND_HOST'], '127.0.0.1')
         self.assertEqual(service['environment']['AXON_REVISION'], self.new['revision'])
+        # Configuration backups resolve this container's own persistent bind,
+        # including custom names and the default axon-managed installation.
+        self.assertEqual(service['environment']['AXON_CONTAINER_NAME'], self.state['name'])
         self.assertFalse(any(v['target'] == '/app/public' for v in service['volumes']))
         self.assertTrue(any(v['target'] == '/app/data' and v['source'] == str(self.root / 'data') for v in service['volumes']))
 

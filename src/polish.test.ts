@@ -11,6 +11,17 @@ const deferred = <T>() => { let resolve!: (v:T)=>void; const promise=new Promise
 const json = (data:unknown, status=200) => Response.json(data,{status});
 
 describe('shared request contract', () => {
+  test('HTML restart responses produce a useful error, release feedback and can be retried without expiring auth', async () => {
+    let calls=0, ended=0, expired=0;
+    const transport=client({fetcher:(_p,opts)=>{
+      expect(opts.cache).toBe('no-store');
+      return Promise.resolve(++calls===1?new Response('<html>Restarting</html>',{status:502}):json({ok:true}));
+    },onStart:()=>()=>ended++,onAuth:()=>expired++});
+    await expect(transport.request('/api/data')).rejects.toThrow('respuesta incompleta');
+    expect(ended).toBe(1);expect(expired).toBe(0);
+    expect(await transport.request('/api/data')).toEqual({ok:true});
+    expect(ended).toBe(2);
+  });
   test('simultaneous reads share a flight and a failed flight can be retried', async () => {
     let calls=0;const pending=deferred<Response>();
     const transport=client({fetcher:()=>{calls++;return calls===1?pending.promise:Promise.resolve(json({value:2}));}});

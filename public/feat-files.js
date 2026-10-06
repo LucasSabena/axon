@@ -1335,6 +1335,7 @@
   });
 
   document.addEventListener('keydown', (e) => {
+    if (sec.classList.contains('fm-cloud-mode')) return;
     if (e.key !== 'Escape') return;
     // Modals handle their own Escape (or block the editor close while open).
     if (document.querySelector('.fm-confirm-modal')) return;
@@ -1761,10 +1762,41 @@
   // Delete = move to trash (reversible). Inside the trash zone, delete is a
   // real permanent purge of the selected trash items — one strong confirm,
   // then the durable worker removes each entry with identity verification.
-  async function deleteTargets(names, dir) {
+  async function forceDelete(paths, why) {
+    const preview = paths.slice(0, 6).map((p) => p.split('/').pop()).join(', ') + (paths.length > 6 ? ` y ${paths.length - 6} más` : '');
+    const ok = await confirmDialog(`Borrar definitivamente — ${paths.length} elemento${paths.length === 1 ? '' : 's'}`,
+      `${why ? why + ' ' : ''}Se borra sin pasar por la papelera, con permisos de administrador, y no se puede deshacer: ${preview}.`, 'Borrar definitivamente');
+    if (!ok) return;
+    try {
+      const r = await api('/api/files/delete-now', { method: 'POST', body: { paths } });
+      if (r.done?.length) toast(`${r.done.length} borrado${r.done.length === 1 ? '' : 's'} definitivamente`, 'ok', '', 3000);
+      if (r.failed?.length) toast(`${r.failed.length} no se pudieron borrar`, 'error', r.failed.map((f) => `${f.path.split('/').pop()}: ${f.error}`).join('\n'));
+    } catch (err) { errToast(err); }
+    navigate(S.cwd);
+  }
+
+  async function deleteTargets(names, dir, permanent) {
     if (!names.length) return;
+    if (permanent && !inTrash(dir || S.cwd)) return forceDelete(names.map((n) => join(dir || S.cwd, n)));
     const srcDir = dir || S.cwd;
-    const paths = names.map((n) => join(srcDir, n));
+    let paths = names.map((n) => join(srcDir, n));
+    const trashRoot = (p) => /\/\.Trash-\d+$|\/\.Trash\/\d+$|\/\.local\/share\/Trash$/.test(p) ? p + '/files' : /\/\.local\/share\/axon-trash$/.test(p) ? p : null;
+    if (!inTrash(srcDir)) {
+      const roots = paths.map(trashRoot).filter(Boolean);
+      if (roots.length) {
+        paths = paths.filter((p) => !trashRoot(p));
+        const ok = await confirmDialog('Vaciar papelera', 'Una de las carpetas seleccionadas es una papelera: no se borra ella misma, se vacía su contenido definitivamente. Es irreversible.', 'Vaciar papelera');
+        if (ok) for (const root of roots) {
+          try {
+            const r = await api('/api/files/trash/empty', { method: 'POST', body: { root } });
+            if (r.operation) trackPurge(r.operation.id, r.operation.total || 0);
+            else toast(r.message || 'La papelera ya está vacía', 'ok', '', 3000);
+          } catch (err) { errToast(err); }
+        }
+        if (!paths.length) return;
+        names = paths.map((p) => p.slice(srcDir.length).replace(/^\//, ''));
+      }
+    }
     if (inTrash(srcDir)) {
       await loadTrashNames(srcDir).catch(() => {});
       const known = names.filter((n) => S.trashNames[n]?.id);
@@ -1801,8 +1833,13 @@
         });
       }
       toast(`${items.length} a la papelera — Ctrl+Z para deshacer`, 'ok', '', 3000);
-      if (r.failed?.length) toast(`${r.failed.length} no se pudieron mover`, 'error', r.failed.map((f) => f.error).join('\n'));
+      if (r.failed?.length) {
+        const bad = r.failed.map((f) => f.path).filter(Boolean);
+        if (bad.length) { navigate(srcDir === S.cwd ? S.cwd : srcDir); return forceDelete(bad, `No se pudo enviar a la papelera (${r.failed[0].error}).`); }
+        toast(`${r.failed.length} no se pudieron mover`, 'error', r.failed.map((f) => f.error).join('\n'));
+      }
     } catch (err) {
+      if (err.failed?.length && err.failed.every((f) => f.path)) { return forceDelete(err.failed.map((f) => f.path), `No se pudo enviar a la papelera (${err.message}).`); }
       errToast(err);
     }
     navigate(srcDir === S.cwd ? S.cwd : srcDir);
@@ -2281,7 +2318,8 @@
           showProps(p, ent?.trashName || name, ent?.trashOrig);
         },
       },
-      { icon: 'trash-2', label: 'Eliminar', danger: true, run: () => { S.cwd = basePath; doAction('delete', name, type); } }
+      { icon: 'trash-2', label: 'Eliminar', danger: true, run: () => { S.cwd = basePath; doAction('delete', name, type); } },
+      { icon: 'trash-2', label: 'Borrar definitivamente (sin papelera)', danger: true, run: () => deleteTargets(S.sel.has(name) ? [...S.sel] : [name], basePath, true) }
     );
     showCtxMenu(items, e.clientX, e.clientY);
   });
@@ -2544,7 +2582,7 @@
   }
 
   document.addEventListener('keydown', (e) => {
-    if (!sec.classList.contains('active') || S.editingPath) return;
+    if (!sec.classList.contains('active') || sec.classList.contains('fm-cloud-mode') || S.editingPath) return;
     if (document.querySelector('.modal:not(.hidden)')) return;
     const tag = (e.target.tagName || '').toLowerCase();
     if (['input', 'textarea', 'select'].includes(tag) || e.target.isContentEditable) return;
@@ -2667,7 +2705,7 @@
       case 'Delete':
         if (S.sel.size) {
           e.preventDefault();
-          el('fm-sel-del').click();
+          if (e.shiftKey) deleteTargets([...S.sel], S.cwd, true); else el('fm-sel-del').click();
         }
         break;
       case 'F2': {
@@ -2862,7 +2900,7 @@
 
   // ---------- Toolbar ----------
   el('fm-new-file-btn').addEventListener('click', () => createFile());
-  el('fm-refresh-btn').addEventListener('click', async () => { const snap=captureFiles(); await restoreFiles(window.AxonNavigation.current.params,snap); window.AxonNavigation?.checkpoint(); });
+  el('fm-refresh-btn').addEventListener('click', async () => { const snap=captureFiles(); if(window.AxonNavigation?.current?.params)await restoreFiles(window.AxonNavigation.current.params,snap);else navigate(S.cwd); window.AxonNavigation?.checkpoint(); });
 
   el('fm-filter').addEventListener('input', (e) => {
     if (S.searchMode) {
@@ -3384,10 +3422,12 @@
   // Location snapshots contain UI state only, never editor contents.
   const fileLocations = (() => { try { const d=JSON.parse(localStorage.getItem('axon:file-locations:v1') || '{}');return d && typeof d==='object' && !Array.isArray(d)?d:{}; } catch { return {}; } })();
   function fileParams() {
+    if (sec.classList.contains('fm-cloud-mode')) return window.AxonDropbox.params();
     return { path: S.cwd || '~', view: S.view, sort: S.sort.key, order: S.sort.dir === 1 ? 'asc' : 'desc', q: (S.searchMode?S.searchQ:S.filter) || null, search:S.searchMode?'1':null, hidden: S.showHidden ? '1' : '0',
       item: S.editingPath?.split('/').pop() || S.preview?.name || null, edit: S.editingPath ? '1' : null };
   }
   function captureFiles() {
+    if (sec.classList.contains('fm-cloud-mode')) return window.AxonDropbox.capture();
     const scroll = {};
     for (const id of ['fm-table-wrap','fm-grid','fm-cols']) scroll[id] = [el(id).scrollLeft, el(id).scrollTop];
     const snapshot = { cursor: S.cursor, sel: [...S.sel].slice(0, 500), anchor: S.anchor, scroll,
@@ -3404,6 +3444,8 @@
   async function restoreFiles(params, snapshot) {
     S.editingPath = null;
     closePreview(true);
+    if (['dropbox','gdrive','onedrive'].includes(params.source) && window.AxonCloud) { await window.AxonDropbox.restore(params, snapshot); return; }
+    window.AxonDropbox?.hide();
     S.view = ['list','grid','cols'].includes(params.view) ? params.view : S.view;
     S.sort = {key:['name','size','mtime'].includes(params.sort) ? params.sort : S.sort.key, dir:params.order ? (params.order==='desc' ? -1 : 1) : S.sort.dir};
     S.showHidden = params.hidden ? params.hidden==='1' : S.showHidden;
@@ -3450,11 +3492,11 @@
   el('fm-parent').addEventListener('click',()=>navigate(parentOf(S.cwd)));
   el('fm-keys').addEventListener('click',showHelp);
   document.addEventListener('keydown',e=>{
-    if(!sec.classList.contains('active')) return;
+    if(!sec.classList.contains('active') || sec.classList.contains('fm-cloud-mode')) return;
     if(e.altKey && e.key==='ArrowUp'){e.preventDefault();navigate(parentOf(S.cwd));}
     if((e.ctrlKey||e.metaKey)&&e.shiftKey&&e.key.toLowerCase()==='l'){e.preventDefault();el('fm-location').focus();el('fm-location').select();}
   });
-  const saveLocation=()=>{if(!sec.classList.contains('active'))return;queueMicrotask(()=>{
+  const saveLocation=()=>{if(!sec.classList.contains('active') || sec.classList.contains('fm-cloud-mode'))return;queueMicrotask(()=>{
     if(!window.AxonNavigation?.ready || window.AxonNavigation.applying) return;
     markCursor(); window.AxonNavigation.update('files',fileParams());
   });};
@@ -3465,4 +3507,5 @@
   el('fm-grid').setAttribute('aria-multiselectable','true');
   el('fm-table').setAttribute('role','grid');el('fm-table').setAttribute('aria-label','Archivos');
   const oldRender=render; render=function(){oldRender(); markCursor();};
+  window.AxonFilesLocal = { location:()=>S.cwd || S.home || '~', params:fileParams };
 })();

@@ -22,6 +22,22 @@ async function fixture() {
   return {dir,store,hub,diagnostics,api,token,request,close:async() => {store.close();await rm(dir,{recursive:true,force:true});}};
 }
 describe('AXON platform isolation and evidence',() => {
+  test('Agent discovery documents exact token coverage without turning project access into administration',async()=>{
+    const f=await fixture();try{
+      const catalog=await(await f.request('/capabilities')).json();expect(catalog.apiVersion).toBe('v1');expect(catalog.permissions.projects.map((p:any)=>p.projectId)).toEqual(['demo']);expect(catalog.coverage.administrativeAccess).toBe(false);expect(catalog.routes.some((r:any)=>r.path.includes('/cloud/'))).toBe(false);expect(catalog.tools.some((t:any)=>t.name==='axon_project_logs')).toBe(false);expect(catalog.tools.some((t:any)=>t.name==='axon_capabilities')).toBe(true);expect(JSON.stringify(catalog)).not.toContain(f.token);
+      const call=(method:string,params:any={})=>f.request('/mcp',{method:'POST',headers:{'Content-Type':'application/json',Accept:'application/json, text/event-stream'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});
+      expect((await(await call('initialize')).json()).result.instructions).toContain('axon_capabilities');
+      const capabilities=await(await call('tools/call',{name:'axon_capabilities',arguments:{}})).json();expect(capabilities.result.structuredContent.routes).toEqual(catalog.routes);
+      expect((await(await call('tools/call',{name:'axon_capabilities',arguments:{admin:true}})).json()).error.code).toBe(-32602);
+    }finally{await f.close();}
+  });
+  test('More than 120 rapid REST/MCP reads succeed; exhausted bursts return a short, identifiable retry',async()=>{
+    const f=await fixture();try{
+      for(let n=0;n<160;n++){const r=await f.request('/projects');expect(r.status).toBe(200);expect(r.headers.get('X-Axon-Limit-Per-Minute')).toBe('1200');}
+      for(let n=0;n<500;n++){const r=await f.request('/mcp',{method:'POST',headers:{'Content-Type':'application/json',Accept:'application/json, text/event-stream'},body:JSON.stringify({jsonrpc:'2.0',id:n,method:'ping'})});if(r.status===429){expect(r.headers.get('Retry-After')).toBe('1');expect(await r.json()).toMatchObject({code:'axon-api-limit',lane:'read',reason:'rate'});return;}expect(r.status).toBe(200);}
+      throw new Error('Expected read burst exhaustion');
+    }finally{await f.close();}
+  });
   test('tokens are hashed, resource scoped, revocable, durable and never cookie-authenticated',async() => {
     const f = await fixture();
     try {

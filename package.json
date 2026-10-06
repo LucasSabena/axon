@@ -1,17 +1,19 @@
 {
   "name": "axon",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Panel de control web self-hosted para administrar un servidor completo: puertos, proyectos, Docker, dominios y más",
   "scripts": {
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
-    "build": "bun run scripts/build-ui.ts && bun build src/index.ts --outdir dist --target bun && mkdir -p dist/storage && cp src/storage/scan-host.py dist/scan-host.py && cp src/storage/trash-host.py dist/storage/trash-host.py && cp src/storage/file-task-host.py dist/storage/file-task-host.py && cp src/storage/compose-release-host.py dist/storage/compose-release-host.py && cp src/storage/installations-host.py dist/storage/installations-host.py && cp src/storage/versions-host.py dist/storage/versions-host.py && cp src/storage/edit-host.py dist/storage/edit-host.py && cp src/storage/volumes-host.py dist/storage/volumes-host.py && cp src/platform/backup-host.py dist/backup-host.py && cp src/platform/desktop-host.py dist/desktop-host.py",
+    "build": "bun run scripts/build-ui.ts && bun build src/index.ts --outdir dist --target bun && mkdir -p dist/storage && cp src/software-host.py dist/software-host.py && cp src/storage/scan-host.py dist/scan-host.py && cp src/storage/trash-host.py dist/storage/trash-host.py && cp src/storage/force-delete-host.py dist/storage/force-delete-host.py && cp src/storage/file-task-host.py dist/storage/file-task-host.py && cp src/storage/compose-release-host.py dist/storage/compose-release-host.py && cp src/storage/installations-host.py dist/storage/installations-host.py && cp src/storage/versions-host.py dist/storage/versions-host.py && cp src/storage/edit-host.py dist/storage/edit-host.py && cp src/storage/volumes-host.py dist/storage/volumes-host.py && cp src/platform/backup-host.py dist/backup-host.py && cp src/platform/desktop-host.py dist/desktop-host.py && cp src/storage/cloud-download-host.py dist/storage/cloud-download-host.py",
     "test": "bun run scripts/test.ts",
     "check": "tsc --noEmit && bun run scripts/check-frontend.ts",
     "qa:serve": "bun --no-env-file run scripts/qa-server.ts",
+    "qa:stability": "bun --no-env-file run scripts/stability-browser-qa.ts",
     "qa:maintenance:read": "bun --no-env-file run scripts/maintenance-readonly.ts",
     "build:ui": "bun run scripts/build-ui.ts",
     "qa:platform:database": "bun --no-env-file run scripts/platform-database-qa.ts",
+    "test:software": "python3 -m unittest discover -s src -p test_software_host.py",
     "test:installer": "python3 -m unittest discover -s deployment -p \"test_*.py\""
   },
   "dependencies": {

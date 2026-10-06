@@ -64,10 +64,10 @@
   const containers=[
     ['/api/ports','#ports-table tbody'],['/api/projects','#projects-table tbody'],['/api/docker','#docker-table tbody'],['/api/domains','#domains-table tbody'],
     ['/api/library/recent','#home-files'],['/api/agents/activity','#home-agents'],['/api/events','#home-events'],
-    ['/api/programs','#programs-grid'],['/api/jobs','#jobs-history'],['/api/agents','#ag-main'],
+    ['/api/software','#programs-grid'],['/api/jobs','#jobs-history'],['/api/agents','#ag-main'],
     ['/api/scripts','#sc-list'],['/api/compose','#cp-grid'],['/api/store','#store-grid'],
   ];
-  const feedbackSections={ '/api/ports':'ports','/api/projects':'projects','/api/docker':'docker','/api/domains':'domains','/api/programs':'programs' };
+  const feedbackSections={ '/api/ports':'ports','/api/projects':'projects','/api/docker':'docker','/api/domains':'domains','/api/software':'programs' };
   const feedback=new Map();
   for(const section of Object.values(feedbackSections)) {
     const sec=document.getElementById('tab-'+section);if(!sec)continue;

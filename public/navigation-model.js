@@ -5,13 +5,13 @@ export const SECTIONS = {
   programs: ['/programas', 'Programas'], store: ['/tienda', 'Tienda'], drop: ['/drop', 'Drop'], metrics: ['/metricas', 'Métricas'],
   logs: ['/logs', 'Logs'], ops: ['/salud', 'Salud'], scripts: ['/scripts', 'Scripts'],
   storage: ['/almacenamiento', 'Almacenamiento'], compose: ['/compose', 'Compose'], agents: ['/agentes', 'Agentes'], settings: ['/configuracion', 'Configuración'],
-  backups: ['/respaldos', 'Respaldos'], audit: ['/historial', 'Historial'], access: ['/integraciones', 'Integraciones'], desktop: ['/escritorio', 'Escritorio'],
+  backups: ['/backups', 'Backups'], audit: ['/historial', 'Historial'], access: ['/integraciones', 'Integraciones'], desktop: ['/escritorio', 'Escritorio'],
 };
 
 export function readRoute(input, base = 'http://axon.local') {
   let u;try { u = new URL(input, base); } catch { return null; }
   const pathname = u.pathname.replace(/\/$/, '') || '/';
-  const section = Object.keys(SECTIONS).find((s) => SECTIONS[s][0] === pathname);
+  const section = pathname === '/respaldos' ? 'backups' : Object.keys(SECTIONS).find((s) => SECTIONS[s][0] === pathname);
   if (!section) return null;
   return { section, params: Object.fromEntries(u.searchParams), url: pathname + u.search };
 }

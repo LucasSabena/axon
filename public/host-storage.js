@@ -82,7 +82,7 @@
       const button=document.createElement('button');button.type='button';button.className='btn-secondary host-picker-trigger';button.textContent=opts.append?'Agregar carpeta de un disco':'Explorar discos';button.setAttribute('aria-label',opts.title);
       button.onclick=async()=>{const selected=await pick({...opts,start:opts.append?'~':input.value||'~'});if(!selected)return;const value=opts.suffix?selected.replace(/\/$/,'')+opts.suffix:selected;input.value=opts.append?[...new Set([...input.value.split('\n').map(s=>s.trim()).filter(Boolean),selected])].join('\n'):value;input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));};input.insertAdjacentElement('afterend',button);
     }
-    for(const id of ['dashboard','ops','metrics','storage','agents','projects','library','compose','drop','backups']){
+    for(const id of ['dashboard','ops','metrics','storage','agents','projects','library','compose','drop']){
       const sec=document.getElementById('tab-'+id);if(!sec||sec.querySelector('.host-disks-panel'))continue;
       const panel=document.createElement('section');panel.className='host-disks-panel';panel.dataset.hostDisks='';panel.setAttribute('aria-label','Discos del servidor');const head=sec.querySelector('.section-header');if(head)head.insertAdjacentElement('afterend',panel);else sec.prepend(panel);
     }

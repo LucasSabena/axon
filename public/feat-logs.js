@@ -121,9 +121,11 @@ function closeWs() {
   if (s) { try { s.close(); } catch { /* gone */ } }
 }
 
-function connect(src) {
+async function connect(src) {
   closeWs();
   if (!src) return;
+  try { await AxonAssets.terminal(); ensureTerm(); }
+  catch (err) { setStatus('disconnected', err.message); errToast(err); return; }
   lastSrc = src;
   setStatus('connecting', 'Conectando…');
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -306,11 +308,17 @@ new MutationObserver(() => {
 }).observe(section, { attributes: true, attributeFilter: ['class'] });
 
 // ---------- Loader ----------
-loaders.logs = () => {
-  ensureTerm();
-  requestAnimationFrame(() => fit?.fit());
-  loadSources();
-};
+let loadFlight;
+loaders.logs = () => loadFlight ||= (async () => {
+  try {
+    await AxonAssets.terminal();
+    ensureTerm();
+    requestAnimationFrame(() => fit?.fit());
+    await loadSources();
+  } catch (err) { setStatus('disconnected', err.message); errToast(err); }
+})().finally(() => { loadFlight = null; });
+window.AxonPages ||= {};
+window.AxonPages.logs = { restore: loaders.logs };
 
 refreshIcons();
 })();

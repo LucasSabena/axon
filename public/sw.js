@@ -1,29 +1,41 @@
-const CACHE = 'axon-v3';
-self.addEventListener('install', () => self.skipWaiting());
-self.addEventListener('activate', (e) =>
-  e.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => clients.claim()))
-);
+// Build-time stamp; only versioned vendor assets are cached per release.
+const CACHE = 'axon-73a4c1b20914';
+
+self.addEventListener('install', (e) => e.waitUntil(self.skipWaiting()));
+self.addEventListener('activate', (e) => e.waitUntil(
+  caches.keys().then(keys => Promise.all(keys.filter(k => k.startsWith('axon-') && k !== CACHE).map(k => caches.delete(k)))).then(() => clients.claim())
+));
+
+const OFFLINE_HTML = `<!doctype html><html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#080c10"><title>AXON</title>
+<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#080c10;color:#c9d4de;font-family:system-ui,sans-serif;text-align:center}
+.c{max-width:26rem;padding:2rem}.spin{width:32px;height:32px;margin:0 auto 1rem;border:3px solid #26323d;border-top-color:#5ea1ff;border-radius:50%;animation:s 1s linear infinite}
+@keyframes s{to{transform:rotate(360deg)}}p{line-height:1.5;color:#8b99a7}</style></head>
+<body><div class="c"><div class="spin"></div><p id="m">Axon no responde — probablemente se está actualizando. Reintentando automáticamente…</p></div>
+<script>setTimeout(()=>location.reload(),5000)</script></body></html>`;
+
+const offlinePage = () => new Response(OFFLINE_HTML, { status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
+
 self.addEventListener('fetch', (e) => {
   const u = new URL(e.request.url);
-  // Ignore non-http schemes (chrome-extension:// etc.) and non-GETs.
-  if (!u.protocol.startsWith('http') || e.request.method !== 'GET') return;
+  if (!u.protocol.startsWith('http') || e.request.method !== 'GET' || u.origin !== location.origin) return;
   if (u.pathname.startsWith('/api/') || u.pathname.startsWith('/p/') || u.pathname.startsWith('/x/') || u.pathname.startsWith('/s/')) return;
-  // Immutable-ish statics: cache-first.
-  if (u.pathname.startsWith('/vendor/') || u.pathname.startsWith('/icons/') || u.pathname.startsWith('/fonts/')) {
-    e.respondWith(
-      caches.match(e.request).then((hit) => hit || fetch(e.request).then((res) => {
-        if (res.ok) { const cp = res.clone(); caches.open(CACHE).then((c) => c.put(e.request, cp)); }
-        return res;
-      }))
-    );
+
+  // Never fall back to an old shell: it could load scripts from a new release.
+  // Keep the URL and retry automatically until the current server returns.
+  if (e.request.mode === 'navigate') {
+    e.respondWith(fetch(e.request, { cache: 'no-store' }).then(res => res.status >= 500 ? offlinePage() : res).catch(offlinePage));
     return;
   }
-  // HTML/JS/CSS shell: network-first so deploys show up immediately; cached
-  // copy is only the offline fallback.
-  e.respondWith(
-    fetch(e.request).then((res) => {
-      if (res.ok) { const cp = res.clone(); caches.open(CACHE).then((c) => c.put(e.request, cp)); }
+
+  // Unversioned assets and app scripts always reach the running server.
+  if (/^[a-f0-9]{12}$/.test(u.searchParams.get('v') || '') && (u.pathname.startsWith('/vendor/') || u.pathname.startsWith('/icons/') || u.pathname.startsWith('/fonts/'))) {
+    e.respondWith(caches.open(CACHE).then(c => c.match(e.request).then(hit => hit || fetch(e.request).then(res => {
+      if (res.ok) e.waitUntil(c.put(e.request, res.clone()).catch(() => {}));
       return res;
-    }).catch(() => caches.match(e.request).then((hit) => hit || Response.error()))
-  );
+    }))));
+    return;
+  }
+  e.respondWith(fetch(e.request, { cache: 'no-store' }));
 });
