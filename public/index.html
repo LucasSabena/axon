@@ -33,6 +33,7 @@
   <link rel="axon-feature" data-axon-style="/vendor/webawesome/styles/themes/default.css?v=e19fff39b8c9">
   <link rel="stylesheet" href="/design-system.css?v=2f3d13b40e07">
   <link rel="stylesheet" href="/login.css?v=3eab62086046">
+  <link rel="stylesheet" href="/onboarding.css?v=258bc76c674a">
 </head>
 <body>
   <div id="app">
@@ -223,7 +224,11 @@
                   <tbody></tbody>
                 </table>
               </div>
-              <div id="ports-empty" class="empty-state hidden">No hay puertos abiertos</div>
+              <div id="ports-empty" class="empty-state hidden">
+                <strong>Los puertos en uso aparecen acá</strong>
+                <p>Cuando un proceso abra un puerto vas a ver qué app lo usa, cuánta memoria consume y un enlace directo para abrirlo.</p>
+                <div class="empty-actions"><button type="button" class="btn-secondary" data-empty-target="ports-refresh">Actualizar ahora</button></div>
+              </div>
             </section>
 
             <!-- PROGRAMS -->
@@ -292,7 +297,14 @@
                   <tbody></tbody>
                 </table>
               </div>
-              <div id="projects-empty" class="empty-state hidden">No hay proyectos registrados</div>
+              <div id="projects-empty" class="empty-state hidden">
+                <strong>Todavía no hay proyectos registrados</strong>
+                <p>AXON busca en tus carpetas cosas como package.json, pyproject.toml o docker-compose — detectalos en un click o agregá un proyecto a mano.</p>
+                <div class="empty-actions">
+                  <button type="button" class="btn-action" data-empty-target="projects-detect-btn">Detectar proyectos</button>
+                  <button type="button" class="btn-secondary" data-empty-target="projects-add-btn">Agregar a mano</button>
+                </div>
+              </div>
             </section>
 
             <!-- DOCKER -->
@@ -315,7 +327,14 @@
                   <tbody></tbody>
                 </table>
               </div>
-              <div id="docker-empty" class="empty-state hidden">No hay contenedores Docker corriendo</div>
+              <div id="docker-empty" class="empty-state hidden">
+                <strong>No hay contenedores corriendo</strong>
+                <p>Acá vas a ver cada contenedor con su estado y sus puertos. Instalá apps en un click desde la Tienda o levantá un Compose.</p>
+                <div class="empty-actions">
+                  <a class="btn-action" href="/tienda">Ver la Tienda</a>
+                  <a class="btn-secondary" href="/compose">Ir a Compose</a>
+                </div>
+              </div>
             </section>
 
             <!-- DOMAINS -->
@@ -344,7 +363,11 @@
                   <tbody></tbody>
                 </table>
               </div>
-              <div id="domains-empty" class="empty-state hidden">No hay dominios asignados</div>
+              <div id="domains-empty" class="empty-state hidden">
+                <strong>No hay dominios asignados todavía</strong>
+                <p>Publicá tus proyectos con HTTPS propio, o traé los registros que ya tenés en Cloudflare.</p>
+                <div class="empty-actions"><button type="button" class="btn-action" data-empty-target="domains-import-btn">Importar desde Cloudflare</button></div>
+              </div>
             </section>
 
             <!-- TERMINAL -->
@@ -613,6 +636,23 @@
     </div>
   </div>
 
+  <!-- Password change modal — local account, no recovery: the current
+       password is always required and other sessions get revoked -->
+  <div id="password-modal" class="modal hidden">
+    <div class="modal-content pair-modal-content">
+      <h3>Cambiar contraseña</h3>
+      <p class="listener-note">La cuenta es local a este servidor — no hay recuperación por mail. Al cambiarla se cierran las demás sesiones y dispositivos vinculados.</p>
+      <input type="password" id="password-current" placeholder="Contraseña actual" autocomplete="current-password">
+      <input type="password" id="password-new" placeholder="Contraseña nueva (mín. 8 caracteres)" autocomplete="new-password">
+      <input type="password" id="password-confirm" placeholder="Repetir contraseña nueva" autocomplete="new-password">
+      <div id="password-error" class="error"></div>
+      <div class="modal-actions">
+        <button id="password-cancel" class="btn-secondary">Cancelar</button>
+        <button id="password-save" class="btn-primary">Guardar</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Make-service modal -->
   <div id="service-modal" class="modal hidden">
     <div class="modal-content">
@@ -648,7 +688,8 @@
   <script type="text/axon-feature" data-src="/terminal-tools.js?v=dfff049a9a58"></script>
   <link rel="stylesheet" href="/software.css?v=aa231f6eb768">
   <script defer src="/software.js?v=a1f07389f852"></script>
-  <script defer src="/app.js?v=7d6e833d63fa"></script>
+  <script defer src="/app.js?v=d966e28f6e3a"></script>
+  <script defer src="/onboarding.js?v=8e8516b302ef"></script>
   <link rel="stylesheet" href="/host-storage.css?v=f6a41912b754">
   <script defer src="/host-storage.js?v=aa6cbdc9ae5d"></script>
   <link rel="stylesheet" href="/transfer-review.css?v=98bc9c35eadc">
@@ -661,7 +702,7 @@
   <script type="text/axon-feature" data-src="/feat-drop.js?v=99ee78b1b0c1"></script>
   <script type="text/axon-feature" data-src="/feat-ops.js?v=02ca922b0bf7"></script>
   <link rel="axon-feature" data-axon-style="/optimizer.css?v=128ae12f8225">
-  <script type="text/axon-feature" data-src="/optimizer.js?v=d61022fbcc03"></script>
+  <script type="text/axon-feature" data-src="/optimizer.js?v=5df9c5e41879"></script>
   <script type="text/axon-feature" data-src="/feat-notify.js?v=82542edeb1ae"></script>
   <script type="text/axon-feature" data-src="/feat-compose.js?v=6bff3b32367a"></script>
   <script type="text/axon-feature" data-src="/agent-context.js?v=e4ca47eee189"></script>
@@ -669,14 +710,14 @@
   <script type="text/axon-feature" data-src="/agent-consumption.js?v=2eea796742b5"></script>
   <script type="text/axon-feature" data-src="/agent-accounts.js?v=e83a6b57d1b9"></script>
   <script type="text/axon-feature" data-src="/feat-agents.js?v=cda7a8eb9563"></script>
-  <script type="text/axon-feature" data-src="/feat-library.js?v=10ddf49bbe08"></script>
+  <script type="text/axon-feature" data-src="/feat-library.js?v=0bfb9f381e80"></script>
   <script type="text/axon-feature" data-src="/dashboard.js?v=0e46d02e9f75"></script>
   <script type="text/axon-feature" data-src="/storage.js?v=c4284df86692"></script>
   <script type="text/axon-feature" data-src="/home-links.js?v=232c75cba96d"></script>
   <script type="text/axon-feature" data-src="/app-migrations.js?v=8afd3fef3a2a"></script>
   <script type="text/axon-feature" data-src="/app-store.js?v=d8e9ea9f5d12"></script>
   <script type="text/axon-feature" data-src="/connections.js?v=6b388ec8dd23"></script>
-  <script type="text/axon-feature" data-src="/settings.js?v=9070ceb3dcfd"></script>
+  <script type="text/axon-feature" data-src="/settings.js?v=cdd8cb6cda12"></script>
   <script type="text/axon-feature" data-src="/view-controls.js?v=a65cc71fb1b8"></script>
   <script type="text/axon-feature" data-src="/platform.js?v=e659e6646da7"></script>
   <script type="text/axon-feature" data-src="/backups.js?v=6f88ea9536bf"></script>

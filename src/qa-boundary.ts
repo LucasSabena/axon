@@ -31,7 +31,9 @@ export function registerQaBoundary(app:Hono,root:string|null){
    // blocked: they would run real agent binaries and contact external accounts.
    const fixtureAccounts=/^\/api\/agent-accounts\/(codex|claude)(?:\/(activate|rename|install))?$/.test(p);
    const fixturePlatform=/^\/api\/(access\/tokens(?:\/[^/]+)?|project-hub\/[^/]+\/(diagnose|bindings)|backups\/(recovery-kit|policies(?:\/[^/]+(?:\/run)?)?|jobs\/[^/]+\/(restore|verify)))$/.test(p);
-   if(!safe&&!fixtureTrash&&!fixtureTransfer&&!fixtureFile&&!fixtureLibrary&&!fixtureAccounts&&!fixturePlatform&&!fixtureProject&&!fixtureAgentDoc&&!fixtureSoftwareIcons)return c.json({ok:false,error:'QA: mutación de host bloqueada por el servidor; usá pruebas con fixtures inyectadas'},403);
+   // Onboarding and credential routes only write files inside the QA data dir.
+   const fixtureOnboarding=/^\/api\/(onboarding\/(setup|complete|dismiss|check|reset)|auth\/(password|totp\/(setup|enable|disable)))$/.test(p);
+   if(!safe&&!fixtureTrash&&!fixtureTransfer&&!fixtureFile&&!fixtureLibrary&&!fixtureAccounts&&!fixturePlatform&&!fixtureProject&&!fixtureAgentDoc&&!fixtureSoftwareIcons&&!fixtureOnboarding)return c.json({ok:false,error:'QA: mutación de host bloqueada por el servidor; usá pruebas con fixtures inyectadas'},403);
   }
   await next();
  });

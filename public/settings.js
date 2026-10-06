@@ -31,6 +31,26 @@
   ['settings-protected-pids', 'settings-protected-ports'].forEach(id => move(id, 'security'));
   const powers = [...form.querySelectorAll('.settings-power')];
   if (powers[0]) panes.security.append(powers[0]);
+  // Injected here (not in index.html) so the powers[] indexes above don't shift.
+  panes.security.insertAdjacentHTML('beforeend',
+    `<div class="settings-power"><span class="settings-power-label">Contraseña del panel — la cuenta es local, sin recuperación</span><button type="button" id="password-change-btn" class="btn-secondary">${icon('key-round')} Cambiar</button></div>
+     <div class="settings-power"><span class="settings-power-label">Primeros pasos — asistente de bienvenida y lista del inicio</span><button type="button" id="onboarding-reset-btn" class="btn-secondary">${icon('list-checks')} Ver de nuevo</button></div>`);
+  panes.security.querySelector('#password-change-btn').addEventListener('click', () => {
+    $('#password-current').value = '';
+    $('#password-new').value = '';
+    $('#password-confirm').value = '';
+    $('#password-error').textContent = '';
+    $('#password-modal').classList.remove('hidden');
+    setTimeout(() => $('#password-current').focus(), 50);
+  });
+  panes.security.querySelector('#onboarding-reset-btn').addEventListener('click', async () => {
+    try {
+      await api('/api/onboarding/reset', { method: 'POST' });
+      toast('Los primeros pasos vuelven a aparecer en Inicio', 'ok');
+    } catch (e) {
+      errToast(e);
+    }
+  });
   move('settings-ignored-patterns', 'advanced');
   if (powers[1]) panes.advanced.append(powers[1]);
   panes.appearance.insertAdjacentHTML('beforeend', `<div class="appearance-modes" role="group" aria-label="Modo de color"><button type="button" data-color-mode="light">${icon('sun')} Claro</button><button type="button" data-color-mode="dark">${icon('moon')} Oscuro</button><button type="button" data-color-mode="system">${icon('monitor')} Sistema</button></div><p class="settings-help" id="theme-mode-help"></p><div id="settings-theme-gallery"></div>

@@ -297,6 +297,7 @@ def install(args):
     data.mkdir(mode=0o700)
     atomic(root / '.env', env)
     password = None
+    setup_token = None
     if not args.existing_data:
         password = secrets.token_urlsafe(24)
         salt = str(uuid.uuid4())
@@ -305,6 +306,14 @@ def install(args):
                'settings': {'hostUser': user.pw_name, 'scanDirs': [], 'scanIntervalMs': 5000, 'protectedPids': [1], 'protectedPorts': [22, 80, 443, args.port, 9090, 9443]}}
         atomic(data / 'config.json', json.dumps(cfg, indent=2) + '\n')
         atomic(root / 'initial-password.txt', password + '\n')
+        # One-time token for the browser setup wizard (consumed when the
+        # account is created). The initial password above remains as fallback.
+        setup_token = secrets.token_urlsafe(24)
+        atomic(data / 'onboarding.json', json.dumps({
+            'version': 1,
+            'createdAt': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
+            'setupToken': setup_token,
+        }, indent=2) + '\n')
     state = {'schema': 1, 'repository': args.repository, 'name': args.name, 'port': args.port, 'bind': args.bind,
              'origin': origin, 'hostUser': user.pw_name, 'current': None, 'previous': None, 'operation': 'new'}
     if args.existing_data: state['pendingMigration'] = str(args.existing_data.resolve())
@@ -317,8 +326,48 @@ def install(args):
     link = bin_dir / 'axon'
     if not args.no_link and not link.exists() and not link.is_symlink(): link.symlink_to(root / 'axon')
     update(root, args.ref)
-    if password: print(f'Usuario: admin. Contraseña inicial guardada en {root / "initial-password.txt"} (sólo tu usuario puede leerla).')
+    if setup_token:
+        print(f'Primer acceso — abrí este enlace para crear tu cuenta y configurar el panel:\n  {origin}/?setup={setup_token}')
+        print(f'Alternativa: usuario admin + la contraseña de {root / "initial-password.txt"} (sólo tu usuario puede leerla).')
     print(f'Actualizar: {root / "axon"} update\nEstado y registro: {root / "axon"} status\nInstalaciones existentes: los datos originales se conservan.')
+
+
+def reset_password(root, state):
+    with lock(root):
+        cfg_path = root / 'data' / 'config.json'
+        cfg = json.loads(cfg_path.read_text())
+        if not isinstance(cfg.get('auth'), dict):
+            raise RuntimeError('La configuración no tiene credenciales para restablecer.')
+        password = secrets.token_urlsafe(24)
+        salt = str(uuid.uuid4())
+        cfg['auth']['passwordHash'] = salt + ':' + base64.b64encode(hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100000, dklen=32)).decode()
+        atomic(cfg_path, json.dumps(cfg, indent=2) + '\n')
+        atomic(root / 'initial-password.txt', password + '\n')
+        # Revoke every issued session so a stolen cookie can't outlive the rotation.
+        sessions_path = root / 'data' / 'sessions.json'
+        try:
+            sj = json.loads(sessions_path.read_text())
+            revoked = {j for j in sj.get('revoked', []) if isinstance(j, str)}
+            revoked.update(s.get('jti') for s in sj.get('issued', []) if isinstance(s, dict) and s.get('jti'))
+            sj['revoked'] = sorted(revoked)
+            atomic(sessions_path, json.dumps(sj, indent=2) + '\n')
+        except FileNotFoundError:
+            pass
+        compose(root, root / 'compose.json', 'up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '120')
+        verify(state, state['current'])
+        print(f'Contraseña nueva en {root / "initial-password.txt"} (sólo tu usuario puede leerla).')
+        print(f'Usuario: {cfg["auth"].get("username", "admin")}. Todas las sesiones y dispositivos quedaron cerrados.')
+
+
+def reset_onboarding(root):
+    with lock(root):
+        path = root / 'data' / 'onboarding.json'
+        try: created = json.loads(path.read_text()).get('createdAt')
+        except Exception: created = None
+        # Deliberately no setupToken — the account already exists and a token
+        # would re-open the unauthenticated setup endpoint.
+        atomic(path, json.dumps({'version': 1, 'createdAt': created or time.strftime('%Y-%m-%dT%H:%M:%S%z')}, indent=2) + '\n')
+        print('Listo — el asistente de bienvenida y los primeros pasos reaparecen la próxima vez que abras el panel.')
 
 
 def setup_agents(root):
@@ -362,6 +411,8 @@ def main():
         p.add_argument('--wait', action='store_true')
     sub.add_parser('status')
     sub.add_parser('setup-agents')
+    sub.add_parser('reset-password')
+    sub.add_parser('reset-onboarding')
     args = parser.parse_args()
     args.root = args.root.expanduser().resolve()
     if args.command == 'install': install(args); return
@@ -370,6 +421,8 @@ def main():
         print(json.dumps(state, indent=2, ensure_ascii=False))
         print(f'Registro: {args.root / "update.log"}')
     elif args.command == 'setup-agents': setup_agents(args.root)
+    elif args.command == 'reset-password': reset_password(args.root, state)
+    elif args.command == 'reset-onboarding': reset_onboarding(args.root)
     elif args.command.startswith('_') or args.wait:
         update(args.root, args.ref, 'rollback' in args.command)
     else:

@@ -120,6 +120,10 @@ async function initAuth(attempt = 0) {
     }
   }
   await axonDomReady;
+  // Fresh installs get the guided setup before the login form — the
+  // installer prints a one-time ?setup=… link that authorizes creating the
+  // admin account in the browser. Returns true while the wizard is up.
+  if (await window.AxonOnboarding?.start?.()) return;
   $('#boot-screen').classList.add('hidden');
   $('#login-screen').classList.remove('hidden');
 }
@@ -1433,6 +1437,38 @@ $('#totp-confirm').addEventListener('click', async () => {
 });
 $('#totp-code').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); $('#totp-confirm').click(); }
+});
+
+// ---------- Password change (local account — no recovery flow) ----------
+// The trigger button lives in the lazy-loaded settings pane — see
+// settings.js. Modal markup is static in index.html.
+
+$('#password-cancel').addEventListener('click', () => $('#password-modal').classList.add('hidden'));
+$('#password-save').addEventListener('click', async () => {
+  const err = $('#password-error');
+  err.textContent = '';
+  const current = $('#password-current').value;
+  const password = $('#password-new').value;
+  if (password.length < 8) { err.textContent = 'La contraseña nueva necesita al menos 8 caracteres.'; return; }
+  if (password !== $('#password-confirm').value) { err.textContent = 'Las contraseñas nuevas no coinciden.'; return; }
+  try {
+    await api('/api/auth/password', { method: 'POST', body: { current, password } });
+    $('#password-modal').classList.add('hidden');
+    toast('Contraseña actualizada — se cerraron las demás sesiones', 'ok');
+  } catch (e) {
+    err.textContent = e.message;
+  }
+});
+['password-current', 'password-new', 'password-confirm'].forEach((id) => {
+  $('#' + id).addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); $('#password-save').click(); }
+  });
+});
+
+// Empty-state CTAs mirror the section header buttons (data-empty-target=id)
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-empty-target]');
+  if (btn) document.getElementById(btn.dataset.emptyTarget)?.click();
 });
 
 // ---------- Boot ----------

@@ -22,13 +22,22 @@ cd axon
 bash install.sh
 ```
 
-Abrí **http://localhost:3457**. El usuario inicial es `admin`; la contraseña se genera al instalar y se guarda en un archivo privado:
+Al terminar, el instalador imprime un **enlace de primer acceso** (`http://localhost:3457/?setup=…`, de un solo uso) que abre el asistente de bienvenida: creás tu usuario y contraseña, AXON te muestra lo que ya detectó en el servidor (Docker, proyectos, discos) y elegís el tema. Después, el inicio muestra una lista de "Primeros pasos" con atajos a detectar proyectos, conectar un dominio, crear el primer backup, activar 2FA y explorar la Tienda — desaparece sola cuando la completás.
+
+También podés entrar directo con el usuario `admin` y la contraseña generada al instalar, guardada en un archivo privado:
 
 ```bash
 cat "$HOME/.local/share/axon-install/initial-password.txt"
 ```
 
-Guardala en un lugar seguro; podés activar 2FA desde Configuración. Cada instalación genera su propio secreto de sesión y empieza sin dominios ni proyectos ficticios.
+La cuenta es **local a tu servidor**: no hay recuperación por mail. Podés cambiarla desde Configuración → Seguridad (cierra las demás sesiones), activar 2FA en el mismo lugar, o restablecerla desde la terminal:
+
+```bash
+axon reset-password     # nueva contraseña + cierra todas las sesiones
+axon reset-onboarding   # vuelve a mostrar el asistente y los primeros pasos
+```
+
+Cada instalación genera su propio secreto de sesión y empieza sin dominios ni proyectos ficticios.
 
 El comando queda en `$HOME/.local/bin/axon`. Si esa carpeta no está en tu `PATH`, usá la ruta completa:
 

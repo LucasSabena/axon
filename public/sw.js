@@ -1,5 +1,5 @@
 // Build-time stamp; only versioned vendor assets are cached per release.
-const CACHE = 'axon-73a4c1b20914';
+const CACHE = 'axon-1102fbc1dafc';
 
 self.addEventListener('install', (e) => e.waitUntil(self.skipWaiting()));
 self.addEventListener('activate', (e) => e.waitUntil(

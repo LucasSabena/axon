@@ -1,4 +1,5 @@
-import { initHostStorage, resolveHostPath, hostVolumes } from './host-storage';
+import { initHostStorage, resolveHostPath, hostVolumes, availableStorage } from './host-storage';
+import { $ } from 'bun';
 import { Hono } from 'hono';
 import { browserWriteGuard, requestOriginAllowed, safePairTarget } from './browser-security';
 import { serveStatic } from 'hono/bun';
@@ -9,6 +10,7 @@ import * as path from 'path';
 import {
   requireAuth,
   verifyPassword,
+  hashPassword,
   createSession,
   setSessionCookie,
   clearSessionCookie,
@@ -82,7 +84,8 @@ import type { LogsWsData } from './logs';
 import { registerMetricsRoutes } from './metrics';
 import { registerDropRoutes, startDropSweeper, dropPathReferences } from './drop';
 import { registerLibraryRoutes, libraryHostGuard, libraryFileOperation } from './library';
-import { registerSessionRoutes, recordSession, sessionIdForToken, isRevoked, touchSession, revokeSession } from './sessions';
+import { registerSessionRoutes, recordSession, sessionIdForToken, sessionIdFromRequest, isRevoked, touchSession, revokeSession, listSessions } from './sessions';
+import { registerOnboardingPublic, registerOnboardingRoutes } from './onboarding';
 import { registerOpsRoutes } from './ops';
 import { registerOptimizerRoutes } from './optimizer';
 import { registerDockerOpsRoutes } from './docker-ops';
@@ -354,6 +357,55 @@ app.get('/api/me', async (c) => {
   return c.json({ authenticated: true, username: session.username, totpEnabled: !!config.auth.totpSecret, scanIntervalMs: config.settings.scanIntervalMs, capabilities: ['optimizer', 'optimizer-idle-guard'] });
 });
 
+// ---------- First-run onboarding ----------
+// What the panel already detected about the host — surfaced during setup so
+// the user's first impression is their real environment, not a blank state.
+async function onboardingProbe() {
+  const [dockerVersion, containers, diskProjects, storage, stats] = await Promise.all([
+    $`docker version --format '{{.Server.Version}}'`.text().catch(() => ''),
+    maintenanceQaRoot ? Promise.resolve([]) : listContainers().catch(() => []),
+    detectProjectsOnDisk().catch(() => []),
+    availableStorage().catch(() => null),
+    getServerStats().catch(() => null),
+  ]);
+  return {
+    docker: {
+      available: !!dockerVersion.trim() || (containers?.length ?? 0) > 0,
+      version: dockerVersion.trim() || null,
+      running: containers?.length ?? 0,
+    },
+    projects: {
+      count: diskProjects.length,
+      sample: diskProjects.slice(0, 5).map((p) => ({ name: p.name, type: p.type })),
+    },
+    disks: (storage?.disks || []).slice(0, 6).map((d) => ({ name: d.name, path: d.path, available: d.available })),
+    memoryTotalMb: stats?.memoryTotalMb ?? null,
+    hostUser: config.settings.hostUser,
+  };
+}
+
+const onboardingDeps = {
+  getConfig: () => config,
+  saveAuth: async (username: string, passwordHash: string) => {
+    config.auth.username = username;
+    config.auth.passwordHash = passwordHash;
+    await saveConfig(config);
+  },
+  hashPassword,
+  startSession: async (c: any, username: string) => {
+    const token = await createSession(username);
+    setSessionCookie(c, token);
+    recordSession(token, username, c.req.header('user-agent') || '');
+  },
+  backupCount: () => platformBackups.policies().length,
+  probe: onboardingProbe,
+  recordEvent,
+  lockRemaining: loginLockRemaining,
+  noteFail: noteLoginFail,
+};
+// Public part (status + one-time-token setup) must precede requireAuth.
+registerOnboardingPublic(app, onboardingDeps);
+
 app.use('/api/*', async (c,next)=>{if(/^\/api\/(storage|maintenance|home|compose|files\/trash)(?:\/|$)/.test(c.req.path))c.header('Cache-Control','private, no-store');await next();});
 // Machine tokens are accepted only by the versioned API, before cookie auth.
 // Its terminal wildcard prevents any request from falling through to legacy routes.
@@ -405,6 +457,29 @@ app.post('/api/auth/totp/enable', async (c) => {
   await saveConfig(config);
   recordEvent('auth', '2FA activado');
   notify('2FA activado', 'Los próximos logins van a pedir el código del autenticador.', 3).catch(() => {});
+  return c.json({ ok: true });
+});
+
+// Password change — there is no recovery flow, so the current password is
+// always required and every other session is revoked on success (a stolen
+// cookie can't outlive the rotation). CLI fallback: `axon reset-password`.
+app.post('/api/auth/password', async (c) => {
+  const body = await c.req.json<{ current?: string; password?: string }>().catch(() => ({} as { current?: string; password?: string }));
+  const password = typeof body.password === 'string' ? body.password : '';
+  if (password.length < 8 || password.length > 200) {
+    return fail(c, 400, 'La contraseña nueva necesita al menos 8 caracteres.');
+  }
+  if (!(await verifyPassword(String(body.current || ''), config.auth.passwordHash))) {
+    recordEvent('auth', 'Cambio de contraseña rechazado — la actual no coincide');
+    return fail(c, 401, 'La contraseña actual no es correcta.');
+  }
+  if (body.current === password) return fail(c, 400, 'La contraseña nueva es igual a la actual.');
+  config.auth.passwordHash = await hashPassword(password);
+  await saveConfig(config);
+  const sid = sessionIdFromRequest(c);
+  for (const s of listSessions().issued) if (s.jti !== sid) revokeSession(s.jti);
+  recordEvent('auth', `Contraseña actualizada por ${c.get('user')}`);
+  notify('Contraseña actualizada', 'Las demás sesiones y dispositivos quedaron cerradas.', 3).catch(() => {});
   return c.json({ ok: true });
 });
 
@@ -1482,6 +1557,7 @@ registerMetricsRoutes(app);
 registerDropRoutes(app);
 registerLibraryRoutes(app,fileTransfers);
 registerSessionRoutes(app);
+registerOnboardingRoutes(app, onboardingDeps);
 registerOpsRoutes(app);
 registerOptimizerRoutes(app, async () => config);
 registerDockerOpsRoutes(app);
