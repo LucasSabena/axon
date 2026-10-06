@@ -1,7 +1,7 @@
 import { resolveHostPath, hostVolumes } from '../host-storage';
 import { volumeForPath, volumeContains, type VolumeSnapshot, type FileVolume } from '../file-volumes';
 import { firstBackupAt, followingBackupAt } from './backup-schedule';
-import { readFile } from 'node:fs/promises';
+import { readFile, readlink } from 'node:fs/promises';
 import { hostSpawnInteractive, ON_HOST } from '../host';
 import { PlatformError, type PlatformStore } from './store';
 import type { ProjectHub } from './projects';
@@ -37,8 +37,22 @@ export async function backupWorker(request:Record<string,unknown>) {
 }
 export async function hostDataDirectory(configDir:string):Promise<string> {
   if (ON_HOST) return configDir;
-  // AXON shares the host UTS namespace, so HOSTNAME names the host, not Docker.
-  const p = Bun.spawn(['docker','inspect',process.env.AXON_CONTAINER_NAME || 'axon','--format','{{json .Mounts}}'],{stdout:'pipe',stderr:'pipe'});
+  let container=process.env.AXON_CONTAINER_NAME;
+  if(!container){
+    // A 1.1 updater activates the new image before replacing its own manager,
+    // so the first upgrade has no AXON_CONTAINER_NAME yet. Host PID/network
+    // mode also makes HOSTNAME/cgroup unreliable. Match our mount namespace.
+    const list=Bun.spawn(['docker','ps','-q'],{stdout:'pipe',stderr:'pipe'});
+    const ids=(await new Response(list.stdout).text()).trim().split(/\s+/).filter(Boolean);
+    if(await list.exited||!ids.length)throw new Error('No se pudo identificar el contenedor de AXON');
+    const inspect=Bun.spawn(['docker','inspect',...ids,'--format','{{.Id}} {{.State.Pid}}'],{stdout:'pipe',stderr:'pipe'});
+    const rows=(await new Response(inspect.stdout).text()).trim().split('\n');
+    if(await inspect.exited)throw new Error('No se pudo identificar el contenedor de AXON');
+    const own=await readlink('/proc/self/ns/mnt');
+    for(const row of rows){const [id,pid]=row.split(' ');try{if(await readlink('/proc/'+pid+'/ns/mnt')===own){container=id;break;}}catch{/* Container exited during discovery. */}}
+    if(!container)throw new Error('No se pudo identificar el montaje propio de AXON');
+  }
+  const p = Bun.spawn(['docker','inspect',container,'--format','{{json .Mounts}}'],{stdout:'pipe',stderr:'pipe'});
   const [out,,code] = await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text(),p.exited]);
   if (code) throw new Error('No se pudo resolver el montaje de configuración');
   const mounts = JSON.parse(out) as {Destination:string;Source:string;Type:string}[];
