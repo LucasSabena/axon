@@ -164,13 +164,18 @@ test('volume trash rejects symlink/private-permission attacks and lost mount ide
 test('format-backups can be trashed while the rest of the private state stays protected',async()=>{
  const f=await fixture();try{
   const state=f.home+'/.local/share/axon';const backup=state+'/format-backups/DISK-20261005/payload';
+  // A present legacy trash must not mark the whole ~/.local/share as protected,
+  // and a Trash-named sibling directory stays deletable.
+  await mkdir(f.home+'/.local/share/axon-trash',{recursive:true,mode:0o700});await writeFile(f.home+'/.local/share/axon-trash/.manifest.json','[]');
   await mkdir(backup,{recursive:true});await mkdir(state+'/agent-accounts');await mkdir(state+'/operations');await mkdir(state+'/backups/repo',{recursive:true});await writeFile(backup+'/preserved','resguardo');
+  await writeFile(f.home+'/.local/share/other-app-data','externo');await writeFile(f.home+'/.local/share/Trashbin-item','nombre parecido');
   const sent=await f.operations.send(backup,actor);expect(sent.state).toBe('verified');expect((await f.operations.list()).items[0].orig).toBe(backup);
   await f.operations.restore(sent.id,actor);expect(await readFile(backup+'/preserved','utf8')).toBe('resguardo');
   await expect(f.operations.send(state+'/agent-accounts',actor)).rejects.toThrow('Ruta protegida');
   await expect(f.operations.send(state+'/operations',actor)).rejects.toThrow('Ruta protegida');
   await expect(f.operations.send(state+'/backups/repo',actor)).rejects.toThrow('Ruta protegida');
   await expect(f.operations.send(state,actor)).rejects.toThrow('Ruta protegida');
+  for(const p of [f.home+'/.local/share/other-app-data',f.home+'/.local/share/Trashbin-item']){const r=await f.operations.send(p,actor);expect(r.state).toBe('verified');}
  }finally{await f.clean();}
 });
 test('volume trash uses sticky shared Trash and reconciles a lost receipt without repeating the rename',async()=>{

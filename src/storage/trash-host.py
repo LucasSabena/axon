@@ -132,7 +132,11 @@ def trash_for(rs,path,device):
  if not matches:raise Guard('Otro filesystem sin papelera privada disponible: se conserva el original')
  return matches[0]
 def trash_path(origin,path):return os.path.relpath(path,tops[origin]) if origin in tops else path
-def protected_trash(path,rs):return any(path==os.path.dirname(r[1]) or path.startswith(os.path.dirname(r[1])+'/') for r in rs)
+def under(path,base):return path==base or path.startswith(base+'/')
+def protected_trash(path,rs):
+ # XDG/volume roots point at the files/ subdir: protect its parent (files + info).
+ # The legacy root is the trash dir itself, not a parent to strip.
+ return any(under(path,r[1] if r[0]=='legacy' else os.path.dirname(r[1])) for r in rs)
 def listing(rs):
  result=[];complete=True
  for origin,p,fd,info in rs:
@@ -185,7 +189,7 @@ try:
    p=req['path'];name=os.path.basename(p)
    if any(x in ('.ssh','.gnupg') for x in p.split('/')):raise Guard('Ruta de acceso protegida')
    private_root=home+'/.local/share/axon';recovery=private_root+'/format-backups'
-   if len(p.split('/'))<4 or p==home or p.startswith(home+'/.local/share/Trash') or p.startswith(home+'/.local/share/axon-trash') or ((p==private_root or p.startswith(private_root+'/')) and not (p==recovery or p.startswith(recovery+'/'))):raise Guard('Ruta protegida')
+   if len(p.split('/'))<4 or p==home or under(p,home+'/.local/share/Trash') or under(p,home+'/.local/share/axon-trash') or (under(p,private_root) and not under(p,recovery)):raise Guard('Ruta protegida')
    src=anchor(os.path.dirname(p));handles.append(src);s=os.stat(name,dir_fd=src,follow_symlinks=False)
    if identity(s)!=req['identity']:raise Guard('El elemento cambió desde la revisión')
    origin,destpath,dest,info=trash_for(rs,p,s.st_dev);key=req['key']
