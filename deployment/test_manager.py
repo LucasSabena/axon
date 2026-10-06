@@ -46,6 +46,9 @@ class UpgradeContracts(unittest.TestCase):
         self.assertEqual(service['environment']['AXON_CONTAINER_NAME'], self.state['name'])
         self.assertFalse(any(v['target'] == '/app/public' for v in service['volumes']))
         self.assertTrue(any(v['target'] == '/app/data' and v['source'] == str(self.root / 'data') for v in service['volumes']))
+        host = next(v for v in service['volumes'] if v['target'] == '/hostfs')
+        self.assertTrue(host['read_only'])
+        self.assertEqual(host['bind']['propagation'], 'rslave')
 
     def test_upgrade_records_old_release_and_preserves_all_data(self):
         with patch.object(m, 'verify'):

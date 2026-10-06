@@ -90,7 +90,7 @@ def manifest(root, state, release):
         'labels': {'io.axon.installation': str(root)},
         'volumes': [{'type': 'bind', 'source': str(root / 'data'), 'target': '/app/data'},
             {'type': 'bind', 'source': '/var/run/docker.sock', 'target': '/var/run/docker.sock'},
-            {'type': 'bind', 'source': '/', 'target': '/hostfs', 'read_only': True}],
+            {'type': 'bind', 'source': '/', 'target': '/hostfs', 'read_only': True, 'bind': {'propagation': 'rslave'}}],
         'healthcheck': {'test': ['CMD', 'bun', '-e',
             f"const r=await fetch('http://127.0.0.1:{state['port']}/api/health');const d=await r.json();if(!r.ok||d.ok!==true||d.revision!==process.env.AXON_REVISION)process.exit(1)"],
             'interval': '5s', 'timeout': '5s', 'retries': 12, 'start_period': '15s'},
