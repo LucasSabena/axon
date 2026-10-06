@@ -81,7 +81,14 @@ export class Backups {
   targets(policy:BackupPolicy):BackupDestination[] {return policy.destinations?.length?policy.destinations:[{id:'local',path:policy.repository||'',label:policy.repository?'Destino guardado':'Disco del sistema'}];}
   sources(policy:BackupPolicy) {return policy.sources?.length?policy.sources:policy.source?[policy.source]:[];}
   async ensureConfiguration() {
-    if (!this.store.get('backup-policy','server-configuration')) this.store.put('backup-policy','server-configuration',{id:'server-configuration',name:'Configuración de AXON',kind:'configuration',source:await this.configDir(),dailyAt:'04:00',enabled:true} satisfies BackupPolicy);
+    const source=await this.configDir(),existing=this.store.get<BackupPolicy>('backup-policy','server-configuration');
+    if (!existing) this.store.put('backup-policy','server-configuration',{id:'server-configuration',name:'Configuración de AXON',kind:'configuration',source,dailyAt:'04:00',enabled:true} satisfies BackupPolicy);
+    else if(existing.kind==='configuration'&&existing.source!==source){
+      // Repair the automatically created 1.1 policy after installation/migration.
+      // Existing snapshots retain their frozen source/repository for recovery.
+      this.cancelPending(existing.id,'La configuración de AXON se copiará desde su montaje actual.');
+      this.store.put('backup-policy',existing.id,{...existing,source,sourceVolumes:undefined,revision:crypto.randomUUID()});
+    }
   }
   async save(input:any,actor:string) {return this.serial(async()=>{
     if (!input || Object.keys(input).some(k => !['id','name','kind','projectId','containerId','databases','dailyAt','enabled','repository','sources','destinations','intervalDays','retentionDays','exclusions','diskMode','sourceIdentities'].includes(k))) throw new PlatformError('Configuración inválida');
@@ -210,6 +217,7 @@ export class Backups {
       await this.environment.resolve(p,{directory:true,fresh:true,root:policy.diskMode});
       const v=volumeForPath(mounted,p),expected=policy.sourceVolumes?.[p];
       if(expected&&(!v||!sameDisk(expected,v)))throw new PlatformError('Esperando el disco de origen de '+p+'. No se copiará otra carpeta en su lugar.',409);
+      if(v&&target?.volume&&v.diskId===target.volume.diskId)throw new PlatformError('El destino debe estar en otro disco físico que el origen actual.',409);
       if(v?.mountId&&v.filesystem!=='fixture')sourceMounts[p]=v.mountId;
     }
     const repositoryVolume=policy.repository?volumeForPath(mounted,policy.repository):undefined;

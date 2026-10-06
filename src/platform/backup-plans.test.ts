@@ -33,6 +33,17 @@ test('calendar schedules use Argentina, advance by days and coalesce missed slot
  expect(followingBackupAt(next,utc('2026-10-20T12:00:00Z'),3)).toBe(utc('2026-10-22T07:00:00Z'));
  expect(backupTime('2026-10-07','04:00')).toBe(next);
 });
+test('upgrading the automatic configuration policy repairs its own source without rewriting old copies or user settings',async()=>{
+ const f=await fixture();try{
+  const policy={id:'server-configuration',name:'Mis ajustes',kind:'configuration',source:'/another-install/data',enabled:true,intervalDays:7,dailyAt:'05:00',retentionDays:90,repository:f.home+'/disk-a/repo'};
+  f.store.put('backup-policy',policy.id,policy);
+  f.store.put('backup-job','previous',{id:'previous',policy,mode:'backup',state:'verified',snapshot:'a'.repeat(64),createdAt:1});
+  await f.backups.ensureConfiguration();
+  const current=f.backups.policies()[0];expect(current.source).toBe(f.home+'/source');expect(current.repository).toBe(policy.repository);expect(current.dailyAt).toBe('05:00');expect(current.intervalDays).toBe(7);expect(current.retentionDays).toBe(90);
+  expect(f.store.get<BackupJob>('backup-job','previous')!.policy.source).toBe('/another-install/data');
+  await f.backups.start(policy.id,'owner');expect(f.starts[0].policy.source).toBe(f.home+'/source');
+ }finally{await f.close();}
+});
 test('arbitrary folders and two independent disks persist, physical duplicates and recursive folders are rejected',async()=>{
  const f=await fixture();try{
   const p=await f.backups.save(f.input,'owner');expect(p.sources).toEqual([f.home+'/source']);expect(p.destinations).toHaveLength(2);expect(p.destinations![0].path).toBe(f.home+'/disk-a/AXON-Backups/'+p.id);
