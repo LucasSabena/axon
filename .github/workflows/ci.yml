@@ -23,8 +23,8 @@ jobs:
           version: 12.5.1
       - name: Python test dependencies
         run: python3 -m pip install websockets==15.0.1
-      - name: Restic integration test dependency
-        run: sudo apt-get update && sudo apt-get install -y restic
+      - name: Backup and media integration test dependencies
+        run: sudo apt-get update && sudo apt-get install -y restic ffmpeg
       - name: Install locked packages
         run: pnpm install --frozen-lockfile
       - name: Typecheck and frontend syntax
