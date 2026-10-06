@@ -99,6 +99,9 @@ export function listJobs(): Job[] {
     .slice(0, 30);
 }
 
+let completionHook: (() => void) | null = null;
+export function setJobCompletionHook(hook: () => void) { completionHook = hook; }
+
 export function getJob(id: string): Job | undefined {
   return jobs.get(id);
 }
@@ -107,7 +110,7 @@ export interface JobStep extends ProgramStep {
   group?: string;
 }
 
-export function runJob(title: string, steps: JobStep[]): Job {
+export function runJob(title: string, steps: JobStep[], options: { transient?: boolean } = {}): Job {
   const job: Job = {
     id: Math.random().toString(36).slice(2, 10),
     title,
@@ -118,7 +121,7 @@ export function runJob(title: string, steps: JobStep[]): Job {
   };
   jobs.set(job.id, job);
   pruneJobs();
-  void execute(job, steps);
+  void execute(job, steps, options);
   return job;
 }
 
@@ -131,7 +134,7 @@ function pruneJobs() {
   }
 }
 
-async function execute(job: Job, steps: JobStep[]) {
+async function execute(job: Job, steps: JobStep[], options: { transient?: boolean } = {}) {
   let failedGroup: string | undefined;
   let anyFailed = false;
 
@@ -160,7 +163,7 @@ async function execute(job: Job, steps: JobStep[]) {
           appendLog(job, decoder.decode(value, { stream: true }));
         }
       };
-      const [code] = await Promise.all([proc.exited, reader(proc.stdout), reader(proc.stderr)]);
+      const [code] = await Promise.all([proc.exited, reader(proc.stdout as ReadableStream<Uint8Array>), reader(proc.stderr as ReadableStream<Uint8Array>)]);
       state.exitCode = code;
       if (code !== 0) {
         state.status = 'failed';
@@ -183,12 +186,13 @@ async function execute(job: Job, steps: JobStep[]) {
   job.status = anyFailed ? 'failed' : 'ok';
   job.endedAt = new Date().toISOString();
   appendLog(job, anyFailed ? '\n— Finalizado con errores —\n' : '\n— Finalizado correctamente —\n');
-  persistJob(job);
+  if (!options.transient) persistJob(job);
   recordEvent(
     'job',
     job.title,
     anyFailed ? `Fallaron ${job.steps.filter((s) => s.status === 'failed').length} paso(s)` : 'Completado'
   );
+  completionHook?.();
   notify(
     `AXON — ${job.title}`,
     anyFailed

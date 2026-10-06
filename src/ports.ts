@@ -1,3 +1,4 @@
+import { SnapshotCache } from './snapshot-cache';
 import { readFile, readdir, readlink } from 'fs/promises';
 import * as path from 'path';
 import {
@@ -494,7 +495,9 @@ async function probePortHealth(port: number): Promise<{ ok: boolean; ms?: number
 
 // --- Public API ---
 
-export async function listPortProcesses(): Promise<PortProcess[]> {
+const portFlights = new SnapshotCache<PortProcess[]>(0, 1);
+export function listPortProcesses(): Promise<PortProcess[]> { return portFlights.get('ports', scanPortProcesses); }
+async function scanPortProcesses(): Promise<PortProcess[]> {
   const listeners = await scanListeners();
   const byPid = new Map<number, RawListener[]>();
   const noPid: RawListener[] = [];

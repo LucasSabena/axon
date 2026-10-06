@@ -13,6 +13,28 @@
 /* ---------- Top: header + breadcrumb ---------- */
 #tab-files .fm-top { padding: 12px 18px 0; flex-shrink: 0; }
 #tab-files .fm-note { margin: 6px 0 10px; }
+.fm-devices { display:flex; align-items:flex-start; flex-wrap:wrap; gap:8px; padding-bottom:10px; }
+.fm-device-tools { display:flex; align-items:center; gap:4px; min-height:42px; font-size:12px; color:var(--text-dim); }
+.fm-volume-list { display:flex; flex-wrap:wrap; gap:6px; flex:1; min-width:0; }
+.fm-volume { display:flex; align-items:center; gap:8px; text-align:left; padding:7px 10px; max-width:100%; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg-elevated); color:var(--text); cursor:pointer; }
+.fm-volume span { min-width:0; }
+.fm-volume strong,.fm-volume small { display:block; overflow-wrap:anywhere; }
+.fm-volume strong { font-size:12px; font-weight:600; }
+.fm-volume small { font-size:11px; color:var(--text-dim); margin-top:2px; }
+.fm-volume .lucide-icon { width:17px; height:17px; flex-shrink:0; }
+.fm-volume.active { border-color:var(--accent); background:var(--accent-soft); }
+.fm-volume:hover { background:var(--bg-hover); }
+.fm-volume:disabled { opacity:.6; cursor:default; }
+#fm-volumes-error { flex-basis:100%; margin:0; }
+.fm-clipboard { display:flex; align-items:center; gap:8px; padding:8px 0; border-top:1px solid var(--border); }
+#fm-clipboard-label { flex:1; min-width:0; overflow-wrap:anywhere; font-size:12px; }
+@media (max-width:600px) {
+  .fm-devices { max-height:145px; overflow-y:auto; }
+  .fm-volume-list { flex-basis:100%; }
+  .fm-volume { flex:1 1 130px; }
+  .fm-clipboard { flex-wrap:wrap; }
+  #fm-clipboard-label { flex-basis:100%; }
+}
 
 .fm-breadcrumb {
   display: flex; align-items: center; gap: 2px; flex-wrap: wrap;
@@ -370,6 +392,11 @@ body.fm-marqueeing * { cursor: crosshair !important; }
   font-family: var(--font-mono); font-size: 0.85rem; outline: none;
 }
 .fm-prompt-input:focus { border-color: var(--accent); }
+.fm-create-form { display: flex; flex-direction: column; gap: 12px; }
+.fm-create-form h3, .fm-create-form p { margin: 0; }
+.fm-create-path { overflow-wrap: anywhere; }
+.fm-create-presets { display: flex; flex-wrap: wrap; gap: 8px; }
+.fm-create-error { color: var(--danger); font-size: 0.85rem; }
 
 /* ---------- Preview pane ---------- */
 .fm-preview {

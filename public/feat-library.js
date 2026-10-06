@@ -38,17 +38,19 @@
     favs: new Set(),
     cols: [],
     roots: [],
+    directories: [],
     home: '',
     uploadRoot: '',
     shareBase: '',
     scannedAt: 0,
-    view: JSON.parse(localStorage.getItem('lib-view') || '{"type":"all"}'),
+    view: (()=>{try{return JSON.parse(localStorage.getItem('lib-view')) || {type:'all'};}catch{return {type:'all'};}})(),
     q: '',
     sort: localStorage.getItem('lib-sort') || 'date-desc',
     group: localStorage.getItem('lib-group') || 'month',
     size: Number(localStorage.getItem('lib-size') || 170),
     layout: localStorage.getItem('lib-layout') || 'grid',
     sel: new Set(),
+    cursor: null,
     selMode: false,
     lastIdx: -1,
     list: [],
@@ -76,7 +78,8 @@
   const dirOf = (p) => p.slice(0, p.lastIndexOf('/'));
   const baseOf = (p) => p.slice(p.lastIndexOf('/') + 1);
   const prettyPath = (p) => (L.home && p.startsWith(L.home) ? '~' + p.slice(L.home.length) : p);
-  const thumbUrl = (it) => (it.th === 2 ? `/api/library/thumb/${it.id}` : `/api/library/thumb/${it.id}?k=${it.tk}`);
+  const mediaUrl = (it, kind = 'file') => `/api/library/${kind}/${it.id}?k=${encodeURIComponent(it.tk)}`;
+  const thumbUrl = (it) => mediaUrl(it, 'thumb');
   const rootOf = (p) => [L.uploadRoot, ...L.roots].filter(Boolean).sort((a, b) => b.length - a.length).find((r) => p === r || p.startsWith(r + '/'));
   const expiresIn = (ms) => {
     if (!ms) return 'Sin vencimiento';
@@ -128,6 +131,7 @@
       }
     } catch { /* older app.js */ }
     document.body.classList.remove('sidebar-open');
+    if (window.AxonNavigation) return;
     if (!L.loaded) load();
     else render();
   }
@@ -152,6 +156,7 @@
     sec.className = 'tab-content';
     sec.innerHTML = `
       <div class="lib-top">
+        <div class="page-history"><button class="icon-btn" data-axon-back title="Atrás" aria-label="Atrás">${icon('arrow-left')}</button><button class="icon-btn" data-axon-forward title="Adelante" aria-label="Adelante">${icon('arrow-right')}</button><button class="icon-btn" id="lib-keys" title="Atajos de teclado" aria-label="Atajos de teclado">${icon('keyboard')}</button></div>
         <button class="icon-btn lib-side-toggle" id="lib-side-toggle" title="Secciones">${icon('panel-left')}</button>
         <div class="lib-title"><h2 id="lib-h">Biblioteca</h2><span class="lib-sub" id="lib-sub"></span></div>
         <div class="lib-search">${icon('search')}<input id="lib-q" placeholder="Buscar por nombre, carpeta, tipo…" autocomplete="off"><kbd>/</kbd></div>
@@ -179,6 +184,7 @@
             <button data-layout="list" title="Lista">${icon('list')}</button>
           </div>
           <button class="icon-btn lib-selmode" id="lib-selmode" title="Seleccionar">${icon('check-square')}</button>
+          <button class="btn-secondary" id="lib-share-manager" title="Links compartidos y actividad">${icon('link')}<span>Links</span></button>
           <button class="btn-primary" id="lib-upload">${icon('upload')}<span>Subir</span></button>
           <button class="icon-btn" id="lib-refresh" title="Volver a escanear">${icon('refresh-cw')}</button>
           <button class="icon-btn" id="lib-settings" title="Carpetas y ajustes">${icon('settings-2')}</button>
@@ -188,7 +194,7 @@
         <aside class="lib-side" id="lib-side"></aside>
         <div class="lib-main" id="lib-main">
           <div class="lib-crumbs" id="lib-crumbs"></div>
-          <div class="lib-body" id="lib-body"><div class="lib-empty">${icon('loader')} Cargando biblioteca…</div></div>
+          <div class="lib-body" id="lib-body">${AxonUI.skeleton('Cargando biblioteca',6)}</div>
         </div>
       </div>
       <div class="lib-bulk hidden" id="lib-bulk"></div>
@@ -247,6 +253,7 @@
       startUploads([...e.dataTransfer.files]);
     });
 
+    $('#lib-share-manager').addEventListener('click',()=>setView({type:'shares'}));
     document.addEventListener('keydown', onKey);
     refreshIcons();
   }
@@ -262,20 +269,29 @@
 
   // ---------- Data ----------
 
-  async function load() {
-    const viewerId = !$('#lib-viewer')?.classList.contains('hidden') ? L.list[vIdx]?.id : null;
+  let loadFlight = null;
+  function load() {
+    if (!loadFlight) loadFlight = fetchLibrary().finally(() => { loadFlight = null; });
+    return loadFlight;
+  }
+  async function fetchLibrary() {
     try {
       const d = await api('/api/library');
+      // Read the current item AFTER the request: the user may have stepped meanwhile.
+      const viewerId = !$('#lib-viewer')?.classList.contains('hidden') ? vItemId : null;
+      const viewerVersion = viewerId ? vItemVersion : null;
       L.loaded = true;
       L.items = d.items;
       L.byId = new Map(d.items.map((it) => [it.id, it]));
       L.favs = new Set(d.favorites);
       L.cols = d.collections;
       L.roots = d.roots;
+      L.directories = d.directories || [];
       L.home = d.home;
       L.uploadRoot = d.uploadRoot;
       L.shareBase = d.shareBase;
       L.scannedAt = d.scannedAt;
+      L.revision = d.revision;
       L.sharesCount = d.shares;
       for (const id of [...L.sel]) if (!L.byId.has(id)) L.sel.delete(id);
       const nc = $('#nav-count-library');
@@ -285,30 +301,40 @@
       render({ keep: !first });
       if (viewerId) {
         const i = L.list.findIndex((x) => x.id === viewerId);
-        if (i >= 0) { vIdx = i; viewerBar(); }
+        if (i >= 0) {
+          vIdx = i;
+          if (viewerVersion !== L.list[i].tk) {
+            const media = $('#lv-stage audio, #lv-stage video');
+            showItem(media ? { time: media.currentTime, paused: media.paused } : null);
+          }
+          else { viewerBar(); syncViewerNavigation(); }
+        }
+        else { closeViewer(false); window.AxonNavigation?.update('library', libraryParams()); }
       }
       statusLine(d);
-      if (d.scanning || d.metaPending || d.thumbsPending) pollStatus();
+      pollStatus();
     } catch (err) {
       errToast(err);
-      $('#lib-body').innerHTML = `<div class="lib-empty">${icon('alert-triangle')} No se pudo cargar la biblioteca</div>`;
+      if (!L.loaded) $('#lib-body').innerHTML = `<div class="lib-empty">${icon('alert-triangle')} No se pudo cargar la biblioteca. Usá Actualizar para reintentar.</div>`;
       refreshIcons();
     }
   }
 
   let pollTimer = null;
-  function pollStatus() {
+  function pollStatus(delay = 2000) {
     clearTimeout(pollTimer);
+    if (!tabActive() || document.hidden) return;
     pollTimer = setTimeout(async () => {
       try {
-        const s = await api('/api/library/status');
-        statusLine(s);
-        if (s.scannedAt !== L.scannedAt && !s.scanning) return load();
-        if (s.scanning || s.metaPending || s.thumbsPending) pollStatus();
-        else if (tabActive()) load();
-      } catch { /* transient */ }
-    }, 4000);
+        const status = await api('/api/library/status?live=1' + (vItemId ? `&item=${encodeURIComponent(vItemId)}` : ''));
+        statusLine(status);
+        if (status.revision !== L.revision) await load();
+        pollStatus(2000);
+      } catch { pollStatus(15_000); }
+    }, delay);
   }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && tabActive()) pollStatus(0); else clearTimeout(pollTimer); });
+  document.addEventListener('axon:section', e => { if(e.detail === 'library' && L.loaded) pollStatus(0); else clearTimeout(pollTimer); });
 
   function statusLine(s) {
     const bits = [];
@@ -331,6 +357,12 @@
   // ---------- Filtering / grouping ----------
 
   function setView(v) {
+    if (window.AxonNavigation?.ready && !window.AxonNavigation.applying) {
+      const params = { ...libraryParams(), type: v.type, value: v.value || null, item: null };
+      const snapshot = libraryLocations[`${v.type}:${v.value || ''}:${L.q}`];
+      void window.AxonNavigation.go(window.AxonNavigation.url('library', params), { view: snapshot });
+      return;
+    }
     L.view = v;
     localStorage.setItem('lib-view', JSON.stringify(v));
     L.sel.clear();
@@ -394,6 +426,7 @@
   // Subfolders of a folder view, with counts and a cover image.
   function subfolders(dir) {
     const map = new Map();
+    for(const p of L.directories){if(!p.startsWith(dir+'/'))continue;const name=p.slice(dir.length+1).split('/')[0];if(name&&!map.has(name))map.set(name,{name,path:dir+'/'+name,count:0,size:0,cover:null});}
     for (const it of L.items) {
       if (!it.p.startsWith(dir + '/')) continue;
       const rest = it.p.slice(dir.length + 1);
@@ -509,8 +542,8 @@
       : it.k !== 'image' ? `<span class="lib-badge">${esc(it.e.toUpperCase())}</span>` : '';
     return `<div class="lib-tile${sel ? ' sel' : ''}" data-i="${i}" data-id="${it.id}" title="${esc(it.n)}">
       ${media}${badge}
-      <button class="lib-check" data-act="sel" aria-label="Seleccionar">${icon('check')}</button>
-      <button class="lib-fav${fav ? ' on' : ''}" data-act="fav" aria-label="Favorito">${icon('star')}</button>
+      <button class="lib-check" data-act="sel" aria-label="Seleccionar ${esc(it.n)}">${icon('check')}</button>
+      <button class="lib-fav${fav ? ' on' : ''}" data-act="fav" aria-label="Marcar favorito ${esc(it.n)}">${icon('star')}</button>
       <span class="lib-cap">${esc(it.n)}</span>
     </div>`;
   }
@@ -519,7 +552,7 @@
     const sel = L.sel.has(it.id);
     const media = it.th === -1 ? `<span class="lib-ext k-${it.k}">${icon(KIND[it.k]?.ic || 'file')}</span>` : `<img loading="lazy" src="${thumbUrl(it)}" alt="">`;
     return `<div class="lib-row${sel ? ' sel' : ''}" data-i="${i}" data-id="${it.id}">
-      <span class="lib-row-th"><button class="lib-check" data-act="sel">${icon('check')}</button>${media}</span>
+      <span class="lib-row-th"><button class="lib-check" data-act="sel" aria-label="Seleccionar ${esc(it.n)}">${icon('check')}</button>${media}</span>
       <span class="lib-row-n">${L.favs.has(it.id) ? `<span class="lib-star">${icon('star')}</span>` : ''}${esc(it.n)}</span>
       <span>${esc(KIND_ONE[it.k])}${it.d ? ' · ' + fmtDur(it.d) : ''}</span>
       <span>${fmtSize(it.s)}</span>
@@ -866,7 +899,8 @@
     const name = await promptModal('Renombrar', it.n);
     if (!name || name === it.n) return;
     try {
-      await api('/api/library/rename', { method: 'POST', body: { id: it.id, name } });
+      if(name.includes('/')||name==='.'||name==='..')throw new Error('Usá un nombre sin barras, punto ni doble punto.');
+      await window.AxonTransfers.run(it.p,dirOf(it.p)+'/'+name,'move');
       toast('Renombrado', 'ok', '', 2000);
       closeViewer();
       load();
@@ -874,7 +908,7 @@
   }
 
   function allFolders() {
-    const set = new Set([L.uploadRoot, ...L.roots].filter(Boolean));
+    const set = new Set([L.uploadRoot, ...L.roots, ...L.directories].filter(Boolean));
     for (const it of L.items) {
       let d = dirOf(it.p);
       const r = rootOf(it.p);
@@ -910,15 +944,28 @@
     $('#lib-mv-ok').addEventListener('click', async () => {
       $('#lib-mv-ok').disabled = true;
       try {
-        const r = await api('/api/library/move', { method: 'POST', body: { ids, dir: dest() } });
+        const target=dest(), selected=ids.map(id=>L.byId.get(id)).filter(Boolean);
+        await api('/api/files/mkdir',{method:'POST',body:{path:target}});
+        const listing=await api('/api/files?path='+encodeURIComponent(target));
+        const taken=new Set(listing.entries.map(e=>e.name));
         closeModal();
-        toast(`${r.moved.length} archivo${r.moved.length === 1 ? '' : 's'} movido${r.moved.length === 1 ? '' : 's'}`, 'ok', '', 2500);
+        let moved=0;
+        for(const it of selected){
+          if(dirOf(it.p)===target)continue;
+          let name=it.n, n=1;
+          const dot=it.n.lastIndexOf('.'), stem=dot>0?it.n.slice(0,dot):it.n, ext=dot>0?it.n.slice(dot):'';
+          while(taken.has(name))name=`${stem} (copia${n++===1?'':' '+(n-1)})${ext}`;
+          await window.AxonTransfers.run(it.p,target+'/'+name,'move');
+          taken.add(name);moved++;
+        }
+        toast(`${moved} archivo${moved===1?'':'s'} movido${moved===1?'':'s'}`, 'ok', '', 2500);
         L.sel.clear();
         closeViewer();
         load();
       } catch (err) {
-        $('#lib-mv-ok').disabled = false;
-        errToast(err);
+        const button=$('#lib-mv-ok');if(button)button.disabled=false;
+        L.sel.clear();load();
+        if(!err.cancelled)await window.AxonTransfers.showError(err,{mode:'move'});
       }
     });
   }
@@ -939,15 +986,36 @@
   // ---------- Viewer ----------
 
   let vIdx = -1;
+  let vItemId = null;
+  let vItemVersion = null;
+  let mediaGeneration = 0;
   let vInfo = localStorage.getItem('lib-vinfo') !== '0';
   let vPanel = 'info';
   let tcPoll = null;
   let vZoom = null;
+  const viewerMobile=matchMedia('(max-width:768px)');
+  viewerMobile.addEventListener('change',()=>{if(viewerMobile.matches&&vPanel==='info'){vInfo=false;$('#lv-info')?.classList.add('hidden');if(!$('#lib-viewer')?.classList.contains('hidden'))viewerBar();}});
 
-  function openViewer(i) {
+  function openViewer(i, fromRoute = false) {
+    if (!fromRoute && !$('#lib-viewer')?.classList.contains('hidden') && !window.AxonNavigation?.applying) {
+      if (vItemId === L.list[i]?.id) return;
+      vIdx = i; L.cursor = L.list[i]?.id;
+      showItem();
+      window.AxonNavigation?.update('library', libraryParams());
+      return;
+    }
+    if (!fromRoute && window.AxonNavigation?.ready && !window.AxonNavigation.applying) {
+      L.cursor = L.list[i]?.id;
+      void window.AxonNavigation.go(window.AxonNavigation.url('library', { ...libraryParams(), item: L.cursor }), { view: captureLibrary(), transient: true });
+      return;
+    }
+    stopViewerMedia();
     vIdx = i;
+    if (L.list[i]?.k === 'audio' && vPanel === 'info') vInfo = false;
+    if(matchMedia('(max-width:768px)').matches && vPanel==='info')vInfo=false;
     const v = $('#lib-viewer');
     v.classList.remove('hidden');
+    v.setAttribute('role','dialog');v.setAttribute('aria-modal','true');v.setAttribute('aria-label','Vista previa de archivo');
     document.body.classList.add('lib-noscroll');
     v.innerHTML = `
       <div class="lv-bar" id="lv-bar"></div>
@@ -963,7 +1031,7 @@
     let sx = null, sy = null;
     const st = $('#lv-stage');
     st.addEventListener('touchstart', (e) => {
-      if (e.touches.length !== 1 || vZoom?.zoomed()) { sx = null; return; }
+      if (e.target.closest('audio,video,button,input') || v.classList.contains('lv-compact') || e.touches.length !== 1 || vZoom?.zoomed()) { sx = null; return; }
       sx = e.touches[0].clientX; sy = e.touches[0].clientY;
     }, { passive: true });
     st.addEventListener('touchend', (e) => {
@@ -973,43 +1041,60 @@
       else if (dy > 110 && Math.abs(dy) > Math.abs(dx)) closeViewer();
       sx = null;
     });
-    // Android back button / swipe-back closes the viewer instead of leaving.
-    if (!vHist.pushed) {
-      if (vHist.skip) vHist.pending = true;
-      else { history.pushState({ libViewer: true }, ''); vHist.pushed = true; }
-    }
     showItem();
+    $('#lv-close')?.focus({preventScroll:true});
   }
 
-  // pushed: our history entry is on top · skip: a back() we triggered is in
-  // flight · pending: a viewer opened while that back() was still running.
-  const vHist = { pushed: false, skip: 0, pending: false };
-  window.addEventListener('popstate', () => {
-    if (vHist.skip) {
-      vHist.skip--;
-      if (vHist.pending) { vHist.pending = false; history.pushState({ libViewer: true }, ''); vHist.pushed = true; }
-      return;
-    }
-    vHist.pushed = false;
-    if (!$('#lib-viewer')?.classList.contains('hidden')) closeViewer(false);
-  });
+  function viewerQueue() {
+    return L.list[vIdx]?.k === 'audio' ? L.list.filter(it => it.k === 'audio') : L.list;
+  }
+
+  function syncViewerNavigation() {
+    const queue = viewerQueue(), pos = queue.findIndex(it => it.id === vItemId);
+    const audio = L.list[vIdx]?.k === 'audio';
+    $('#lv-prev').disabled = queue.length < 2 || (audio && pos <= 0);
+    $('#lv-next').disabled = queue.length < 2 || (audio && pos >= queue.length - 1);
+    $('#lv-prev').setAttribute('aria-label', audio ? 'Audio anterior' : 'Archivo anterior');
+    $('#lv-next').setAttribute('aria-label', audio ? 'Audio siguiente' : 'Archivo siguiente');
+  }
 
   function step(d) {
-    if (!L.list.length) return;
-    vIdx = (vIdx + d + L.list.length) % L.list.length;
+    const queue = viewerQueue(), pos = queue.findIndex(it => it.id === vItemId);
+    if (pos < 0 || !queue.length) return;
+    let next = pos + d;
+    if (L.list[vIdx]?.k === 'audio') {
+      if (next < 0 || next >= queue.length) return;
+    } else next = (next + queue.length) % queue.length;
+    vIdx = L.list.findIndex(it => it.id === queue[next].id);
+    L.cursor = L.list[vIdx].id;
     showItem();
+    window.AxonNavigation?.update('library', libraryParams());
+  }
+
+  function stopViewerMedia() {
+    mediaGeneration++;
+    clearTimeout(tcPoll);
+    $('#lib-viewer')?.querySelectorAll('audio,video').forEach(media => {
+      media.pause();
+      media.removeAttribute('src');
+      media.load();
+    });
   }
 
   function closeViewer(back = true) {
+    if (back && window.AxonNavigation?.ready && !window.AxonNavigation.applying) {
+      window.AxonNavigation.close({ ...libraryParams(), item: null }); return;
+    }
     const v = $('#lib-viewer');
     if (!v || v.classList.contains('hidden')) return;
+    stopViewerMedia();
+    vItemId = null;
+    vItemVersion = null;
     v.classList.add('hidden');
     v.innerHTML = '';
     vZoom = null;
     document.body.classList.remove('lib-noscroll');
     clearTimeout(tcPoll);
-    vHist.pending = false;
-    if (back && vHist.pushed) { vHist.pushed = false; vHist.skip++; history.back(); }
   }
 
   function viewerBar() {
@@ -1019,7 +1104,7 @@
     const tr = canTranscribe(it);
     $('#lv-bar').innerHTML = `
       <button class="lv-btn" id="lv-close" title="Cerrar (Esc)">${icon('x')}</button>
-      <div class="lv-title"><b>${esc(it.n)}</b><small>${vIdx + 1} / ${L.list.length} · ${fmtSize(it.s)}</small></div>
+      <div class="lv-title"><b>${esc(it.n)}</b><small>${viewerQueue().findIndex(x => x.id === it.id) + 1} / ${viewerQueue().length} · ${fmtSize(it.s)}</small></div>
       <div class="lv-actions">
         <button class="lv-btn${L.favs.has(it.id) ? ' on' : ''} lv-hide-sm" id="lv-fav" title="Favorito (F)">${icon('star')}</button>
         ${tool ? `<button class="lv-btn" id="lv-tools" title="Optimizar / convertir (O)">${icon('wand-2')}<span>Optimizar</span></button>` : ''}
@@ -1042,7 +1127,7 @@
         { icon: 'info', label: 'Información', run: () => togglePanel('info') },
         { icon: 'star', label: L.favs.has(it.id) ? 'Quitar de favoritos' : 'Favorito', run: () => toggleFav([it.id], !L.favs.has(it.id)) },
         { icon: 'download', label: 'Descargar original', run: () => { location.href = `/api/library/file/${it.id}?dl=1`; } },
-        { icon: 'external-link', label: 'Abrir original en otra pestaña', run: () => window.open(`/api/library/file/${it.id}`, '_blank') },
+        { icon: 'external-link', label: 'Abrir original en otra pestaña', run: () => window.open(mediaUrl(it), '_blank') },
         ...itemMenu(it, [it.id]).filter((x) => !['share-2', 'download', 'star'].includes(x.icon)),
       ], r.right - 240, r.bottom + 4);
     });
@@ -1059,21 +1144,21 @@
   }
 
   function mediaHtml(it) {
-    const f = `/api/library/file/${it.id}`;
+    const f = mediaUrl(it);
     if (it.k === 'video') {
-      const src = it.wv ? `/api/library/web/${it.id}` : f;
+      const src = it.wv ? mediaUrl(it, 'web') : f;
       const track = it.tr ? `<track kind="subtitles" label="Transcripción" src="/api/library/transcript/${it.id}/export?fmt=vtt&v=${Date.now()}">` : '';
       return `<video controls autoplay playsinline preload="metadata" ${it.th >= 1 ? `poster="${thumbUrl(it)}"` : ''} src="${src}">${track}</video>`;
     }
     if (it.k === 'image' || it.k === 'raw' || it.k === 'vector' || (it.k === 'design' && it.vw)) {
       const light = it.vw || it.bv;
-      const src = light ? `/api/library/view/${it.id}?k=${it.tk}` : f;
+      const src = light ? mediaUrl(it, 'view') : f;
       return `<div class="lv-img-wrap" id="lv-zoom">${light && it.th >= 1 ? `<img class="lv-ph" src="${thumbUrl(it)}" alt="">` : ''}<img class="lv-img" src="${src}" alt="" draggable="false" onload="this.previousElementSibling?.classList?.contains('lv-ph')&&this.previousElementSibling.remove()"></div>`;
     }
-    if (it.k === 'audio') return `<div class="lv-audio">${it.th >= 1 ? `<img src="${thumbUrl(it)}" alt="">` : icon('music')}<b>${esc(it.n)}</b><audio controls autoplay src="${f}"></audio></div>`;
+    if (it.k === 'audio') return `<div class="lv-audio"><audio controls autoplay preload="metadata" aria-label="${esc(it.n)}" src="${f}"></audio><small class="lv-audio-status" role="status"></small></div>`;
     if (it.k === 'pdf' || ['txt', 'md', 'csv'].includes(it.e)) return `<iframe class="lv-frame" src="${f}"></iframe>`;
     return `<div class="lv-file">${icon(KIND[it.k]?.ic || 'file')}<b>${esc(it.e.toUpperCase())}</b><span>${esc(it.n)}</span><span>Este tipo de archivo no tiene vista previa</span>
-      <a class="btn-primary" href="${f}?dl=1">${icon('download')} Descargar</a></div>`;
+      <a class="btn-primary" href="${f}&dl=1">${icon('download')} Descargar</a></div>`;
   }
 
   // Wheel / pinch / double-tap zoom. Past 1.3× the light 2048px view is
@@ -1097,7 +1182,7 @@
         full = true;
         const o = new Image();
         o.onload = () => { if (img.isConnected) img.src = o.src; };
-        o.src = `/api/library/file/${it.id}`;
+        o.src = mediaUrl(it);
       }
     };
     img.style.transformOrigin = '0 0';
@@ -1126,27 +1211,58 @@
     return { zoomed: () => s > 1, reset: () => zoomAt(1, 0, 0) };
   }
 
-  function showItem() {
+  function showItem(playback = null) {
     const it = L.list[vIdx];
     if (!it) return closeViewer();
-    clearTimeout(tcPoll);
+    window.AxonRecent?.add({section:'library',name:it.n,path:it.p,url:window.AxonNavigation.url('library',{...libraryParams(),item:it.id})});
+    stopViewerMedia();
+    vItemId = it.id;
+    vItemVersion = it.tk;
+    const generation = mediaGeneration;
+    const viewer = $('#lib-viewer'), compact = it.k === 'audio';
+    viewer.classList.toggle('lv-compact', compact);
+    viewer.setAttribute('role', compact ? 'region' : 'dialog');
+    viewer.setAttribute('aria-label', compact ? 'Reproductor de audio' : 'Vista previa de archivo');
+    if (compact) viewer.removeAttribute('aria-modal'); else viewer.setAttribute('aria-modal', 'true');
+    document.body.classList.toggle('lib-noscroll', !compact);
     viewerBar();
+    syncViewerNavigation();
     const st = $('#lv-stage');
     st.innerHTML = mediaHtml(it);
+    if (playback) {
+      const media = st.querySelector('audio,video');
+      if (media) {
+        media.autoplay = !playback.paused;
+        if (playback.paused) media.pause();
+        media.addEventListener('loadedmetadata', () => {
+          if (generation !== mediaGeneration) return;
+          if (Number.isFinite(media.duration)) media.currentTime = Math.min(playback.time || 0, Math.max(0, media.duration - 0.05));
+          if (!playback.paused) media.play().catch(() => {});
+        }, { once: true });
+      }
+    }
     vZoom = $('#lv-zoom') ? zoomer($('#lv-zoom'), it) : null;
+    if (compact) {
+      const audio = st.querySelector('audio');
+      audio.addEventListener('ended', () => { if (generation === mediaGeneration) step(1); });
+      audio.addEventListener('error', () => {
+        if (generation === mediaGeneration) st.querySelector('.lv-audio-status').textContent = 'No se pudo reproducir este audio. Podés descargar el original desde la barra.';
+      });
+    }
     if (it.k === 'video') {
       const note = document.createElement('div');
       note.className = 'lv-note hidden';
+      note.setAttribute('role', 'status');
       st.appendChild(note);
-      const v = st.querySelector('video');
-      const offerWeb = (msg) => {
-        note.classList.remove('hidden');
-        note.innerHTML = `${icon('alert-triangle')} <span>${esc(msg)}</span> <button class="btn-primary" id="lv-mkweb">${icon('wand-2')} Crear versión compatible</button>`;
-        $('#lv-mkweb').addEventListener('click', () => makeWeb(it, note));
-        refreshIcons();
-      };
-      v.addEventListener('error', () => offerWeb('Este navegador no puede reproducir el formato original.'));
-      if (it.nw && !it.wv) offerWeb(`Video ${it.c ? it.c.toUpperCase() : esc(it.e.toUpperCase())}: puede no reproducirse en todos los navegadores.`);
+      const video = st.querySelector('video');
+      video.addEventListener('error', () => {
+        if (generation !== mediaGeneration || !video.isConnected) return;
+        if (!it.wv && [3, 4].includes(video.error?.code)) makeWeb(it, note, video, generation);
+        else {
+          note.classList.remove('hidden');
+          note.textContent = 'No se pudo cargar el video. Revisá la conexión o descargá el original desde la barra.';
+        }
+      });
     }
     // Warm up the neighbours (light views for photos) for snappy navigation.
     for (const d of [1, -1]) {
@@ -1160,29 +1276,47 @@
     refreshIcons();
   }
 
-  async function makeWeb(it, note) {
+  async function makeWeb(it, note, video, generation) {
+    if (note.dataset.preparing) return;
+    note.dataset.preparing = '1';
+    note.classList.remove('hidden');
+    note.textContent = 'Preparando reproducción compatible…';
+    const active = () => generation === mediaGeneration && video.isConnected && vItemId === it.id;
+    const failed = (message) => {
+      if (!active()) return;
+      note.textContent = message + ' ';
+      const retry = document.createElement('button');
+      retry.className = 'btn-primary'; retry.textContent = 'Reintentar';
+      retry.addEventListener('click', () => { delete note.dataset.preparing; makeWeb(it, note, video, generation); });
+      note.appendChild(retry);
+    };
     try {
       await api(`/api/library/web/${it.id}`, { method: 'POST' });
+      if (!active()) return;
       const tick = async () => {
-        const s = await api(`/api/library/web/${it.id}/status`).catch(() => null);
-        if (!s) return;
-        if (s.state === 'done') {
+        if (!active()) return;
+        let status;
+        try { status = await api(`/api/library/web/${it.id}/status`); }
+        catch { failed('Se interrumpió la preparación.'); return; }
+        if (!active()) return;
+        if (status.state === 'done') {
           it.wv = 1;
-          if (L.list[vIdx]?.id === it.id) showItem();
-          toast('Versión web lista', 'ok', '', 2500);
+          const time = video.currentTime || 0;
+          video.addEventListener('loadedmetadata', () => { video.currentTime = time; video.play().catch(() => {}); }, { once: true });
+          video.src = mediaUrl(it, 'web');
+          video.load();
+          note.classList.add('hidden');
           return;
         }
-        if (s.state === 'error') {
-          note.innerHTML = `${icon('x-circle')} No se pudo convertir: ${esc(s.error || '')}`;
-          refreshIcons();
+        if (status.state === 'error' || status.state === 'none') {
+          failed('No se pudo preparar la reproducción compatible.');
           return;
         }
-        note.innerHTML = `${icon('loader', 'spin')} Convirtiendo a MP4 H.264… ${s.state === 'queued' ? 'en cola' : (s.pct || 0) + '%'}`;
-        refreshIcons();
+        note.textContent = `Preparando reproducción compatible… ${status.state === 'queued' ? 'en cola' : (status.pct || 0) + '%'}`;
         tcPoll = setTimeout(tick, 1500);
       };
-      tick();
-    } catch (err) { errToast(err); }
+      void tick();
+    } catch { failed('No se pudo iniciar la reproducción compatible.'); }
   }
 
   function renderInfo(it) {
@@ -1241,8 +1375,18 @@
     }
     const viewer = !$('#lib-viewer').classList.contains('hidden');
     if (viewer) {
+      if(e.key==='Tab' && !$('#lib-viewer').classList.contains('lv-compact')){
+        const nodes=[...$('#lib-viewer').querySelectorAll('button,a[href],input,select,textarea,video,audio,iframe,[tabindex]')].filter(n=>n.offsetParent!==null&&!n.disabled&&n.tabIndex>=0);
+        const i=nodes.indexOf(document.activeElement);
+        if(nodes.length&&(i<0 || (e.shiftKey?i===0:i===nodes.length-1))){e.preventDefault();nodes[e.shiftKey?nodes.length-1:0].focus();}return;
+      }
       if (inField) return;
+      if (e.key !== 'Escape' && (e.target.closest('audio,video') || ($('#lib-viewer').classList.contains('lv-compact') && !e.target.closest('#lib-viewer')))) {
+        if ($('#lib-viewer').classList.contains('lv-compact') && !e.target.closest('#lib-viewer')) libraryKeyboard(e);
+        return;
+      }
       const it = L.list[vIdx];
+      if (!it) return;
       if (e.key === 'Escape') closeViewer();
       else if (e.key === 'ArrowRight') step(1);
       else if (e.key === 'ArrowLeft') step(-1);
@@ -1261,6 +1405,7 @@
       if (e.key === 'Escape') document.activeElement.blur();
       return;
     }
+    if (libraryKeyboard(e)) return;
     if (e.key === '/') { e.preventDefault(); $('#lib-q').focus(); }
     else if (e.key === 'Escape' && (L.sel.size || L.selMode)) { L.sel.clear(); L.selMode = false; syncSelClasses(); }
     else if ((e.ctrlKey || e.metaKey) && e.key === 'a' && L.view.type !== 'shares') {
@@ -1272,6 +1417,7 @@
 
   // ---------- Modals ----------
 
+  let promptResolve = null;
   function openModal(html, cls = '') {
     const c = $('#lib-modal-c');
     c.className = `modal-content lib-modal-content ${cls}`;
@@ -1283,6 +1429,7 @@
   }
 
   function closeModal() {
+    const resolve = promptResolve; promptResolve = null; resolve?.('');
     $('#lib-modal').classList.add('hidden');
     $('#lib-modal-c').innerHTML = '';
   }
@@ -1292,7 +1439,8 @@
       openModal(`<h3>${esc(title)}</h3><input type="text" id="lib-prompt" class="filter-input lib-wide" value="${esc(value)}" placeholder="${esc(placeholder)}">
         <div class="modal-actions"><button class="btn-secondary" data-close>Cancelar</button><button class="btn-primary" id="lib-prompt-ok">Aceptar</button></div>`);
       const inp = $('#lib-prompt');
-      const done = (v) => { closeModal(); resolve(v); };
+      promptResolve = resolve;
+      const done = (v) => { promptResolve = null; closeModal(); resolve(v); };
       $('#lib-prompt-ok').addEventListener('click', () => done(inp.value.trim()));
       inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') done(inp.value.trim()); });
       $$('#lib-modal [data-close]').forEach((b) => b.addEventListener('click', () => resolve('')));
@@ -1329,6 +1477,7 @@
       <label class="lib-toggle"><input type="checkbox" id="lsh-dl" checked><span>Permitir descargar <small>(si lo apagás, solo pueden ver online)</small></span></label>
       <label class="lib-toggle"><input type="checkbox" id="lsh-pw-on"><span>Proteger con contraseña</span></label>
       <input type="text" id="lsh-pw" class="filter-input lib-wide hidden" placeholder="Contraseña" autocomplete="off">
+      <label class="lib-toggle"><input type="checkbox" id="lsh-notify" checked><span>Notificar visitas, reproducciones y descargas</span></label>
       <label class="lib-toggle" id="lsh-cdn-w"><input type="checkbox" id="lsh-cdn"${localStorage.getItem('lib-cdn') === '0' ? '' : ' checked'}><span>Acelerar con la CDN de Cloudflare <small>(vistas previas y archivos se sirven desde el nodo más cercano a quien abre el link)</small></span></label>
       ${heavy || bigPhotos ? `<p class="lib-muted">${icon('zap')} Para que cargue rápido: ${[bigPhotos ? `${bigPhotos} foto${bigPhotos > 1 ? 's' : ''} se ${bigPhotos > 1 ? 'muestran' : 'muestra'} en una versión liviana (el original se baja al descargar o hacer zoom)` : '', heavy ? `${heavy} video${heavy > 1 ? 's' : ''} pesado${heavy > 1 ? 's' : ''} o HEVC se ${heavy > 1 ? 'preparan' : 'prepara'} en una versión para streaming` : ''].filter(Boolean).join(' · ')}.</p>` : ''}
       <div class="modal-actions"><button class="btn-secondary" data-close>Cancelar</button><button class="btn-primary" id="lsh-ok">${icon('link')} Crear link</button></div>`, 'lib-share-modal');
@@ -1350,7 +1499,7 @@
       try {
         const r = await api('/api/library/shares', {
           method: 'POST',
-          body: { ids, title: $('#lsh-title').value, msg: $('#lsh-msg').value, ttl, allowDownload: $('#lsh-dl').checked, password: pw, cdn: $('#lsh-cdn').checked },
+          body: { ids, title: $('#lsh-title').value, msg: $('#lsh-msg').value, ttl, allowDownload: $('#lsh-dl').checked, password: pw, cdn: $('#lsh-cdn').checked, notifyActivity: $('#lsh-notify').checked },
         });
         L.sharesCount++;
         renderSide();
@@ -1385,8 +1534,8 @@
           ${s.preparing ? `<p>${icon('loader', 'spin')} Preparando ${s.preparing} video${s.preparing > 1 ? 's' : ''} para streaming</p>` : ''}
           <div class="lib-share-btns">
             ${navigator.share ? `<button class="btn-primary" id="lsr-native">${icon('share')} Compartir…</button>` : ''}
-            ${shareTargets(s).map((t) => `<a class="btn-secondary" href="${esc(t.href)}" target="_blank" rel="noopener">${icon(t.ic)} ${t.l}</a>`).join('')}
-            <a class="btn-secondary" href="${esc(s.url)}" target="_blank">${icon('external-link')} Abrir</a>
+            ${shareTargets(s).map((t) => `<a class="btn-secondary" href="${esc(t.href)}" target="_blank" rel="noopener noreferrer">${icon(t.ic)} ${t.l}</a>`).join('')}
+            <a class="btn-secondary" href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${icon('external-link')} Abrir</a>
           </div>
         </div>
       </div>
@@ -1427,6 +1576,7 @@
       <label>Mensaje<textarea id="les-msg" rows="2">${esc(s.msg || '')}</textarea></label>
       <div class="lib-field-l">Vencimiento <small class="lt-hint">· ${esc(expiresIn(s.expires))}</small></div>
       <div class="lib-pills" id="les-ttl"><button class="chip active" data-s="-1">Sin cambios</button>${TTLS.map((t) => `<button class="chip" data-s="${t.s}">${t.s ? `${t.label} desde hoy` : t.label}</button>`).join('')}</div>
+      <label class="lib-toggle"><input type="checkbox" id="les-notify"${s.notifyActivity !== false ? ' checked' : ''}><span>Notificar actividad de este link</span></label>
       <label class="lib-toggle"><input type="checkbox" id="les-dl"${s.allowDownload ? ' checked' : ''}><span>Permitir descargar</span></label>
       <label class="lib-toggle"><input type="checkbox" id="les-cdn"${s.cdn || s.hasPassword ? ' checked' : ''}${s.hasPassword ? ' disabled' : ''}><span>Acelerar con la CDN de Cloudflare${s.hasPassword ? ' <small>(no aplica con contraseña)</small>' : ''}</span></label>
       <label class="lib-toggle"><input type="checkbox" id="les-pw-on"${s.hasPassword ? ' checked' : ''}><span>Contraseña${s.hasPassword ? ' <small>(dejá el campo vacío para mantener la actual)</small>' : ''}</span></label>
@@ -1443,7 +1593,7 @@
       b.classList.toggle('off', remove.has(id));
     }));
     $('#les-ok').addEventListener('click', async () => {
-      const body = { title: $('#les-title').value, msg: $('#les-msg').value, allowDownload: $('#les-dl').checked };
+      const body = { title: $('#les-title').value, msg: $('#les-msg').value, allowDownload: $('#les-dl').checked, notifyActivity: $('#les-notify').checked };
       if (!s.hasPassword) body.cdn = $('#les-cdn').checked;
       if (ttl >= 0) body.ttl = ttl || null;
       if (!$('#les-pw-on').checked && s.hasPassword) body.password = null;
@@ -1451,7 +1601,7 @@
       else if ($('#les-pw-on').checked && !s.hasPassword) return $('#les-pw').focus();
       if (remove.size) body.remove = [...remove];
       try {
-        await api(`/api/library/shares/${s.id}`, { method: 'PATCH', body });
+        const result=await api(`/api/library/shares/${s.id}`, { method: 'PATCH', body });if(result.warning)toast(result.warning,'error','',12000);
         closeModal();
         toast('Link actualizado', 'ok', '', 2000);
         after?.();
@@ -1459,10 +1609,20 @@
     });
   }
 
+  function showShareActivity(s) {
+    const actions={view:'Visita',play:'Reproducción iniciada',download:'Descarga iniciada',zip:'ZIP iniciado'};
+    openModal(`<h3>${icon('activity')} ${esc(s.title)}</h3><p class="lib-muted">${s.views} visitas · ${s.downloads} descargas iniciadas · ${s.visitors || 0} visitantes anónimos${s.visitorsCapped?'+':''}. Un inicio de descarga no confirma que haya terminado.</p>
+      <label class="lib-toggle"><input type="checkbox" id="share-activity-notify"${s.notifyActivity!==false?' checked':''}><span>Recibir notificaciones de este link</span></label>
+      <h4>Archivos compartidos</h4><ul class="share-files-list">${(s.files||[]).map(f=>`<li><b>${esc(f.name)}</b><small>${esc(prettyPath(f.path))} · ${fmtSize(f.size)}</small></li>`).join('')}</ul>
+      <h4>Últimos 100 eventos</h4><p class="lib-muted">Los visitantes se identifican con un código anónimo. No identifica a una persona ni guarda su IP.</p><div class="share-activity-list">${(s.recentActivity||[]).map(ev=>`<div><b>${esc(actions[ev.kind]||ev.kind)}</b><span>${esc(ev.name||ev.client)}</span><small>${esc(fmtDateTime(ev.t))} · ${esc(ev.client)} · ${esc(ev.visitor)}</small></div>`).join('')||'<p>Todavía no hay actividad.</p>'}</div><div class="modal-actions"><button class="btn-secondary" data-close>Cerrar</button></div>`, 'lib-activity-modal');
+    $('#share-activity-notify').addEventListener('change',async e=>{try{await api(`/api/library/shares/${s.id}`,{method:'PATCH',body:{notifyActivity:e.target.checked}});s.notifyActivity=e.target.checked;}catch(err){e.target.checked=!e.target.checked;errToast(err);}});
+  }
+
   async function renderShares() {
     $('#lib-crumbs').innerHTML = `<span class="lib-crumb-title">Links compartidos</span><span class="lib-crumb-sp"></span>
       <button class="lib-crumb-act" id="lib-sh-clean">${icon('trash')} Borrar vencidos</button><span class="lib-status" id="lib-status"></span>`;
     $('#lib-sh-clean').addEventListener('click', async () => {
+      if(!await confirmDialog('Borrar links vencidos','Se borra su historial de actividad. Los archivos se conservan.','Borrar vencidos'))return;
       const r = await api('/api/library/shares/cleanup', { method: 'POST' }).catch(errToast);
       if (r) toast(`${r.removed} links vencidos eliminados`, 'ok', '', 2500);
       renderShares();
@@ -1488,7 +1648,7 @@
           <small>${s.count} archivo${s.count === 1 ? '' : 's'} · ${fmtSize(s.size)}${s.missing ? ` · ${s.missing} ya no existen` : ''}${s.lastAccess ? ` · último acceso ${esc(fmtDateTime(s.lastAccess))}` : ''}</small>
           <div class="lib-share-meta">
             <span class="${s.alive ? 'ok' : 'bad'}">${icon('clock')} ${esc(expiresIn(s.expires))}</span>
-            <span title="Visitas">${icon('eye')} ${s.views}</span><span title="Descargas${s.cdn ? ' (las servidas desde la CDN no se cuentan)' : ''}">${icon('download')} ${s.downloads}</span>
+            <span title="Visitantes anónimos aproximados">${icon('users')} ${s.visitors || 0}${s.visitorsCapped ? '+' : ''}</span><span title="Visitas">${icon('eye')} ${s.views}</span><span title="Descargas iniciadas; no confirma la transferencia completa">${icon('download')} ${s.downloads}</span>
             ${s.hasPassword ? `<span title="Con contraseña">${icon('lock')}</span>` : ''}${s.allowDownload ? '' : `<span>${icon('eye-off')} solo ver</span>`}
             ${s.cdn ? `<span title="Acelerado por la CDN de Cloudflare">${icon('zap')} CDN</span>` : ''}
             ${s.preparing ? `<span>${icon('loader', 'spin')} preparando ${s.preparing} video${s.preparing > 1 ? 's' : ''}</span>` : ''}
@@ -1498,7 +1658,8 @@
         <div class="lib-share-acts">
           <button class="btn-secondary" data-a="copy" title="Copiar link">${icon('copy')}</button>
           <button class="btn-secondary" data-a="qr" title="QR y compartir">${icon('qr-code')}</button>
-          <a class="btn-secondary" href="${esc(s.url)}" target="_blank" title="Abrir">${icon('external-link')}</a>
+          <a class="btn-secondary" href="${esc(s.url)}" target="_blank" rel="noopener noreferrer" title="Abrir">${icon('external-link')}</a>
+          <button class="btn-secondary" data-a="activity" title="Ver archivos y actividad">${icon('chart-no-axes-combined')}</button>
           <button class="btn-secondary" data-a="edit" title="Editar">${icon('pencil')}</button>
           <button class="btn-secondary" data-a="ext" title="Extender 7 días">${icon('calendar-plus')}</button>
           <button class="btn-danger" data-a="del" title="Eliminar link">${icon('trash-2')}</button>
@@ -1512,11 +1673,12 @@
         try {
           if (a === 'copy') return copyText(s.url);
           if (a === 'qr') return shareResult(s, '');
+          if (a === 'activity') return showShareActivity(s);
           if (a === 'edit') return editShare(s, renderShares);
           if (a === 'ext') await api(`/api/library/shares/${s.id}`, { method: 'PATCH', body: { extend: 7 * 86400 } });
           if (a === 'del') {
-            if (!(await confirmDialog('Eliminar link', `"${s.title}" deja de funcionar inmediatamente. Los archivos no se tocan.`))) return;
-            await api(`/api/library/shares/${s.id}`, { method: 'DELETE' });
+            if (!(await confirmDialog('Eliminar link', `"${s.title}" deja de estar disponible en Axon. Los archivos se conservan.${s.cdn?' También se invalidan sus copias de CDN.':''}`))) return;
+            const result=await api(`/api/library/shares/${s.id}`, { method: 'DELETE' });if(result.warning)toast(result.warning,'error','',12000);
           }
           renderShares();
           renderSide();
@@ -1721,7 +1883,7 @@
       body.innerHTML = `
         ${one ? `<div class="lt-cmp" id="lt-cmp">
           <div class="lt-cmp-in" id="lt-cmp-in">
-            <img class="lt-a" src="${one.vw ? `/api/library/view/${one.id}` : `/api/library/file/${one.id}`}" alt="" draggable="false">
+            <img class="lt-a" src="${mediaUrl(one, one.vw ? 'view' : 'file')}" alt="" draggable="false">
             <img class="lt-b" id="lt-b" alt="" draggable="false">
           </div>
           <div class="lt-cmp-line" id="lt-line"><span>${icon('chevrons-left-right')}</span></div>
@@ -2034,7 +2196,7 @@
     if (cur && cur.id === j.outId && !$('#lib-viewer').classList.contains('hidden')) {
       cur.tr = 1;
       vPanel = 'tr';
-      showItem(true);
+      viewerBar(); renderInfo(cur);
     }
     toast(`Transcripción lista: ${j.name}`, 'ok', '', 3000);
   }
@@ -2239,20 +2401,124 @@
     });
   }
 
+  const libraryLocations = (()=>{try{const d=JSON.parse(localStorage.getItem('axon:library-locations:v1') || '{}');return d && typeof d==='object' && !Array.isArray(d)?d:{};}catch{return {};}})();
+  function libraryParams() {
+    return { type:L.view.type, value:L.view.value || null, q:L.q || null, view:L.layout, sort:L.sort, group:L.group,
+      item:!$('#lib-viewer')?.classList.contains('hidden') ? vItemId : null };
+  }
+  function captureLibrary() {
+    const snap={cursor:L.cursor,sel:[...L.sel].slice(0,500),scroll:$('#lib-main')?.scrollTop || 0,shown:L.shown,focus:Boolean(document.activeElement?.closest('.lib-tile,.lib-row'))};
+    libraryLocations[`${L.view.type}:${L.view.value || ''}:${L.q}`]=snap;
+    const keys=Object.keys(libraryLocations);while(keys.length>40)delete libraryLocations[keys.shift()];
+    try{localStorage.setItem('axon:library-locations:v1',JSON.stringify(libraryLocations));}catch{}
+    return snap;
+  }
+  async function restoreLibrary(params,snap) {
+    ensureDom();
+    closeViewer(false);
+    L.view={type:['all','recent','fav','kind','col','folder','shares'].includes(params.type)?params.type:'all',value:params.value || ''};
+    L.q=params.q || '';
+    if(['grid','list'].includes(params.view))L.layout=params.view;
+    if(['date-desc','date-asc','name-asc','name-desc','size-desc','size-asc','kind'].includes(params.sort))L.sort=params.sort;
+    if(['month','day','year','folder','kind','none'].includes(params.group))L.group=params.group;
+    $('#lib-q').value=L.q;$('#lib-sort').value=L.sort;$('#lib-group').value=L.group;
+    if(!L.loaded)await load();else render();
+    if(window.AxonNavigation.current.section!=='library' || window.AxonNavigation.current.params!==params)return;
+    snap ||= libraryLocations[`${L.view.type}:${L.view.value || ''}:${L.q}`];
+    L.sel=new Set((snap?.sel || []).filter(id=>L.byId.has(id)));
+    L.cursor=L.byId.has(snap?.cursor) ? snap.cursor : null;
+    const focusIndex=L.list.findIndex(it=>it.id===L.cursor);
+    const needed=Math.max(snap?.shown || PAGE,focusIndex+1);
+    while(L.shown<Math.min(needed,L.list.length) && $('#lib-groups'))renderMore();
+    syncSelClasses();markLibraryCursor();
+    $('#lib-main').scrollTop=snap?.scroll || 0;
+    if(snap?.focus && L.cursor)$('#lib-body').querySelector(`[data-id="${CSS.escape(L.cursor)}"]`)?.focus({preventScroll:true});
+    if(params.item){
+      let i=L.list.findIndex(it=>it.id===params.item);
+      if(i<0 && L.byId.has(params.item)){L.view={type:'all'};L.q='';$('#lib-q').value='';render();i=L.list.findIndex(it=>it.id===params.item);}
+      if(i>=0){L.cursor=params.item;openViewer(i,true);}
+      else toast('Este archivo ya no está en la biblioteca','warn','',3500);
+    }
+    if(params.action==='upload')$('#lib-file').click();
+    window.AxonNavigation.controls();
+  }
+  function markLibraryCursor() {
+    const rows=[...($('#lib-body')?.querySelectorAll('.lib-tile,.lib-row') || [])];
+    const cursor=rows.some(r=>r.dataset.id===L.cursor)?L.cursor:rows[0]?.dataset.id;
+    rows.forEach(row=>{
+      row.tabIndex=row.dataset.id===cursor?0:-1;
+      row.classList.toggle('lib-focused',row.dataset.id===L.cursor);
+      row.setAttribute('role','group');row.setAttribute('aria-label',L.list.find(it=>it.id===row.dataset.id)?.n || 'Archivo');
+      row.querySelector('[data-act=sel]')?.setAttribute('aria-pressed',String(L.sel.has(row.dataset.id)));
+      row.querySelector('[data-act=fav]')?.setAttribute('aria-pressed',String(L.favs.has(row.dataset.id)));
+    });
+    $('#lib-groups')?.setAttribute('role','group');$('#lib-groups')?.setAttribute('aria-label','Archivos de la biblioteca');
+
+  }
+  let libraryType='',libraryTypeTimer;
+  function libraryKeyboard(e) {
+    if(L.view.type==='shares'||!L.list.length)return false;
+    if((e.target.tagName==='BUTTON'||e.target.tagName==='A')&&['Enter',' '].includes(e.key))return false;
+    let index=L.list.findIndex(it=>it.id===L.cursor);
+    let next=index;
+    const tile=$('#lib-body .lib-tile');
+    const columns=L.layout==='list'?1:Math.max(1,Math.round((tile?.parentElement.clientWidth || 1)/Math.max(1,(tile?.getBoundingClientRect().width || 1)+8)));
+    if(e.key==='ArrowDown')next=index<0?0:index+columns;
+    else if(e.key==='ArrowUp')next=index<0?0:index-columns;
+    else if(e.key==='ArrowRight')next=index<0?0:index+1;
+    else if(e.key==='ArrowLeft')next=index<0?0:index-1;
+    else if(e.key==='Home')next=0;
+    else if(e.key==='End')next=L.list.length-1;
+    else if(e.key==='Enter'){e.preventDefault();if(index>=0)openViewer(index);return true;}
+    else if(e.key===' '){e.preventDefault();if(index>=0){L.sel.has(L.cursor)?L.sel.delete(L.cursor):L.sel.add(L.cursor);syncSelClasses();markLibraryCursor();}return true;}
+    else if(!e.ctrlKey&&!e.metaKey&&!e.altKey&&e.key.length===1 && /[\p{L}\p{N}]/u.test(e.key)) {
+      libraryType+=e.key.toLocaleLowerCase('es');clearTimeout(libraryTypeTimer);libraryTypeTimer=setTimeout(()=>libraryType='',800);
+      next=L.list.findIndex(it=>it.n.toLocaleLowerCase('es').startsWith(libraryType));if(next<0)return false;
+    }else return false;
+    e.preventDefault();next=Math.max(0,Math.min(next,L.list.length-1));
+    L.cursor=L.list[next].id;
+    if(e.shiftKey){const a=L.lastIdx>=0?L.lastIdx:Math.max(0,index);for(let i=Math.min(a,next);i<=Math.max(a,next);i++)L.sel.add(L.list[i].id);}
+    else if(!e.ctrlKey&&!e.metaKey){L.sel=new Set([L.cursor]);L.lastIdx=next;}
+    while(L.shown<=next && L.shown<L.list.length)renderMore();
+    syncSelClasses();markLibraryCursor();
+    const row=$('#lib-body').querySelector(`[data-id="${CSS.escape(L.cursor)}"]`);row?.focus({preventScroll:true});row?.scrollIntoView({block:'nearest'});
+    window.AxonNavigation?.checkpoint();return true;
+  }
+  window.AxonPages ||= {};
+  window.AxonPages.library={capture:captureLibrary,params:libraryParams,restore:restoreLibrary,leave:()=>closeViewer(false)};
+  function wireLibraryNavigation(){
+    const sec=$('#tab-library');if(!sec)return;
+    sec.addEventListener('click',e=>{const row=e.target.closest('.lib-tile,.lib-row');if(row)L.cursor=row.dataset.id;});
+    const save=()=>queueMicrotask(()=>{if(tabActive() && window.AxonNavigation?.ready&&!window.AxonNavigation.applying){markLibraryCursor();window.AxonNavigation.update('library',libraryParams());}});
+    sec.addEventListener('focusin',e=>{const row=e.target.closest('.lib-tile,.lib-row');if(row){L.cursor=row.dataset.id;markLibraryCursor();save();}});
+    ['click','keyup','change'].forEach(t=>sec.addEventListener(t,save));
+    $('#lib-q').addEventListener('input',()=>setTimeout(save,180));
+    $('#lib-main').addEventListener('scroll',save,{passive:true});
+    $('#lib-keys').addEventListener('click',()=>openModal('<h3>Teclado en Biblioteca</h3><dl class="shortcut-list"><dt>Flechas · Inicio · Fin</dt><dd>Mover el foco entre archivos</dd><dt>Enter</dt><dd>Abrir el archivo enfocado</dd><dt>Espacio</dt><dd>Seleccionar o deseleccionar</dd><dt>Shift + flechas</dt><dd>Extender selección</dd><dt>Ctrl/⌘ + flechas</dt><dd>Mover foco sin cambiar selección</dd><dt>/ · escribir un nombre</dt><dd>Buscar o saltar a un archivo</dd><dt>Esc · ← · → en el visor</dt><dd>Volver o cambiar de archivo</dd></dl><button class="btn-secondary" data-close>Cerrar</button>'));
+    markLibraryCursor();
+  }
+  const previousRender=render;render=function(...args){
+    previousRender(...args);markLibraryCursor();
+    if (vItemId && !$('#lib-viewer')?.classList.contains('hidden')) {
+      const index=L.list.findIndex(it=>it.id===vItemId);
+      if(index>=0){vIdx=index;viewerBar();syncViewerNavigation();}
+      else closeViewer(false);
+    }
+  };
   // ---------- Boot ----------
 
   function boot() {
     ensureDom();
-    // Light background refresh of the nav count.
-    api('/api/library/status').then((s) => {
-      const nc = $('#nav-count-library');
-      if (nc && s.count) nc.textContent = s.count.toLocaleString('es-AR');
-    }).catch(() => {});
-    // Pick up jobs still running from before a reload.
-    pollJobs(1500);
+    wireLibraryNavigation();
+    document.addEventListener('axon:authenticated', () => {
+      api('/api/library/status').then(s => {
+        const nc = $('#nav-count-library'); if(nc && s.count) nc.textContent = s.count.toLocaleString('es-AR');
+      }).catch(() => {});
+      pollJobs(1500);
+    }, { once: true });
   }
 
-  window.pmLibrary = { open: activateTab, share: openShareModal, tools: openTools, transcribe: openTranscribe };
+  window.pmLibrary = { open: () => window.AxonNavigation?.ready ? window.AxonNavigation.go("/biblioteca", {remember:true}) : activateTab(), share: openShareModal, tools: openTools, transcribe: openTranscribe };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();
 })();

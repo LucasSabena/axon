@@ -344,7 +344,7 @@ export function registerAlertRoutes(app: Hono): void {
   });
 
   app.put('/api/alerts/thresholds', async (c) => {
-    const body = await c.req.json<Partial<AlertThresholds>>().catch(() => ({}));
+    const body = await c.req.json<Partial<AlertThresholds>>().catch(() => ({} as Partial<AlertThresholds>));
     const clamp = (v: unknown, min: number, max: number): number | undefined => {
       const n = typeof v === 'number' ? v : parseFloat(String(v));
       if (!Number.isFinite(n)) return undefined;

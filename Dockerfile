@@ -38,6 +38,9 @@ RUN pnpm install --prod --frozen-lockfile
 
 COPY . .
 
+# Build local web components from the locked production dependency.
+RUN bun run scripts/build-ui.ts
+
 ENV NODE_ENV=production
 ENV CONFIG_PATH=/app/data/config.json
 ENV CLOUDFLARED_CONFIG=/app/cloudflared-config.yml

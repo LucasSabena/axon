@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["bun"],
+    "skipLibCheck": true,
+    "strict": false,
+    "noEmit": true,
+    "allowJs": true,
+    "checkJs": false
+  },
+  "include": ["src/**/*.ts", "scripts/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"]
+}

@@ -1,3 +1,8 @@
+import { resolveHostPath, hostVolumes } from './host-storage';
+import type {FileTransfers} from './file-transfers';
+import {reviewLibraryMove,movedReference,type TransferReview} from './library-transfer-review';
+import {actor as maintenanceActor} from './storage/http';
+import {volumeForPath,volumeContains} from './file-volumes';
 import type { Context, Hono, MiddlewareHandler } from 'hono';
 import { readdir, stat, readFile, writeFile, mkdir, realpath, rename as fsRename } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
@@ -7,6 +12,12 @@ import * as path from 'node:path';
 import { hostExec, hostSpawn, hostSpawnInteractive, hostToContainer, containerToHost, HOST_USER } from './host';
 import { registerLibraryTools, hasTranscript, transcriptVtt, type LibCtx } from './library-tools';
 import { purgeCachePrefixes } from './cloudflare';
+import { canonicalRoots, canonicalLibraryFile } from './library-paths';
+import { trackShare, type ShareActivity } from './library-activity';
+import { recordEvent } from './events';
+import { notify } from './notify';
+import { playbackEncoding } from './media-playback';
+import { LibraryLiveWatch, libraryFileVersion } from './library-live';
 
 // ---------------------------------------------------------------------------
 // BIBLIOTECA — media library over host folders + temporary public share links.
@@ -31,7 +42,7 @@ interface Item {
   k: Kind;
   s: number;    // size
   m: number;    // mtime ms
-  tk: string;   // cache key (dev+ino+size+mtime) — survives rename/move
+  tk: string;   // source version (dev+ino+size+mtime+ctime)
   t?: number;   // taken (exif) ms
   w?: number;
   h?: number;
@@ -54,6 +65,9 @@ interface Share {
   downloads: number;
   lastAccess?: number;
   msg?: string;           // note shown to the recipient
+  notifyActivity?: boolean;
+  activity?: ShareActivity[];
+  visitors?: string[];
   cdn?: boolean;          // let Cloudflare's edge cache previews/files (default on)
 }
 
@@ -77,7 +91,7 @@ const THUMB_SIZE = 512;
 const VIEW_SIZE = 2048;
 const CHUNK_MAX = 64 * 1024 * 1024;
 const RESCAN_MS = 20 * 60 * 1000;
-const ALLOWED_ROOT_PREFIXES = ['/home', '/mnt', '/media', '/srv', '/data', '/opt', '/tmp'];
+const ACTIVE_RESCAN_MS = 20_000;
 const SKIP_DIRS = new Set(['node_modules', '__MACOSX', '$RECYCLE.BIN', 'System Volume Information', 'lost+found', 'venv', '__pycache__']);
 
 // ---------- Kinds ----------
@@ -157,6 +171,7 @@ const items = new Map<string, Item>();       // id → item
 const byPath = new Map<string, string>();    // path → id
 let scannedAt = 0;
 let scanning = false;
+let directories = new Set<string>();
 let metaPending = 0;
 let ready: Promise<void> | null = null;
 
@@ -165,31 +180,41 @@ const failSet = new Set<string>();
 const viewSet = new Set<string>();
 const webSet = new Set<string>();
 
+let stateWriteQueue = Promise.resolve();
+let indexWriteQueue = Promise.resolve();
+let scanFlight: Promise<void> | null = null;
+const liveWatch = new LibraryLiveWatch(hostToContainer, refreshChangedPaths);
 let stateTimer: ReturnType<typeof setTimeout> | null = null;
 let indexTimer: ReturnType<typeof setTimeout> | null = null;
 
 function saveState(): void {
   rev++;
   if (stateTimer) return;
-  stateTimer = setTimeout(async () => {
+  stateTimer = setTimeout(() => {
     stateTimer = null;
-    try {
-      await mkdir(LIB_DIR, { recursive: true });
-      await writeFile(STATE_FILE + '.tmp', JSON.stringify(state), 'utf-8');
-      await fsRename(STATE_FILE + '.tmp', STATE_FILE);
-    } catch (e) { console.error('library state save', e); }
+    const snapshot=JSON.stringify(state);
+    stateWriteQueue=stateWriteQueue.then(async()=>{
+      try {
+        await mkdir(LIB_DIR, { recursive: true });
+        await writeFile(STATE_FILE + '.tmp', snapshot, 'utf-8');
+        await fsRename(STATE_FILE + '.tmp', STATE_FILE);
+      } catch (e) { console.error('library state save', e); }
+    });
   }, 800);
 }
 
 function saveIndex(): void {
   if (indexTimer) return;
-  indexTimer = setTimeout(async () => {
+  indexTimer = setTimeout(() => {
     indexTimer = null;
-    try {
-      await mkdir(LIB_DIR, { recursive: true });
-      await writeFile(INDEX_FILE + '.tmp', JSON.stringify({ scannedAt, items: [...items.values()] }), 'utf-8');
-      await fsRename(INDEX_FILE + '.tmp', INDEX_FILE);
-    } catch (e) { console.error('library index save', e); }
+    const snapshot=JSON.stringify({scannedAt,items:[...items.values()]});
+    indexWriteQueue=indexWriteQueue.then(async()=>{
+      try {
+        await mkdir(LIB_DIR, { recursive: true });
+        await writeFile(INDEX_FILE + '.tmp', snapshot, 'utf-8');
+        await fsRename(INDEX_FILE + '.tmp', INDEX_FILE);
+      } catch (e) { console.error('library index save', e); }
+    });
   }, 5000);
 }
 
@@ -276,6 +301,7 @@ async function resolveInRoots(input: string): Promise<string | null> {
   if (p.startsWith('~/')) p = home + p.slice(1);
   p = path.posix.resolve(p);
   const roots = [...state.roots, state.uploadRoot];
+  try{await hostVolumes.roots(p);}catch{return null;}
   if (!roots.some((r) => under(p, r))) return null;
   let probe = p;
   const tail: string[] = [];
@@ -286,6 +312,7 @@ async function resolveInRoots(input: string): Promise<string | null> {
       const realRoots = await Promise.all(roots.map(async (r) => {
         try { return containerToHost(await realpath(hostToContainer(r))); } catch { return r; }
       }));
+      try{await hostVolumes.roots(full);}catch{return null;}
       return realRoots.some((r) => under(full, r)) ? p : null;
     } catch {
       tail.push(path.posix.basename(probe));
@@ -326,34 +353,52 @@ async function statItem(hp: string, kindOverride?: Kind): Promise<Item | null> {
   const st = await stat(hostToContainer(hp)).catch(() => null);
   if (!st || !st.isFile()) return null;
   const m = Math.floor(st.mtimeMs);
-  const tk = createHash('sha1').update(`${st.dev}:${st.ino}:${st.size}:${m}`).digest('hex').slice(0, 20);
+  const tk = libraryFileVersion(st);
   return { id: idOf(hp), p: hp, n: name, e, k, s: st.size, m, tk };
 }
 
 async function scan(): Promise<void> {
   await ensureReady();
-  if (scanning) return;
+  if (!scanFlight) scanFlight=scanOnce().finally(()=>{scanFlight=null;});
+  return scanFlight;
+}
+async function scanOnce(): Promise<void> {
   scanning = true;
   const t0 = Date.now();
   try {
     const found = new Map<string, Item>();
+    const foundDirs = new Set<string>();
     const roots = [...new Set([state.uploadRoot, ...state.roots])];
+    const mapper = { toContainer: hostToContainer, toHost: containerToHost };
+    const realRoots = await canonicalRoots(roots, mapper);
+    const visited=new Set<string>();
     for (const root of roots) {
+      try{await hostVolumes.roots(root);}catch{for(const it of items.values())if(under(it.p,root))found.set(it.p,it);continue;}
       const anyKind = root === state.uploadRoot;
       const stack = [root.replace(/\/+$/, '')];
       while (stack.length && found.size < MAX_ITEMS) {
         const dir = stack.pop()!;
         let ents;
+        try{await hostVolumes.roots(dir);const ds=await stat(hostToContainer(dir));const key=ds.dev+':'+ds.ino;if(visited.has(key))continue;visited.add(key);}catch{continue;}
         try { ents = await readdir(hostToContainer(dir), { withFileTypes: true }); } catch { continue; }
+        foundDirs.add(dir);
         const files: string[] = [];
+        const links: string[] = [];
         for (const d of ents) {
           if (d.name.startsWith('.')) continue;
           const hp = `${dir}/${d.name}`;
           if (d.isDirectory()) {
             if (!SKIP_DIRS.has(d.name) && hp !== cacheHost) stack.push(hp);
+          } else if (d.isSymbolicLink() && KIND_BY_EXT[extOf(d.name)]) {
+            links.push(hp);
           } else if (d.isFile() && (anyKind || KIND_BY_EXT[extOf(d.name)])) {
             if (!found.has(hp)) files.push(hp);
           }
+        }
+        for (let i = 0; i < links.length; i += 64) {
+          const accepted = await Promise.all(links.slice(i, i + 64).map(async hp =>
+            await canonicalLibraryFile(hp, roots, realRoots, mapper) ? hp : null));
+          files.push(...accepted.filter((p): p is string => !!p && !found.has(p)));
         }
         for (let i = 0; i < files.length; i += 64) {
           const batch = await Promise.all(files.slice(i, i + 64).map((hp) => statItem(hp, anyKind ? 'other' : undefined)));
@@ -361,23 +406,72 @@ async function scan(): Promise<void> {
             if (!it) continue;
             const prevId = byPath.get(it.p);
             const prev = prevId ? items.get(prevId) : undefined;
-            if (prev && prev.s === it.s && prev.m === it.m) {
+            if (prev && prev.tk === it.tk && prev.s === it.s && prev.m === it.m) {
               found.set(it.p, { ...prev, tk: it.tk, k: it.k });
             } else found.set(it.p, it);
           }
         }
       }
     }
-    items.clear();
-    byPath.clear();
-    for (const it of found.values()) putItem(it);
+    const changed = foundDirs.size !== directories.size || [...foundDirs].some(p => !directories.has(p)) || found.size !== items.size || [...found.values()].some(it => {
+      const previous = items.get(it.id);
+      return !previous || previous.tk !== it.tk || previous.k !== it.k || previous.m !== it.m || previous.s !== it.s;
+    });
+    directories = foundDirs;
+    if (changed) {
+      items.clear(); byPath.clear();
+      for (const it of found.values()) putItem(it);
+      rev++;
+    }
     scannedAt = Date.now();
+    await liveWatch.sync(directories);
     saveIndex();
     console.log(`[library] scan: ${items.size} items in ${Date.now() - t0} ms`);
   } finally {
     scanning = false;
   }
-  runMetaPass().then(warmThumbs).catch((e) => console.error('library meta', e));
+  runMetaPass().catch((e) => console.error('library meta', e));
+}
+
+// Revalidate individual resources on access, even before a watch/poll fires.
+// Resolve links again so a changed link cannot escape the configured roots.
+async function freshItem(id: string): Promise<Item | undefined> {
+  await ensureReady();
+  const previous = items.get(id);
+  if (!previous) return undefined;
+  try{await hostVolumes.roots(previous.p);}catch{return undefined;}
+  const roots = [...state.roots, state.uploadRoot];
+  const mapper = { toContainer: hostToContainer, toHost: containerToHost };
+  const realRoots = await canonicalRoots(roots, mapper);
+  const allowed = await canonicalLibraryFile(previous.p, roots, realRoots, mapper);
+  const current = allowed ? await statItem(previous.p, under(previous.p, state.uploadRoot) ? 'other' : undefined) : null;
+  // An overlapping scan may already have replaced the indexed entry.
+  if (items.get(id) !== previous) return items.get(id);
+  if (!current) { dropItem(id); saveIndex(); return undefined; }
+  if (current.tk === previous.tk) return previous;
+  putItem(current); saveIndex();
+  if (['image', 'raw', 'video', 'audio'].includes(current.k)) {
+    exifBatch([current]).then(() => { touched(); saveIndex(); }).catch(() => {});
+  } else current.mx = 1;
+  return current;
+}
+
+async function refreshChangedPaths(paths: string[] | null): Promise<void> {
+  // Don't let a scan snapshot overwrite an update detected during its walk.
+  if (scanFlight) await scanFlight;
+  if (!paths) { await scan(); return; }
+  let reconcile = false;
+  for (const p of paths) {
+    if (directories.has(p)) { reconcile = true; continue; }
+    if (path.posix.basename(p).startsWith('.')) continue;
+    const id = byPath.get(p);
+    if (id) { await freshItem(id); continue; }
+    const st = await stat(hostToContainer(p)).catch(() => null);
+    if (st?.isDirectory()) { reconcile = true; continue; }
+    if (!st?.isFile() || !(KIND_BY_EXT[extOf(p)] || under(p, state.uploadRoot))) continue;
+    if (await resolveInRoots(p)) await addPathToIndex(p);
+  }
+  if (reconcile) await scan();
 }
 
 // ---------- Metadata (exiftool on the host) ----------
@@ -411,7 +505,7 @@ async function exifBatch(batch: Item[]): Promise<void> {
   const meta = new Map(rows.map((r) => [String(r.SourceFile), r]));
   for (const it of batch) {
     const cur = items.get(it.id);
-    if (!cur) continue;
+    if (!cur || cur.tk !== it.tk) continue;
     cur.mx = 1;
     const r = meta.get(it.p);
     if (!r) continue;
@@ -428,12 +522,35 @@ async function exifBatch(batch: Item[]): Promise<void> {
   }
 }
 
-async function runMetaPass(): Promise<void> {
-  const todo = [...items.values()].filter((it) => !it.mx && ['image', 'raw', 'video', 'audio'].includes(it.k));
+let metaFlight: Promise<void> | null = null;
+let metaAgain = false;
+function runMetaPass(): Promise<void> {
+  metaAgain = true;
+  if (!metaFlight) {
+    metaFlight = (async () => {
+      do { metaAgain = false; await runMetaOnce(); } while (metaAgain);
+    })().finally(() => { metaFlight = null; });
+  }
+  return metaFlight;
+}
+
+async function runMetaOnce(): Promise<void> {
+  const groups = new Map<string,Item[]>();
+  for(const it of items.values()){const group=groups.get(it.tk)||[];group.push(it);groups.set(it.tk,group);}
+  const metadata = (it:Item) => ({mx:it.mx,t:it.t,w:it.w,h:it.h,d:it.d,c:it.c});
+  const todo: Item[] = [];
+  for(const group of groups.values()){
+    const ready=group.find(it=>it.mx);
+    if(ready)for(const it of group)Object.assign(it,metadata(ready));
+    else if(['image','raw','video','audio'].includes(group[0].k))todo.push(group[0]);
+  }
   metaPending = todo.length;
   for (let i = 0; i < todo.length; i += 250) {
-    await exifBatch(todo.slice(i, i + 250)).catch(() => {});
+    const batch=todo.slice(i,i+250).filter(it => items.get(it.id)?.tk === it.tk && !items.get(it.id)?.mx);
+    if (batch.length) await exifBatch(batch).catch(() => {});
+    for(const it of batch)for(const sibling of groups.get(it.tk)||[])if(items.get(sibling.id)?.tk===it.tk)Object.assign(items.get(sibling.id)!,metadata(it));
     metaPending = Math.max(0, todo.length - i - 250);
+    if (batch.length) touched();
     saveIndex();
   }
   // Non-media kinds never get exif — mark them so they don't re-queue.
@@ -558,20 +675,6 @@ function ensureView(it: Item): Promise<boolean> {
   }, true);
 }
 
-let warming = false;
-async function warmThumbs(): Promise<void> {
-  if (warming) return;
-  warming = true;
-  try {
-    const todo = [...items.values()]
-      .filter((it) => thumbState(it) === 0)
-      .sort((a, b) => (b.t || b.m) - (a.t || a.m));
-    for (const it of todo) ensureThumb(it, false);
-  } finally {
-    warming = false;
-  }
-}
-
 // ---------- Web (H.264) versions for HEVC / non-web containers ----------
 
 interface Transcode { state: 'queued' | 'running' | 'done' | 'error'; pct: number; error?: string }
@@ -584,7 +687,7 @@ function ensureWeb(it: Item): Transcode {
   if (cur && cur.state !== 'error') return cur;
   const tc: Transcode = { state: 'queued', pct: 0 };
   transcodes.set(it.tk, tc);
-  tcChain = tcChain.then(() => runTranscode(it, tc)).catch(() => {});
+  tcChain = tcChain.then(() => runTranscode(it, tc)).catch(() => { tc.state = 'error'; tc.error = 'No se pudo preparar el video'; });
   return tc;
 }
 
@@ -592,12 +695,14 @@ async function runTranscode(it: Item, tc: Transcode): Promise<void> {
   tc.state = 'running';
   const out = `${cacheHost}/web/${it.tk}.mp4`;
   const part = `${cacheHost}/web/${it.tk}.part.mp4`;
-  const vf = "scale='if(gte(iw,ih),min(1920,iw),-2)':'if(gte(iw,ih),-2,min(1920,ih))',format=yuv420p";
+  const probe = await hostExec(`ffprobe -v error -show_entries stream=codec_type,codec_name,pix_fmt -of json ${shq(it.p)}`, { user: 'user', timeoutMs: 15_000 });
+  const encoding = playbackEncoding(probe.stdout, needsWeb(it) || !heavyVideo(it));
   const cmd =
-    `nice -n 10 ffmpeg -nostdin -v error -y -i ${shq(it.p)} -map 0:v:0 -map 0:a:0? -c:v libx264 -preset veryfast -crf 23 ` +
-    `-profile:v high -vf "${vf}" -c:a aac -b:a 160k -ac 2 -movflags +faststart -threads 8 -progress pipe:1 -nostats ${shq(part)} ` +
+    `nice -n 10 ffmpeg -nostdin -v error -y -i ${shq(it.p)} -map 0:v:0 -map 0:a:0? ${encoding.video} ${encoding.audio} ` +
+    `-movflags +faststart -threads 8 -progress pipe:1 -nostats ${shq(part)} ` +
     `&& mv -f ${shq(part)} ${shq(out)}`;
   const proc = hostSpawn(cmd, { user: 'user' });
+  const stderr = new Response(proc.stderr as ReadableStream).text();
   const dur = it.d || 0;
   const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
   const dec = new TextDecoder();
@@ -624,7 +729,7 @@ async function runTranscode(it: Item, tc: Transcode): Promise<void> {
     tc.pct = 100;
   } else {
     tc.state = 'error';
-    tc.error = (await new Response(proc.stderr as ReadableStream).text()).trim().slice(-400) || `exit ${code}`;
+    tc.error = (await stderr).trim().slice(-400) || `exit ${code}`;
     hostExec(`rm -f ${shq(part)}`, { user: 'user', timeoutMs: 5000 }).catch(() => {});
   }
 }
@@ -657,20 +762,22 @@ function disposition(kind: 'inline' | 'attachment', name: string): string {
 async function sendFile(
   c: Context,
   hostPath: string,
-  opts: { name: string; download?: boolean; mime?: string; cache?: string }
+  opts: { name: string; download?: boolean; mime?: string; cache?: string; version?: string }
 ): Promise<Response> {
   const cp = hostToContainer(hostPath);
   const st = await stat(cp).catch(() => null);
   if (!st || !st.isFile()) return c.text('No encontrado', 404);
   const e = extOf(opts.name);
+  const version = libraryFileVersion(st);
   const headers: Record<string, string> = {
     'Content-Type': opts.mime || MIME[e] || 'application/octet-stream',
     'Accept-Ranges': 'bytes',
     'Content-Disposition': disposition(opts.download ? 'attachment' : 'inline', opts.name),
     'X-Content-Type-Options': 'nosniff',
     'Content-Security-Policy': "script-src 'none'; sandbox",
-    'Cache-Control': opts.cache || 'private, max-age=3600',
-    ETag: `"${st.size.toString(36)}-${Math.floor(st.mtimeMs).toString(36)}"`,
+    'Cache-Control': opts.download ? 'private, no-store' : opts.cache ||
+      (opts.version === version ? 'private, max-age=31536000, immutable' : 'private, no-cache'),
+    ETag: `"${version}"`,
   };
   if (!opts.download && c.req.header('if-none-match') === headers.ETag && !c.req.header('range')) {
     return new Response(null, { status: 304, headers });
@@ -936,6 +1043,7 @@ async function shareFiles(s: Share): Promise<ShareFile[]> {
     const p = s.paths[i];
     const id = byPath.get(p);
     let it = id ? items.get(id) : undefined;
+    if (!(await resolveInRoots(p))) continue;
     if (!it) it = (await statItem(p, 'other')) || undefined;
     if (!it) continue;
     out.push({ i, p, n: it.n, e: it.e, k: it.k, s: it.s, it });
@@ -943,8 +1051,17 @@ async function shareFiles(s: Share): Promise<ShareFile[]> {
   return out;
 }
 
-function shareSummary(c: Context, s: Share) {
-  const files = s.paths.map((p) => items.get(byPath.get(p) || '')).filter(Boolean) as Item[];
+async function canonicalSharePaths(paths: string[]): Promise<string[]> {
+  const roots = [...state.roots, state.uploadRoot];
+  const mapper = { toContainer: hostToContainer, toHost: containerToHost };
+  const realRoots = await canonicalRoots(roots, mapper);
+  const resolved = await Promise.all(paths.map(p => canonicalLibraryFile(p, roots, realRoots, mapper)));
+  if (resolved.some(p => !p)) throw new Error('Uno de los archivos ya no existe o está fuera de la Biblioteca');
+  return [...new Set(resolved as string[])];
+}
+
+async function shareSummary(c: Context, s: Share) {
+  const files = (await shareFiles(s)).map(f => f.it!).filter(Boolean);
   const preparing = files.filter((it) => {
     const tc = transcodes.get(it.tk);
     return tc && (tc.state === 'queued' || tc.state === 'running');
@@ -963,6 +1080,11 @@ function shareSummary(c: Context, s: Share) {
     views: s.views,
     downloads: s.downloads,
     lastAccess: s.lastAccess,
+    notifyActivity: s.notifyActivity !== false,
+    visitors: s.visitors?.length || 0,
+    visitorsCapped: (s.visitors?.length || 0) >= 2000,
+    recentActivity: (s.activity || []).slice(-100).reverse(),
+    files: files.map(it => ({name:it.n, path:it.p, kind:it.k, size:it.s})),
     count: s.paths.length,
     size: files.reduce((a, f) => a + f.s, 0),
     ids: files.map((f) => f.id),
@@ -989,11 +1111,26 @@ function edgeCache(s: Share, browserMax: number): string {
   return edge > 120 ? `public, max-age=${Math.min(browserMax, edge)}, s-maxage=${edge}` : 'private, max-age=60';
 }
 
-async function purgeShare(c: Context, s: Share): Promise<void> {
-  if (s.cdn === false && !s.pass) return;
+async function purgeShare(c: Context, s: Share): Promise<{success:boolean;error?:string}> {
+  if (s.cdn === false && !s.pass) return {success:true};
   const host = shareBase(c).replace(/^https?:\/\//, '');
   const r = await purgeCachePrefixes([`${host}/s/${s.id}/`]).catch((e) => ({ success: false, error: String(e) }));
   if (!r.success) console.warn('[library] purge', s.id, r.error);
+  return r;
+}
+
+function shareActivity(c: Context, s: Share, kind: ShareActivity['kind'], name?: string) {
+  const ip = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'local';
+  const agent = c.req.header('user-agent') || '';
+  const visitor = createHmac('sha256', SECRET).update(s.id + ':' + ip + ':' + agent).digest('hex').slice(0, 12);
+  const client = /Firefox/i.test(agent) ? 'Firefox' : /Edg/i.test(agent) ? 'Edge' : /Chrome/i.test(agent) ? 'Chrome' : /Safari/i.test(agent) ? 'Safari' : 'Otro cliente';
+  if (!trackShare(s, { t:Date.now(), kind, visitor, client, ...(name ? {name} : {}) })) return;
+  saveState();
+  if (s.notifyActivity === false) return;
+  const action = {view:'Visita',play:'Reproducción iniciada',download:'Descarga iniciada',zip:'Descarga ZIP iniciada'}[kind];
+  const title = action + ': ' + s.title;
+  recordEvent('file',title,name || client,{section:'library',params:{type:'shares'}});
+  void notify(title,name || client);
 }
 
 const unlockFails = new Map<string, number[]>();
@@ -1014,7 +1151,7 @@ const PUBLIC_CSS = `
 :root{--bg:#070b10;--panel:#0d141d;--el:#131c28;--el2:#1a2533;--bd:rgba(120,150,180,.18);--tx:#e6f3fb;--dim:#8ea2b5;--ac:#19dbef;--acx:#032027;--ok:#4ade80}
 *{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased;-webkit-tap-highlight-color:transparent}
 a{color:inherit}button{font:inherit;color:inherit}
-.wrap{max-width:1280px;margin:0 auto;padding:16px 18px 110px}
+.wrap{max-width:1280px;margin:0 auto;padding:16px 18px 110px}.wrap.has-video{padding-bottom:24px}
 header.top{display:flex;align-items:center;gap:12px;justify-content:space-between;padding:4px 0 16px;flex-wrap:wrap}
 .brand{display:flex;align-items:center;gap:9px;font-weight:600;letter-spacing:.02em;color:var(--dim);font-size:13px;text-decoration:none}
 .brand img{width:22px;height:22px}
@@ -1037,7 +1174,7 @@ h1{font-size:clamp(21px,3vw,30px);margin:0 0 4px;font-weight:680;word-break:brea
 .ib:hover{background:var(--el2)}
 .stage{background:#000;border:1px solid var(--bd);border-radius:16px;overflow:hidden;display:grid;place-items:center;min-height:220px;max-height:78vh;position:relative}
 .stage img,.stage video{max-width:100%;max-height:78vh;display:block}
-.stage video{width:100%;background:#000}.stage iframe{width:100%;height:78vh;border:0;background:#fff}
+.stage video{width:100%;background:#000;object-fit:contain}.stage.is-video{min-height:0;max-height:none;margin:0 auto}.stage.is-video video{width:100%;height:100%;max-height:100%;object-fit:contain}.stage iframe{width:100%;height:78vh;border:0;background:#fff}
 .stage audio{width:min(560px,92%);margin:20px auto}
 .stage .zoomable{cursor:zoom-in}
 .ficon{display:grid;place-items:center;gap:10px;padding:60px 20px;color:var(--dim);text-align:center}
@@ -1066,14 +1203,20 @@ h1{font-size:clamp(21px,3vw,30px);margin:0 0 4px;font-weight:680;word-break:brea
 .selbar{position:fixed;left:50%;bottom:max(14px,env(safe-area-inset-bottom));transform:translate(-50%,140%);transition:transform .2s;z-index:5;display:flex;gap:8px;align-items:center;background:var(--el2);border:1px solid var(--bd);border-radius:16px;padding:8px 8px 8px 16px;box-shadow:0 14px 40px rgba(0,0,0,.5);max-width:calc(100% - 20px)}
 .selbar.on{transform:translate(-50%,0)}.selbar span{font-size:14px;white-space:nowrap}
 .lb{position:fixed;inset:0;background:#030609;display:none;flex-direction:column;z-index:10}
-.lb.on{display:flex}.lb-bar{display:flex;align-items:center;gap:8px;padding:10px 12px;padding-top:max(10px,env(safe-area-inset-top));color:var(--dim);font-size:14px}
+.lb.on{display:flex;height:100dvh}.lb-bar{flex-shrink:0;display:flex;align-items:center;gap:8px;padding:10px 12px;padding-top:max(10px,env(safe-area-inset-top));color:var(--dim);font-size:14px}
 .lb-bar .nm{flex:1;min-width:0;display:flex;flex-direction:column}.lb-bar .nm b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--tx);font-weight:600}.lb-bar .nm small{font-size:12px}
-.lb-body{flex:1;min-height:0;display:grid;place-items:center;position:relative;overflow:hidden}
+.lb-body{flex:1 1 0;min-height:0;min-width:0;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;padding:16px}
 .lb-body>img,.lb-body .zw img{max-width:100%;max-height:100%;object-fit:contain;user-select:none;-webkit-user-drag:none}
 .zw{width:100%;display:grid;place-items:center;transform-origin:0 0;will-change:transform}.lb-body .zw{height:100%;touch-action:none}
 .lb-body .ph{position:absolute;inset:0;margin:auto;filter:blur(10px);opacity:.55}
-.lb-body video{width:100%;height:100%}.lb-body iframe{width:100%;height:100%;border:0;background:#fff}
+.lb-body video{max-width:100%;max-height:100%;object-fit:contain;display:block;flex-shrink:1}.lb-body iframe{width:100%;height:100%;border:0;background:#fff}
 .lb-body audio{width:min(560px,92%)}
+.stage.is-audio{min-height:0;background:var(--panel);padding:12px}
+.lb.is-audio.on{inset:auto 12px max(12px,env(safe-area-inset-bottom));height:auto;max-height:35vh;border:1px solid var(--bd);border-radius:12px;background:var(--panel)}
+.lb.is-audio .lb-body{padding:8px 64px 14px}.lb.is-audio audio{width:100%;height:40px}
+.lb.is-audio .nav{display:grid;top:auto;bottom:14px;transform:none;width:36px;height:36px}.nav:disabled{opacity:.35;cursor:default}
+.playback-note{position:absolute;bottom:12px;left:12px;right:12px;padding:8px;background:var(--panel);border-radius:8px;text-align:center}.playback-note:empty{display:none}
+
 .nav{position:absolute;top:50%;transform:translateY(-50%);background:rgba(20,28,40,.72);border:1px solid var(--bd);width:48px;height:48px;border-radius:99px;cursor:pointer;font-size:24px;display:grid;place-items:center;z-index:2}
 .nav.prev{left:12px}.nav.next{right:12px}
 .spin{width:28px;height:28px;border:3px solid rgba(255,255,255,.15);border-top-color:var(--ac);border-radius:50%;animation:sp 1s linear infinite;position:absolute}
@@ -1087,7 +1230,7 @@ input[type=password]{width:100%;background:var(--bg);border:1px solid var(--bd);
  .wrap{padding:12px 10px 110px}.grid{grid-template-columns:repeat(3,1fr);gap:4px}.tile{border-radius:8px;border:0}.tile .cap{display:none}
  .tile .badge{top:5px;left:5px;font-size:10px;padding:1px 5px}.tile .ck{top:5px;right:5px;width:24px;height:24px}
  .nav{display:none}.head .acts{width:100%}.head .acts .btn{flex:1}.lb-bar .ib span{display:none}
- .stage{border-radius:12px;max-height:70vh}.stage img,.stage video{max-height:70vh}
+ .stage{border-radius:12px;max-height:70vh}.stage img{max-height:70vh}.stage.is-video{max-height:none}.lb-body{padding:8px}
 }
 `;
 
@@ -1150,6 +1293,7 @@ function sharePage(c: Context, s: Share, files: ShareFile[]): Response {
       sz: fmtSize(f.s),
       desc: fileDesc(f),
       dur,
+      width:it?.w || 0, height:it?.h || 0,
       v: it?.tk || '',
       th: it ? thumbState(it) !== -1 : false,
       vw: it ? hasView(it) : false,
@@ -1185,7 +1329,7 @@ ${s.allowDownload ? `<button class="ib" id="selt">${ICONS.sel}<span>Seleccionar<
 ${multiBar}
 ${files.length === 0 ? '<p class="sub">Los archivos de este link ya no están disponibles.</p>' : single ? '<div class="stage" id="single"></div><p class="note" id="snote"></p>' : '<div id="items"></div>'}
 <footer>${esc(expTxt)}${s.allowDownload ? '' : ' · Solo visualización'}</footer></div>
-<div class="selbar" id="selbar"><span id="seln"></span><button class="ib" id="selall">Todo</button><a class="btn" id="seldl" href="#">${DL_SVG} Descargar</a><button class="ib" id="selx" title="Cancelar">${ICONS.x}</button></div>
+<div class="selbar" id="selbar"><span id="seln"></span><button class="ib" id="selall">Todo</button><a class="btn" id="seldl" href="${base}/zip">${DL_SVG} Descargar</a><button class="ib" id="selx" title="Cancelar">${ICONS.x}</button></div>
 <div class="lb" id="lb"><div class="lb-bar"><div class="nm"><b id="lbn"></b><small id="lbc"></small></div><span id="lbd"></span><button class="ib" id="lbx" title="Cerrar">${ICONS.x}</button></div>
 <div class="lb-body" id="lbb"></div><button class="nav prev" id="lbp">‹</button><button class="nav next" id="lbnx">›</button></div>
 <script>
@@ -1203,17 +1347,48 @@ function media(f){
   var k=f.k;
   if(isImg(f))return '<div class="zw"><img class="main" src="'+view(f)+'" alt="'+h(f.n)+'" draggable="false"></div>';
   if(k==='video'){var u=f.w?B+'/w/'+f.i+'.mp4?v='+f.v:orig(f);return '<video controls playsinline autoplay preload="metadata" crossorigin="anonymous" '+(f.th?'poster="'+thumb(f)+'" ':'')+(DL?'':'controlslist="nodownload" ')+'src="'+u+'">'+(f.tr?'<track kind="subtitles" label="Subtítulos" src="'+B+'/c/'+f.i+'.vtt?v='+f.v+'" default>':'')+'</video>'}
-  if(k==='audio')return (f.th?'<img src="'+thumb(f)+'" style="max-height:45vh;border-radius:12px">':'')+'<audio controls autoplay src="'+orig(f)+'"></audio>';
+  if(k==='audio')return '<audio controls autoplay preload="metadata" aria-label="'+h(f.n)+'" src="'+orig(f)+'"></audio>';
   if(k==='pdf'||f.e==='txt'||f.e==='md'||f.e==='csv')return '<iframe src="'+orig(f)+'"></iframe>';
   return '<div class="ficon"><b>'+h((f.e||'file').toUpperCase())+'</b><span>'+h(f.n)+'</span><span>'+h(f.desc)+'</span>'+(DL?'<a class="btn" href="'+orig(f)+'?dl=1">'+IC.dl+' Descargar</a>':'')+'</div>';
 }
-function hookVideo(root,noteEl,f){
+function fitVideo(root,f){
   var v=root.querySelector('video');if(!v)return;
-  v.addEventListener('error',function(){var m='Tu navegador no puede reproducir este formato.'+(DL?' Descargalo para verlo.':'');if(noteEl)noteEl.textContent=m});
-  if(f.nw&&noteEl){noteEl.textContent='Preparando una versión compatible con tu navegador…';waitWeb(f,function(){var t=v.currentTime;v.src=B+'/w/'+f.i+'.mp4?v='+f.v;v.currentTime=t;noteEl.textContent=''})}
+  if(root._axonVideo===v&&root._axonVideoFit){root._axonVideoFit();return;}
+  var inline=root.id==='single';if(inline){root.classList.add('is-video');root.parentElement.classList.add('has-video');}
+  function fit(){
+    if(!inline&&!root.closest('.lb.on'))return;
+    var viewport=window.visualViewport?window.visualViewport.height:window.innerHeight;
+    var ratio=v.videoWidth&&v.videoHeight?v.videoWidth/v.videoHeight:(f.width&&f.height?f.width/f.height:16/9);
+    var maxW,maxH;
+    if(inline){var wrap=root.parentElement,style=getComputedStyle(wrap);maxW=wrap.clientWidth-parseFloat(style.paddingLeft)-parseFloat(style.paddingRight);maxH=Math.max(120,Math.min(680,viewport-root.getBoundingClientRect().top-128));}
+    else{var style=getComputedStyle(root);maxW=root.clientWidth-parseFloat(style.paddingLeft)-parseFloat(style.paddingRight);maxH=root.clientHeight-parseFloat(style.paddingTop)-parseFloat(style.paddingBottom);}
+    if(maxW<=0||maxH<=0)return;
+    var w=Math.min(maxW,maxH*ratio),h=w/ratio;
+    v.style.width=w+'px';v.style.height=h+'px';
+    if(inline){root.style.width=(w+2)+'px';root.style.height=(h+2)+'px';}
+  }
+  root._axonVideo=v;root._axonVideoFit=fit;
+  v.addEventListener('loadedmetadata',fit);requestAnimationFrame(fit);
 }
-var waiting=null;
-function waitWeb(f,cb){clearTimeout(waiting);waiting=setTimeout(function(){fetch(B+'/st',{cache:'no-store'}).then(function(r){return r.json()}).then(function(d){var x=d.files&&d.files[f.i];if(x&&x.w){f.w=true;f.nw=false;cb()}else waitWeb(f,cb)}).catch(function(){waitWeb(f,cb)})},5000)}
+window.addEventListener('resize',function(){var v=$('single');if(v)fitVideo(v,F[0]);if($('lb').classList.contains('on'))fitVideo($('lbb'),F[cur]);});
+if(window.visualViewport)window.visualViewport.addEventListener('resize',function(){window.dispatchEvent(new Event('resize'))});
+function stopMedia(root){[].forEach.call(root.querySelectorAll('audio,video'),function(v){v.pause();v.removeAttribute('src');v.load()})}
+function hookVideo(root,noteEl,f){
+  var audio=root.querySelector('audio');
+  if(audio){if(root.id==='single')root.classList.add('is-audio');audio.addEventListener('ended',function(){if(audio.isConnected&&root.id!=='single')stepAudio(1)});return;}
+  fitVideo(root,f);
+  var v=root.querySelector('video');if(!v)return;
+  function active(){return v.isConnected&&root.querySelector('video')===v}
+  var preparing=false;
+  function note(msg){if(!active())return;var el=noteEl;if(!el){el=root.querySelector('.playback-note');if(!el){el=document.createElement('p');el.className='note playback-note';el.setAttribute('role','status');root.appendChild(el)}}el.textContent=msg;}
+  function prepare(){
+    if(preparing||!active())return;preparing=true;note('Preparando reproducción compatible…');
+    fetch(B+'/prepare/'+f.i,{method:'POST'}).then(function(r){if(!r.ok)throw Error();return r.json()}).then(function(){if(active())waitWeb(f,function(){return active()},function(){f.w=true;f.nw=false;var t=v.currentTime||0;v.addEventListener('loadedmetadata',function(){v.currentTime=t;v.play().catch(function(){})},{once:true});v.src=B+'/w/'+f.i+'.mp4?v='+f.v;v.load();note('')},note)}).catch(function(){note('No se pudo preparar este video. Recargá para reintentar.');});
+  }
+  v.addEventListener('play',function(){fetch(B+'/activity',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({i:f.i}),keepalive:true}).catch(function(){})},{once:true});
+  v.addEventListener('error',function(){if(!active())return;if(!f.w&&v.error&&(v.error.code===3||v.error.code===4))prepare();else note('No se pudo reproducir el video.'+(DL?' Podés descargar el original.':''));});
+}
+function waitWeb(f,active,cb,note){if(!active())return;setTimeout(function(){if(!active())return;fetch(B+'/st',{cache:'no-store'}).then(function(r){if(!r.ok)throw Error();return r.json()}).then(function(d){if(!active())return;var x=d.files&&d.files[f.i];if(x&&x.w)cb();else if(!x||x.state==='error'||x.state==='none')note('No se pudo preparar este video. Recargá para reintentar.');else {note('Preparando reproducción compatible… '+(x.state==='queued'?'en cola':(x.pct||0)+'%'));waitWeb(f,active,cb,note)}}).catch(function(){note('Se interrumpió la preparación. Recargá para reintentar.')})},1500)}
 // Pinch / double-tap / wheel zoom; zooming in swaps the light view for the original.
 function zoomer(wrap,f,inline){
   var img=wrap.querySelector('img'),s=1,x=0,y=0,pts={},pinch=null,pan=null,lastTap=0,full=false;
@@ -1237,7 +1412,7 @@ function saveFile(f,btn){var t=btn.innerHTML;btn.textContent='Preparando…';fet
 function canSave(f){try{return DL&&navigator.canShare&&/Mobi|Android|iPhone|iPad/.test(navigator.userAgent)&&navigator.canShare({files:[new File([''],f.n,{type:f.k==='video'?'video/mp4':'image/jpeg'})]})&&f.s<250e6}catch(e){return false}}
 var single=$('single');
 if(single){var f0=F[0];single.innerHTML=media(f0);var zw=single.querySelector('.zw');if(zw)zoomer(zw,f0,true);
-  hookVideo(single,$('snote'),f0);if(f0.k==='pdf')$('snote').innerHTML='¿No se ve? <a href="'+orig(f0)+'" target="_blank">Abrir el PDF</a>';
+  hookVideo(single,$('snote'),f0);if(f0.k==='pdf')$('snote').innerHTML='¿No se ve? <a href="'+orig(f0)+'" target="_blank" rel="noopener noreferrer">Abrir el PDF</a>';
   if(f0.vw&&isImg(f0))$('snote').textContent='Doble toque (o Ctrl + rueda) para hacer zoom en la resolución original.';
   var sb=$('save1');if(sb&&canSave(f0)){sb.classList.remove('hide');sb.onclick=function(){saveFile(f0,sb)}}
   return}
@@ -1270,21 +1445,28 @@ box.addEventListener('click',function(e){if(e.target.closest('[data-dl]'))return
   var ix=t.dataset.ix;if(selecting){if(sel[ix])delete sel[ix];else sel[ix]=1;syncSel();return}show(+ix)});
 var lb=$('lb'),lbb=$('lbb'),cur=0,zm=null;
 function preload(ix){var f=F[(ix+F.length)%F.length];if(f&&isImg(f)){var i=new Image();i.src=view(f)}}
-function show(ix){cur=(ix+F.length)%F.length;var f=F[cur];
+function stepAudio(d){var q=F.map(function(f,i){return f.k==='audio'?i:-1}).filter(function(i){return i>=0}),p=q.indexOf(cur)+d;if(p>=0&&p<q.length)show(q[p])}
+function step(d){if(F[cur].k==='audio')stepAudio(d);else show(cur+d)}
+function show(ix){stopMedia(lbb);cur=(ix+F.length)%F.length;var f=F[cur];
+  lb.classList.toggle('is-audio',f.k==='audio');
+  var q=F.map(function(f,i){return f.k==='audio'?i:-1}).filter(function(i){return i>=0}),p=q.indexOf(cur);
+  $('lbp').disabled=f.k==='audio'&&p===0;$('lbnx').disabled=f.k==='audio'&&p===q.length-1;
+  $('lbp').setAttribute('aria-label','Anterior');$('lbnx').setAttribute('aria-label','Siguiente');
+
   lbb.innerHTML=(isImg(f)&&f.th?'<img class="ph" src="'+thumb(f)+'" alt="">':'')+(isImg(f)?'<span class="spin"></span>':'')+media(f);zm=null;
   var main=lbb.querySelector('img.main');if(main){var done=function(){var p=lbb.querySelector('.ph'),sp=lbb.querySelector('.spin');if(p)p.remove();if(sp)sp.remove()};if(main.complete)done();else{main.onload=done;main.onerror=done}zm=zoomer(lbb.querySelector('.zw'),f)}
   hookVideo(lbb,null,f);
   $('lbn').textContent=f.n;$('lbc').textContent=(cur+1)+' / '+F.length+' · '+f.desc;
-  var acts='';if(f.vw&&isImg(f))acts+='<a class="ib" href="'+orig(f)+'" target="_blank" title="Original">'+IC.zoom+'<span>Original</span></a> ';
+  var acts='';if(f.vw&&isImg(f))acts+='<a class="ib" href="'+orig(f)+'" target="_blank" rel="noopener noreferrer" title="Original">'+IC.zoom+'<span>Original</span></a> ';
   if(DL){if(canSave(f))acts+='<button class="ib" id="lbs">'+IC.save+'<span>Guardar</span></button> ';acts+='<a class="ib" href="'+orig(f)+'?dl=1">'+IC.dl+'<span>Descargar</span></a>'}
   $('lbd').innerHTML=acts;var sb=$('lbs');if(sb)sb.onclick=function(){saveFile(f,sb)};
-  lb.classList.add('on');document.body.style.overflow='hidden';preload(cur+1);preload(cur-1);
+  lb.classList.add('on');document.body.style.overflow=f.k==='audio'?'':'hidden';preload(cur+1);preload(cur-1);
   if(history.state!=='lb')history.pushState('lb','')}
-function close(back){lb.classList.remove('on');lbb.innerHTML='';document.body.style.overflow='';if(back!==false&&history.state==='lb')history.back()}
+function close(back){stopMedia(lbb);lb.classList.remove('on');lbb.innerHTML='';document.body.style.overflow='';if(back!==false&&history.state==='lb')history.back()}
 window.addEventListener('popstate',function(){if(lb.classList.contains('on'))close(false)});
-$('lbx').onclick=function(){close()};$('lbp').onclick=function(){show(cur-1)};$('lbnx').onclick=function(){show(cur+1)};
-document.addEventListener('keydown',function(e){if(!lb.classList.contains('on'))return;if(e.key==='Escape')close();if(e.key==='ArrowLeft')show(cur-1);if(e.key==='ArrowRight')show(cur+1)});
-var sx=null,sy=null;lbb.addEventListener('touchstart',function(e){if(e.touches.length!==1||(zm&&zm.zoomed())){sx=null;return}sx=e.touches[0].clientX;sy=e.touches[0].clientY},{passive:true});
+$('lbx').onclick=function(){close()};$('lbp').onclick=function(){step(-1)};$('lbnx').onclick=function(){step(1)};
+document.addEventListener('keydown',function(e){if(!lb.classList.contains('on'))return;if(e.key==='Escape')close();if(e.target.closest('audio,video,input,textarea'))return;if(e.key==='ArrowLeft'){e.preventDefault();step(-1)}if(e.key==='ArrowRight'){e.preventDefault();step(1)}});
+var sx=null,sy=null;lbb.addEventListener('touchstart',function(e){if(e.target.closest('audio,video,button,input')||lb.classList.contains('is-audio')||e.touches.length!==1||(zm&&zm.zoomed())){sx=null;return}sx=e.touches[0].clientX;sy=e.touches[0].clientY},{passive:true});
 lbb.addEventListener('touchend',function(e){if(sx===null)return;var dx=e.changedTouches[0].clientX-sx,dy=e.changedTouches[0].clientY-sy;if(Math.abs(dx)>60&&Math.abs(dx)>Math.abs(dy))show(cur+(dx<0?1:-1));else if(dy>120&&Math.abs(dy)>Math.abs(dx))close();sx=null});
 })();
 </script>`;
@@ -1317,7 +1499,7 @@ const uploads = new Map<string, Upload>();
 async function appendToHost(part: string, body: ReadableStream<Uint8Array> | null): Promise<{ ok: boolean; n: number; error?: string }> {
   if (!body) return { ok: false, n: 0, error: 'Cuerpo vacío' };
   const proc = hostSpawnInteractive(`cat >> ${shq(part)}`, { user: 'user' });
-  const stdin = proc.stdin as { write(d: Uint8Array): number | Promise<number>; flush(): void | Promise<void>; end(): void };
+  const stdin = proc.stdin as { write(d: Uint8Array): number | Promise<number>; flush(): number | Promise<number>; end(): void };
   let n = 0;
   try {
     const r = body.getReader();
@@ -1348,17 +1530,70 @@ async function addPathToIndex(hp: string, carry?: Partial<Item>): Promise<Item |
   saveIndex();
   if (['image', 'raw', 'video', 'audio'].includes(it.k)) exifBatch([it]).then(() => saveIndex()).catch(() => {});
   else it.mx = 1;
-  ensureThumb(it, true);
   return it;
 }
 
 // Rewrite references (favorites / collections / shares) after a move.
-function repath(from: string, to: string): void {
-  const swap = (arr: string[]) => arr.map((p) => (p === from ? to : p));
+function repath(from: string, to: string, aliases:string[]=[from]): void {
+  const swap = (arr: string[]) => arr.map(p=>movedReference(p,aliases,to));
   state.favorites = swap(state.favorites);
   for (const col of state.collections) col.paths = swap(col.paths);
   for (const s of state.shares) s.paths = swap(s.paths);
   saveState();
+}
+
+// Trash keeps favorites/collections/share paths at the original location. A restore
+// reindexes that location; originals in trash must never become public shares.
+export async function libraryFileOperation(action: 'send'|'restore'|'copy'|'move', from: string, to: string, review?:TransferReview): Promise<void> {
+  await ensureReady();
+  if(action==='move'){
+    // Persist the approved visibility change together with all repathed references.
+    const aliases=review?.sourceAliases||[from];
+    state.roots=[...new Set([...state.roots.map(p=>movedReference(p,aliases,to)),...(review?.addRoots||[])])];
+    state.uploadRoot=movedReference(state.uploadRoot,aliases,to);
+    repath(from,to,aliases);
+    await flushTransferState();
+  }
+  if (action === 'send'||action==='move') {
+    for (const it of [...items.values()]) if ((review?.sourceAliases||[from]).some(root=>it.p===root||it.p.startsWith(root+'/'))) dropItem(it.id);
+    saveIndex();
+  }
+  if(action!=='send'){
+    const allowed = [...state.roots, state.uploadRoot].filter(Boolean).some(root => to === root || to.startsWith(root + '/'));
+    if (allowed) { const st = await stat(hostToContainer(to)); if (st.isDirectory()) await scan(); else await addPathToIndex(to); }
+  }
+}
+
+async function flushTransferState():Promise<void>{
+  if(stateTimer){clearTimeout(stateTimer);stateTimer=null;}
+  const snapshot=JSON.stringify(state);
+  const write=stateWriteQueue.then(async()=>{
+    await mkdir(LIB_DIR,{recursive:true});
+    await writeFile(STATE_FILE+'.tmp',snapshot,'utf-8');
+    await fsRename(STATE_FILE+'.tmp',STATE_FILE);
+  });
+  stateWriteQueue=write.catch(()=>{});
+  await write;
+}
+
+export async function libraryTransferReview(mode:'copy'|'move',from:string,to:string):Promise<TransferReview|undefined>{
+  if(mode!=='move')return;
+  await ensureReady();
+  const source=await stat(hostToContainer(from));
+  const aliases=[from], inventory=await hostVolumes.snapshot();
+  const current=volumeForPath(inventory.volumes,from);
+  if(current?.path){
+    const relative=path.posix.relative(current.path,from);
+    for(const volume of inventory.volumes){
+      if(!volume.path||volume.path===current.path||volume.majorMinor!==current.majorMinor)continue;
+      const candidate=path.posix.join(volume.path,relative);
+      if(!volumeContains(candidate,volume.path))continue;
+      const entry=await stat(hostToContainer(candidate)).catch(()=>null);
+      // The identity check also excludes bind mounts of a different subtree.
+      if(entry&&entry.dev===source.dev&&entry.ino===source.ino)aliases.push(candidate);
+    }
+  }
+  return reviewLibraryMove(state,from,to,source.isDirectory(),[...items.values()].map(it=>it.p),aliases);
 }
 
 function publicItem(it: Item) {
@@ -1376,10 +1611,9 @@ const zipTokens = new Map<string, { paths: string[]; name: string; exp: number }
 // Register AFTER app.use('/api/*', requireAuth): /api/library/* inherits
 // cookie auth; /s/* is intentionally public (the token is the capability).
 
-export function registerLibraryRoutes(app: Hono): void {
+export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers): void {
   ensureReady().then(() => {
-    if (!items.size || Date.now() - scannedAt > RESCAN_MS) scan().catch(() => {});
-    else runMetaPass().then(warmThumbs).catch(() => {});
+    scan().catch(() => {});
   });
   setInterval(() => { scan().catch(() => {}); }, RESCAN_MS).unref();
   setInterval(() => {
@@ -1406,7 +1640,7 @@ export function registerLibraryRoutes(app: Hono): void {
     trash: async (cookie, paths) => {
       const res = await app.request('/api/files/trash', {
         method: 'POST',
-        headers: { 'content-type': 'application/json', cookie },
+        headers: { 'content-type': 'application/json', cookie, origin: process.env.AXON_PUBLIC_ORIGIN || 'http://localhost' },
         body: JSON.stringify({ paths }),
       });
       const data = (await res.json().catch(() => ({}))) as { items?: { orig: string }[] };
@@ -1421,7 +1655,7 @@ export function registerLibraryRoutes(app: Hono): void {
   // If-None-Match and get a 304 unless something actually changed.
   app.get('/api/library', async (c) => {
     await ensureReady();
-    const etag = `W/"lib-${rev}-${scannedAt}-${scanning ? 1 : 0}"`;
+    const etag = `W/"lib-${rev}"`;
     if (c.req.header('if-none-match') === etag) return new Response(null, { status: 304, headers: { ETag: etag, 'Cache-Control': 'private, no-cache' } });
     c.header('ETag', etag);
     c.header('Cache-Control', 'private, no-cache');
@@ -1431,9 +1665,11 @@ export function registerLibraryRoutes(app: Hono): void {
       ok: true,
       home,
       roots: state.roots,
+      directories: [...directories],
       uploadRoot: state.uploadRoot,
       shareBase: state.shareBase,
       scannedAt,
+      revision: rev,
       scanning,
       metaPending,
       thumbsPending: hiQ.length + loQ.length + active,
@@ -1447,9 +1683,20 @@ export function registerLibraryRoutes(app: Hono): void {
     });
   });
 
+  app.get('/api/library/recent', async (c) => {
+    await ensureReady();
+    const limit = Math.max(1, Math.min(24, Number(c.req.query('limit')) || 8));
+    const list = [...items.values()].sort((a, b) => b.m - a.m).slice(0, limit);
+    return c.json({ ok: true, items: list.map(publicItem), count: items.size, scannedAt });
+  });
+
   app.get('/api/library/status', async (c) => {
     await ensureReady();
-    return c.json({ ok: true, scanning, scannedAt, metaPending, thumbsPending: hiQ.length + loQ.length + active, count: items.size });
+    const currentId = c.req.query('item');
+    if (currentId) await freshItem(currentId);
+    if (c.req.query('live') === '1' && Date.now() - scannedAt > ACTIVE_RESCAN_MS && !scanning) scan().catch(() => {});
+    c.header('Cache-Control', 'private, no-store');
+    return c.json({ ok: true, revision: rev, scanning, scannedAt, metaPending, thumbsPending: hiQ.length + loQ.length + active, count: items.size });
   });
 
   app.post('/api/library/rescan', async (c) => {
@@ -1463,79 +1710,69 @@ export function registerLibraryRoutes(app: Hono): void {
   app.put('/api/library/settings', async (c) => {
     await ensureReady();
     const body = await c.req.json<{ roots?: string[]; uploadRoot?: string; shareBase?: string }>().catch(() => ({} as never));
-    if (Array.isArray(body.roots)) {
-      const clean: string[] = [];
-      for (const r of body.roots) {
-        let p = String(r || '').trim();
-        if (!p) continue;
-        if (p.startsWith('~/')) p = home + p.slice(1);
-        p = path.posix.resolve(p);
-        if (!ALLOWED_ROOT_PREFIXES.some((a) => under(p, a)) || p === '/home') return fail(c, 400, `Carpeta no permitida: ${p}`);
-        if (!(await hostDirExists(p))) return fail(c, 400, `No existe la carpeta: ${p}`);
-        if (!clean.includes(p)) clean.push(p);
-      }
-      state.roots = clean;
+    const next={...state};
+    if(Array.isArray(body.roots)){
+      const clean:string[]=[];
+      for(const r of body.roots){if(!String(r||'').trim())continue;const p=await resolveHostPath(String(r),{directory:true});if(p==='/home')return fail(c,400,'Elegí una carpeta dentro de /home');if(!clean.includes(p))clean.push(p);}
+      next.roots=clean;
     }
-    if (typeof body.uploadRoot === 'string' && body.uploadRoot.trim()) {
-      let p = body.uploadRoot.trim();
-      if (p.startsWith('~/')) p = home + p.slice(1);
-      p = path.posix.resolve(p);
-      if (!ALLOWED_ROOT_PREFIXES.some((a) => under(p, a)) || p === '/home') return fail(c, 400, 'Carpeta de subidas no permitida');
-      const mk = await hostExec(`mkdir -p ${shq(p)}`, { user: 'user', timeoutMs: 10_000 });
-      if (!mk.ok) return fail(c, 400, 'No se pudo crear la carpeta de subidas', { detail: mk.stderr });
-      state.uploadRoot = p;
+    if(typeof body.uploadRoot==='string'&&body.uploadRoot.trim()){
+      const p=await resolveHostPath(body.uploadRoot);if(p==='/home')return fail(c,400,'Elegí una carpeta de subidas');
+      next.uploadRoot=p;
     }
-    if (typeof body.shareBase === 'string') {
-      const sb = body.shareBase.trim().replace(/\/+$/, '');
-      if (sb && !/^https?:\/\/[a-z0-9.-]+(:\d+)?$/i.test(sb)) return fail(c, 400, 'URL base inválida (ej: https://share.midominio.com)');
-      state.shareBase = sb;
+    if(typeof body.shareBase==='string'){
+      const sb=body.shareBase.trim().replace(/\/+$/,'');if(sb&&!/^https?:\/\/[a-z0-9.-]+(:\d+)?$/i.test(sb))return fail(c,400,'URL base inválida');next.shareBase=sb;
     }
+    if(next.uploadRoot!==state.uploadRoot){const mk=await hostExec(`mkdir -p -- ${shq(next.uploadRoot)}`,{user:'user',timeoutMs:10_000});if(!mk.ok)return fail(c,400,'No se pudo crear la carpeta de subidas');}
+    state=next;
     saveState();
     scan().catch(() => {});
     return c.json({ ok: true, roots: state.roots, uploadRoot: state.uploadRoot, shareBase: state.shareBase });
   });
 
   // ---- Media ----
-  const itemOr404 = (c: Context) => items.get(c.req.param('id') || '');
+  const itemOr404 = (c: Context) => freshItem(c.req.param('id') || '');
+  const previewCache = (c: Context, it: Item) => c.req.query('k') === it.tk
+    ? 'private, max-age=31536000, immutable' : 'private, no-cache';
 
   app.get('/api/library/thumb/:id', async (c) => {
-    const it = itemOr404(c);
+    const it = await itemOr404(c);
     if (!it) return c.text('No encontrado', 404);
-    if (it.k === 'vector' && it.e === 'svg') return sendFile(c, it.p, { name: it.n });
+    if (it.k === 'vector' && it.e === 'svg') return sendFile(c, it.p, { name: it.n, version: c.req.query('k') });
     const ok = await Promise.race([ensureThumb(it, true), Bun.sleep(45_000).then(() => false)]);
     if (!ok) return c.text('Sin miniatura', 404);
-    return sendCached(c, `${cacheHost}/thumbs/${it.tk}`);
+    return sendCached(c, `${cacheHost}/thumbs/${it.tk}`, previewCache(c, it));
   });
 
   app.get('/api/library/view/:id', async (c) => {
-    const it = itemOr404(c);
+    const it = await itemOr404(c);
     if (!it) return c.text('No encontrado', 404);
-    if (!hasView(it)) return sendFile(c, it.p, { name: it.n });
+    if (!hasView(it)) return sendFile(c, it.p, { name: it.n, version: c.req.query('k') });
     const ok = await ensureView(it);
     if (!ok) return c.text('No se pudo generar la vista', 415);
-    return sendCached(c, `${cacheHost}/views/${it.tk}`);
+    return sendCached(c, `${cacheHost}/views/${it.tk}`, previewCache(c, it));
   });
 
   app.get('/api/library/file/:id', async (c) => {
-    const it = itemOr404(c);
+    const it = await itemOr404(c);
     if (!it) return c.text('No encontrado', 404);
-    return sendFile(c, it.p, { name: it.n, download: c.req.query('dl') === '1' });
+    return sendFile(c, it.p, { name: it.n, download: c.req.query('dl') === '1', version: c.req.query('k') });
   });
 
   app.get('/api/library/web/:id', async (c) => {
-    const it = itemOr404(c);
+    const it = await itemOr404(c);
     if (!it || !webSet.has(it.tk)) return c.text('No encontrado', 404);
-    return sendFile(c, `${cacheHost}/web/${it.tk}.mp4`, { name: it.n.replace(/\.[^.]+$/, '') + '.mp4', mime: 'video/mp4' });
+    return sendFile(c, `${cacheHost}/web/${it.tk}.mp4`, { name: it.n.replace(/\.[^.]+$/, '') + '.mp4', mime: 'video/mp4', cache: previewCache(c, it) });
   });
 
   app.post('/api/library/web/:id', async (c) => {
-    const it = itemOr404(c);
+    const it = await itemOr404(c);
     if (!it || it.k !== 'video') return fail(c, 404, 'Video no encontrado');
     return c.json({ ok: true, ...ensureWeb(it) });
   });
 
   app.get('/api/library/web/:id/status', async (c) => {
-    const it = itemOr404(c);
+    const it = await itemOr404(c);
     if (!it) return fail(c, 404, 'No encontrado');
     if (webSet.has(it.tk)) return c.json({ ok: true, state: 'done', pct: 100 });
     const tc = transcodes.get(it.tk);
@@ -1554,7 +1791,7 @@ export function registerLibraryRoutes(app: Hono): void {
   });
 
   app.post('/api/library/collections', async (c) => {
-    const { name, ids } = await c.req.json<{ name: string; ids?: string[] }>().catch(() => ({ name: '' }));
+    const { name, ids } = await c.req.json<{ name: string; ids?: string[] }>().catch(() => ({ name: '', ids: undefined as string[] | undefined, desc: undefined as string | undefined, body: undefined as string | undefined, url: undefined as string | undefined, command: undefined as string | undefined, args: undefined as string | undefined }));
     const clean = String(name || '').trim().slice(0, 80);
     if (!clean) return fail(c, 400, 'Poné un nombre');
     const col: Collection = {
@@ -1600,8 +1837,8 @@ export function registerLibraryRoutes(app: Hono): void {
     if (dest === it.p) return c.json({ ok: true, item: publicItem(it) });
     if (!(await resolveInRoots(dest))) return fail(c, 403, 'Destino fuera de la biblioteca');
     if (await existsHost(dest)) return fail(c, 409, 'Ya existe un archivo con ese nombre');
-    const r = await hostExec(`mv -n -- ${shq(it.p)} ${shq(dest)}`, { user: 'user', timeoutMs: 30_000 });
-    if (!r.ok) return fail(c, 500, 'No se pudo renombrar', { detail: r.stderr });
+    if(!transfers)return fail(c,503,'Motor de transferencias no disponible');
+    await transfers.quick('move',it.p,dest,maintenanceActor(c));
     dropItem(it.id);
     repath(it.p, dest);
     const ni = await addPathToIndex(dest);
@@ -1623,8 +1860,8 @@ export function registerLibraryRoutes(app: Hono): void {
       if (path.posix.dirname(it.p) === target) continue;
       const name = await freeName(target, it.n);
       const dest = `${target}/${name}`;
-      const r = await hostExec(`mv -n -- ${shq(it.p)} ${shq(dest)}`, { user: 'user', timeoutMs: 600_000 });
-      if (!r.ok) { failed.push({ id, error: r.stderr || `exit ${r.code}` }); continue; }
+      if(!transfers){failed.push({id,error:'Motor de transferencias no disponible'});break;}
+      try{await transfers.quick('move',it.p,dest,maintenanceActor(c));}catch{failed.push({id,error:'Operación pendiente o no completada. Consultá el historial de transferencias.'});break;}
       dropItem(it.id);
       repath(it.p, dest);
       const ni = await addPathToIndex(dest);
@@ -1639,7 +1876,7 @@ export function registerLibraryRoutes(app: Hono): void {
 
   // Delete = move to Axon's trash (restorable from Archivos → Papelera).
   app.post('/api/library/trash', async (c) => {
-    const { ids } = await c.req.json<{ ids: string[] }>().catch(() => ({ ids: [] }));
+    const { ids } = await c.req.json<{ ids: string[] }>().catch(() => ({ ids: [] as string[], name: undefined as string | undefined }));
     const list = (ids || []).map((id) => items.get(id)).filter(Boolean) as Item[];
     if (!list.length) return fail(c, 400, 'Nada para eliminar');
     const res = await app.request('/api/files/trash', {
@@ -1674,7 +1911,7 @@ export function registerLibraryRoutes(app: Hono): void {
     if (!name) return fail(c, 400, 'Nombre inválido');
     if (!Number.isFinite(size) || size < 0) return fail(c, 400, 'Tamaño inválido');
     const kind = KIND_BY_EXT[extOf(name)] || 'other';
-    let dir = b.dir ? await resolveInRoots(b.dir) : `${state.uploadRoot}/${KIND_FOLDER[kind]}`;
+    let dir = await resolveInRoots(b.dir || `${state.uploadRoot}/${KIND_FOLDER[kind]}`);
     if (!dir) return fail(c, 403, 'Carpeta destino fuera de la biblioteca');
     const relDirs = String(b.rel || '').split('/').slice(0, -1).map(sanitizeName).filter((s) => s && s !== '..');
     if (relDirs.length) dir = `${dir}/${relDirs.join('/')}`;
@@ -1694,7 +1931,9 @@ export function registerLibraryRoutes(app: Hono): void {
   app.put('/api/library/upload/:uid', async (c) => {
     const u = uploads.get(c.req.param('uid'));
     if (!u) return fail(c, 404, 'Subida no encontrada (¿expiró?)');
+    await hostVolumes.roots(u.dir);
     const offset = Number(c.req.query('offset') || 0);
+    await hostVolumes.roots(u.dir);
     const st = await stat(hostToContainer(u.part)).catch(() => null);
     const have = st?.size ?? -1;
     if (have < 0) return fail(c, 410, 'El archivo parcial desapareció');
@@ -1711,6 +1950,7 @@ export function registerLibraryRoutes(app: Hono): void {
   app.post('/api/library/upload/:uid/finish', async (c) => {
     const u = uploads.get(c.req.param('uid'));
     if (!u) return fail(c, 404, 'Subida no encontrada');
+    await hostVolumes.roots(u.dir);
     const st = await stat(hostToContainer(u.part)).catch(() => null);
     if (!st || st.size !== u.size) return fail(c, 400, `Subida incompleta (${st?.size ?? 0} de ${u.size} bytes)`);
     const name = await freeName(u.dir, u.name);
@@ -1725,6 +1965,7 @@ export function registerLibraryRoutes(app: Hono): void {
   app.delete('/api/library/upload/:uid', async (c) => {
     const u = uploads.get(c.req.param('uid'));
     if (u) {
+      await hostVolumes.roots(u.dir);
       uploads.delete(u.id);
       await hostExec(`rm -f -- ${shq(u.part)}`, { user: 'user', timeoutMs: 10_000 });
     }
@@ -1733,7 +1974,7 @@ export function registerLibraryRoutes(app: Hono): void {
 
   // ---- ZIP (authed) ----
   app.post('/api/library/zip', async (c) => {
-    const { ids, name } = await c.req.json<{ ids: string[]; name?: string }>().catch(() => ({ ids: [] }));
+    const { ids, name } = await c.req.json<{ ids: string[]; name?: string }>().catch(() => ({ ids: [] as string[], name: undefined as string | undefined }));
     const paths = (ids || []).map((id) => items.get(id)?.p).filter(Boolean) as string[];
     if (!paths.length) return fail(c, 400, 'Nada para descargar');
     const tok = randomBytes(12).toString('base64url');
@@ -1750,26 +1991,29 @@ export function registerLibraryRoutes(app: Hono): void {
   // ---- Shares (authed management) ----
   app.get('/api/library/shares', async (c) => {
     await ensureReady();
-    return c.json({ ok: true, shareBase: state.shareBase, shares: state.shares.slice().sort((a, b) => b.created - a.created).map((s) => shareSummary(c, s)) });
+    return c.json({ ok: true, shareBase: state.shareBase, shares: await Promise.all(state.shares.slice().sort((a, b) => b.created - a.created).map((s) => shareSummary(c, s))) });
   });
 
   app.post('/api/library/shares', async (c) => {
     await ensureReady();
-    const b = await c.req.json<{ ids: string[]; title?: string; ttl?: number; allowDownload?: boolean; password?: string; msg?: string; cdn?: boolean }>().catch(() => ({ ids: [] } as never));
+    const b = await c.req.json<{ ids: string[]; title?: string; ttl?: number; allowDownload?: boolean; password?: string; msg?: string; cdn?: boolean; notifyActivity?: boolean }>().catch(() => ({ ids: [] } as never));
     const list = (b.ids || []).map((id) => items.get(id)).filter(Boolean) as Item[];
     if (!list.length) return fail(c, 400, 'Elegí al menos un archivo');
     if (list.length > 2000) return fail(c, 400, 'Demasiados archivos para un solo link');
+    let sharePaths: string[];
+    try { sharePaths = await canonicalSharePaths(list.map(it => it.p)); } catch (e) { return fail(c, 400, (e as Error).message); }
     const ttl = Number(b.ttl);
     const s: Share = {
       id: randomBytes(12).toString('base64url'),
       title: String(b.title || '').trim().slice(0, 120) || (list.length === 1 ? list[0].n : `${list.length} archivos`),
-      paths: list.map((it) => it.p),
+      paths: sharePaths,
       created: Date.now(),
       expires: ttl > 0 ? Date.now() + Math.min(ttl, 366 * 86400) * 1000 : null,
       allowDownload: b.allowDownload !== false,
       views: 0,
       downloads: 0,
       cdn: b.cdn !== false,
+      notifyActivity: b.notifyActivity !== false,
     };
     const msg = String(b.msg || '').trim().slice(0, 1000);
     if (msg) s.msg = msg;
@@ -1777,18 +2021,20 @@ export function registerLibraryRoutes(app: Hono): void {
     state.shares.push(s);
     saveState();
     prepareShare(list);
-    return c.json({ ok: true, share: shareSummary(c, s) });
+    return c.json({ ok: true, share: await shareSummary(c, s) });
   });
 
   app.patch('/api/library/shares/:sid', async (c) => {
-    const s = state.shares.find((x) => x.id === c.req.param('sid'));
-    if (!s) return fail(c, 404, 'Link no encontrado');
+    const current = state.shares.find((x) => x.id === c.req.param('sid'));
+    if (!current) return fail(c, 404, 'Link no encontrado');
+    const s: Share = { ...current, paths: [...current.paths] };
     const b = await c.req.json<{
       title?: string; ttl?: number | null; extend?: number; allowDownload?: boolean; password?: string | null;
-      msg?: string; cdn?: boolean; add?: string[]; remove?: string[]; order?: string[];
+      msg?: string; cdn?: boolean; notifyActivity?: boolean; add?: string[]; remove?: string[]; order?: string[];
     }>().catch(() => ({} as never));
     // Anything that changes who may see what invalidates the edge copies.
     let purge = false;
+    if(typeof b.notifyActivity === 'boolean')s.notifyActivity=b.notifyActivity;
     if (typeof b.title === 'string' && b.title.trim()) s.title = b.title.trim().slice(0, 120);
     if (typeof b.msg === 'string') { const m = b.msg.trim().slice(0, 1000); if (m) s.msg = m; else delete s.msg; }
     if (b.ttl === null || b.ttl === 0) s.expires = null;
@@ -1798,31 +2044,47 @@ export function registerLibraryRoutes(app: Hono): void {
     if (typeof b.cdn === 'boolean' && b.cdn !== (s.cdn !== false)) { s.cdn = b.cdn; purge = true; }
     if (b.password === null || b.password === '') { if (s.pass) purge = true; delete s.pass; }
     else if (typeof b.password === 'string') { s.pass = await Bun.password.hash(b.password); purge = true; }
-    const toPaths = (ids?: string[]) => (ids || []).map((id) => items.get(id)?.p).filter(Boolean) as string[];
+    const toPaths = async (ids?: string[]) => canonicalSharePaths((ids || []).map(id => items.get(id)?.p).filter(Boolean) as string[]);
+    let addedPaths: string[], removedPaths: string[];
+    try {
+      s.paths = await canonicalSharePaths(s.paths);
+      addedPaths = await toPaths(b.add); removedPaths = await toPaths(b.remove);
+    } catch (e) { return fail(c, 400, (e as Error).message); }
     if (b.remove?.length) {
       // Removing shifts file indexes, so cached /f/<i> URLs must go.
-      const rm = new Set(toPaths(b.remove));
+      const rm = new Set(removedPaths);
       s.paths = s.paths.filter((p) => !rm.has(p));
       purge = true;
     }
     if (b.add?.length) {
-      const added = toPaths(b.add).filter((p) => !s.paths.includes(p));
+      const added = addedPaths.filter((p) => !s.paths.includes(p));
       s.paths.push(...added);
       prepareShare(added.map((p) => items.get(byPath.get(p) || '')).filter(Boolean) as Item[]);
     }
     if (!s.paths.length) return fail(c, 400, 'El link tiene que tener al menos un archivo');
+    if (s.paths.length > 2000) return fail(c, 400, 'Demasiados archivos para un solo link');
+    if (b.order?.length) {
+      let ordered: string[];
+      try { ordered = await toPaths(b.order); } catch (e) { return fail(c, 400, (e as Error).message); }
+      s.paths = [...ordered.filter(p => s.paths.includes(p)), ...s.paths.filter(p => !ordered.includes(p))];
+      purge = true;
+    }
+    if (JSON.stringify(s.paths) !== JSON.stringify(current.paths)) purge = true;
+    Object.assign(current, s);
+    if (!s.pass) delete current.pass;
+    if (!s.msg) delete current.msg;
     saveState();
-    if (purge) purgeShare(c, s);
-    return c.json({ ok: true, share: shareSummary(c, s) });
+    const edge = purge ? await purgeShare(c,s) : {success:true};
+    return c.json({ ok: true, share: await shareSummary(c, s), ...(!edge.success ? {warning:'El cambio ya se aplicó en Axon, pero no se pudo invalidar la CDN. Algunas copias previas pueden seguir disponibles hasta vencer.'} : {}) });
   });
 
-  app.delete('/api/library/shares/:sid', (c) => {
+  app.delete('/api/library/shares/:sid', async (c) => {
     const s = state.shares.find((x) => x.id === c.req.param('sid'));
     if (!s) return c.json({ ok: false });
     state.shares = state.shares.filter((x) => x !== s);
     saveState();
-    purgeShare(c, s);
-    return c.json({ ok: true });
+    const edge=await purgeShare(c,s);
+    return c.json({ ok: true, ...(!edge.success ? {warning:'Revocado en Axon. No se pudo invalidar la CDN; algunas copias previas pueden seguir disponibles hasta vencer.'} : {}) });
   });
 
   app.post('/api/library/shares/cleanup', (c) => {
@@ -1853,6 +2115,7 @@ export function registerLibraryRoutes(app: Hono): void {
     const i = idxOf(c);
     if (!Number.isInteger(i) || i < 0 || i >= s.paths.length) return null;
     const p = s.paths[i];
+    if (!(await resolveInRoots(p))) return null;
     const id = byPath.get(p);
     const it = (id ? items.get(id) : undefined) || (await statItem(p, 'other')) || undefined;
     return it ? { i, p, n: it.n, e: it.e, k: it.k, s: it.s, it } : null;
@@ -1872,9 +2135,7 @@ export function registerLibraryRoutes(app: Hono): void {
     const s = await getShare(c);
     if (s instanceof Response) return s;
     if (!isUnlocked(c, s)) return passwordPage(c, s);
-    s.views++;
-    s.lastAccess = Date.now();
-    saveState();
+    shareActivity(c,s,'view');
     return sharePage(c, s, await shareFiles(s));
   });
 
@@ -1901,15 +2162,24 @@ export function registerLibraryRoutes(app: Hono): void {
     return c.redirect(`/s/${s.id}`, 303);
   });
 
+  app.post('/s/:sid/activity', async c => {
+    const s = await getShare(c); if(s instanceof Response)return s;
+    if(!isUnlocked(c,s))return c.json({ok:false},401);
+    const b = await c.req.json<{i?:number}>().catch(()=>({} as {i?:number}));
+    if(!Number.isInteger(b.i) || b.i!<0 || b.i!>=s.paths.length)return c.json({ok:false},400);
+    shareActivity(c,s,'play',path.posix.basename(s.paths[b.i!]));
+    return c.json({ok:true},200,{'Cache-Control':'no-store'});
+  });
+
   // Live state for the page (streaming copies finishing while it's open).
   app.get('/s/:sid/st', async (c) => {
     const s = await getShare(c);
     if (s instanceof Response) return s;
     if (!isUnlocked(c, s)) return c.json({ ok: false }, 401);
-    const files: Record<number, { w: boolean; pct: number }> = {};
+    const files: Record<number, { w: boolean; pct: number; state: string }> = {};
     s.paths.forEach((p, i) => {
       const it = items.get(byPath.get(p) || '');
-      if (it?.k === 'video') files[i] = { w: webSet.has(it.tk), pct: transcodes.get(it.tk)?.pct || 0 };
+      if (it?.k === 'video') files[i] = { w: webSet.has(it.tk), pct: transcodes.get(it.tk)?.pct || 0, state: webSet.has(it.tk) ? 'done' : transcodes.get(it.tk)?.state || 'none' };
     });
     return c.json({ ok: true, files }, 200, { 'Cache-Control': 'no-store' });
   });
@@ -1921,11 +2191,9 @@ export function registerLibraryRoutes(app: Hono): void {
     const dl = c.req.query('dl') === '1';
     if (dl && !s.allowDownload) return c.text('La descarga está deshabilitada para este link', 403);
     if (dl && !/^bytes=[1-9]/.test(c.req.header('range') || '')) {
-      s.downloads++;
-      s.lastAccess = Date.now();
-      saveState();
+      shareActivity(c,s,'download',f.n);
     }
-    return sendFile(c, f.p, { name: f.n, download: dl, cache: edgeCache(s, 3600) });
+    return sendFile(c, f.p, { name: f.n, download: dl, cache: dl ? 'private, no-store' : edgeCache(s, 3600) });
   };
   app.get('/s/:sid/f/:i', original);
   app.get('/s/:sid/f/:i/:name', original);
@@ -1959,6 +2227,15 @@ export function registerLibraryRoutes(app: Hono): void {
     return sendFile(c, `${cacheHost}/web/${f.it.tk}.mp4`, { name: f.n.replace(/\.[^.]+$/, '') + '.mp4', mime: 'video/mp4', cache: edgeCache(s, 86400) });
   });
 
+  // Visitors can request playback only for an accessible video in this share.
+  // The existing queue deduplicates by the original's rendition key.
+  app.post('/s/:sid/prepare/:i', async (c) => {
+    const r = await shareAsset(c);
+    if (r instanceof Response) return r;
+    if (!r.f.it || r.f.it.k !== 'video') return c.json({ ok: false }, 404);
+    return c.json({ ok: true, ...ensureWeb(r.f.it) }, 200, { 'Cache-Control': 'no-store' });
+  });
+
   // Subtitles from the transcript (if one was made).
   app.get('/s/:sid/c/:i', async (c) => {
     const r = await shareAsset(c);
@@ -1981,9 +2258,8 @@ export function registerLibraryRoutes(app: Hono): void {
       paths = s.paths.filter((_, i) => want.has(i));
       if (!paths.length) return c.text('Nada seleccionado', 400);
     }
-    s.downloads++;
-    s.lastAccess = Date.now();
-    saveState();
+    try { paths = await canonicalSharePaths(paths); } catch { return c.text('Uno de los archivos ya no está disponible',404); }
+    shareActivity(c,s,'zip',`${paths.length} archivos`);
     const name = sanitizeName(s.title) || 'compartido';
     return zipResponse(paths, `${name}${pick ? ` (${paths.length})` : ''}.zip`);
   });

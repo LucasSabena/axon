@@ -1,3 +1,5 @@
+import { availableStorage } from './host-storage';
+import type { FileVolume } from './file-volumes';
 import { $ } from 'bun';
 import { HOST_FS } from './host';
 
@@ -9,6 +11,8 @@ export interface ServerStats {
   diskUsedGb: number;
   diskTotalGb: number;
   diskPercent: number;
+  disks?:FileVolume[];
+  disksError?:string;
   loadAverage: number[];
   temperatures?: Record<string, number>;
   ip?: string;
@@ -70,6 +74,7 @@ export async function getServerStats(): Promise<ServerStats> {
 
     const temperatures = parseSensors(sensors);
 
+    const storage=await availableStorage().catch(()=>null);
     const hosts = await getServerHosts();
     const serverIp = hosts[0]?.host || '';
 
@@ -81,6 +86,8 @@ export async function getServerStats(): Promise<ServerStats> {
       diskUsedGb,
       diskTotalGb,
       diskPercent,
+      disks:storage?.disks,
+      disksError:storage?undefined:'No se pudieron actualizar los discos',
       loadAverage,
       temperatures,
       ip: serverIp,
@@ -177,7 +184,8 @@ function calculateCpuPercent(statContent: string): number {
   }
 
   const totalDiff = total - lastCpuStats.total;
-  const idleDiff = idle - lastCpuStats.idle;
+  // Time waiting for disk and time stolen by a hypervisor are not CPU work.
+  const idleDiff = idle - lastCpuStats.idle + iowait - lastCpuStats.iowait + steal - lastCpuStats.steal;
   const percent = totalDiff ? Math.round(((totalDiff - idleDiff) / totalDiff) * 100) : 0;
 
   lastCpuStats = { user, nice, system, idle, iowait, irq, softirq, steal, total, time: now };

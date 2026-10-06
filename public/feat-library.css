@@ -225,7 +225,7 @@ body.lib-noscroll { overflow: hidden; }
 
 /* ---------- Viewer ---------- */
 .lib-viewer { position: fixed; inset: 0; z-index: 90; background: #04070a; display: flex; flex-direction: column; }
-.lv-bar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; padding-top: max(8px, env(safe-area-inset-top)); }
+.lv-bar { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding: 8px 12px; padding-top: max(8px, env(safe-area-inset-top)); }
 .lv-title { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .lv-title b { font-size: 0.9rem; font-weight: 600; color: #f1f5f9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .lv-title small { font-size: 0.74rem; color: #8a99a8; font-family: var(--font-mono); }
@@ -242,9 +242,11 @@ body.lib-noscroll { overflow: hidden; }
 .lv-btn .lucide-icon { width: 17px; height: 17px; }
 .lv-primary { background: var(--accent); color: var(--accent-contrast); border-color: transparent; }
 .lv-primary:hover { background: var(--accent-hover); }
-.lv-main { flex: 1; min-height: 0; display: flex; position: relative; }
-.lv-stage { flex: 1; min-width: 0; display: grid; place-items: center; position: relative; padding: 0 64px 16px; }
-.lv-stage > video { max-width: 100%; max-height: 100%; width: 100%; height: 100%; background: #000; border-radius: 6px; }
+.lv-main { flex: 1; min-height: 0; min-width: 0; display: flex; position: relative; overflow: hidden; }
+/* Ignore media's intrinsic size when sizing the track. Portrait videos must
+   fit the space below the toolbar, including their native playback controls. */
+.lv-stage { flex: 1; min-width: 0; min-height: 0; display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); place-items: center; position: relative; padding: 0 64px max(16px, env(safe-area-inset-bottom)); overflow: hidden; }
+.lv-stage > video { min-width: 0; min-height: 0; max-width: 100%; max-height: 100%; width: 100%; height: 100%; object-fit: contain; background: #000; border-radius: 6px; }
 .lv-img-wrap { position: relative; width: 100%; height: 100%; display: grid; place-items: center; }
 .lv-img-wrap img { max-width: 100%; max-height: 100%; object-fit: contain; grid-area: 1 / 1; }
 .lv-ph { width: 100%; height: 100%; filter: blur(6px); opacity: .6; }
@@ -252,6 +254,32 @@ body.lib-noscroll { overflow: hidden; }
 .lv-audio, .lv-file { display: grid; place-items: center; gap: 14px; color: #cbd5e1; text-align: center; }
 .lv-audio img { max-width: min(360px, 70vw); border-radius: 12px; }
 .lv-audio audio { width: min(520px, 80vw); }
+/* Audio stays in a compact transport bar while the library remains usable. */
+.lib-viewer.lv-compact { inset: auto 16px 16px; height: auto; max-height: 45vh; background: var(--bg-panel); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-lg, 12px); box-shadow: 0 8px 32px rgba(0,0,0,.2); overflow: visible; }
+.lv-compact .lv-bar { padding: 8px 12px; }
+.lv-compact .lv-title b { color: var(--text); }
+.lv-compact .lv-title small { color: var(--text-dim); }
+.lv-compact .lv-btn { color: var(--text); background: var(--bg-hover); border-color: var(--border); }
+.lv-compact .lv-main { overflow: visible; align-items: center; padding: 0 12px 12px; gap: 8px; }
+.lv-compact .lv-stage { display: block; padding: 0; order: 1; }
+.lv-compact .lv-audio { display: flex; flex-direction: column; align-items: stretch; width: 100%; gap: 4px; }
+.lv-compact .lv-audio audio { width: 100%; max-width: 100%; height: 40px; }
+.lv-compact .lv-audio-status { color: var(--text-dim); font-size: .78rem; }
+.lv-compact .lv-audio-status:empty { display: none; }
+.lv-compact .lv-nav { position: static; transform: none; display: inline-flex; flex-shrink: 0; width: 36px; height: 36px; color: var(--text); border-color: var(--border); background: var(--bg-hover); }
+.lv-compact .lv-nav.prev { order: 0; }
+.lv-compact .lv-nav.next { order: 2; }
+.lv-nav:disabled { opacity: .35; cursor: default; }
+.lv-compact .lv-info { position: absolute; bottom: calc(100% + 56px); top: auto; right: 0; max-height: 55vh; width: min(360px, calc(100vw - 32px)); border: 1px solid var(--border); border-radius: 12px; background: var(--bg-panel); color: var(--text); z-index: 2; }
+.lv-compact .lv-info dd, .lv-compact .lv-seg p { color: var(--text); }
+.lv-compact .lv-tabs button, .lv-compact .lv-path { color: var(--text-dim); }
+#tab-library:has(.lv-compact:not(.hidden)) .lib-main { padding-bottom: 150px; }
+@media (max-width: 768px) {
+  .lib-viewer.lv-compact { inset: auto 8px max(8px, env(safe-area-inset-bottom)); max-height: 40vh; }
+  .lv-compact .lv-bar { flex-wrap: wrap; gap: 6px; }
+  .lv-compact .lv-title { flex-basis: calc(100% - 50px); }
+  .lv-compact .lv-actions { margin-left: auto; }
+}
 .lv-file .lucide-icon { width: 64px; height: 64px; color: var(--accent); }
 .lv-file b { font-size: 1.6rem; letter-spacing: .06em; }
 .lv-file span { color: #8a99a8; font-size: 0.86rem; }
@@ -385,7 +413,7 @@ body.lib-noscroll { overflow: hidden; }
   .lib-bulk { bottom: 10px; border-radius: 12px; padding: 6px; gap: 4px; }
   .lib-bulk span:not(.lib-bulk-n) { display: none; }
   .lib-bulk-n { flex-basis: 100%; text-align: center; padding: 2px; }
-  .lv-stage { padding: 0 0 10px; }
+  .lv-stage { padding: 0 0 max(10px, env(safe-area-inset-bottom)); }
   .lv-nav { display: none; }
   .lv-btn span, .lv-hide-sm { display: none; }
   .lv-stage > video { border-radius: 0; }

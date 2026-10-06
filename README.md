@@ -74,6 +74,52 @@
 
 ---
 
+## Navegación y dashboard
+
+**Salud → Diagnóstico y optimización** muestra CPU, memoria y disco del host, consumo por contenedor y programas fuera de Docker, funciones de las aplicaciones y conexiones conocidas. Registra los mayores consumidores cada 30 segundos, conserva hasta 24 horas y muestra las últimas 120 muestras. CPU, espera por disco y tiempo robado por el hipervisor se distinguen; la CPU de los contenedores se normaliza por los núcleos del host.
+
+**Optimizar** permite apagar las dos instancias locales auditadas de `demo-postgres` y `example-postgres`, después de al menos **2 minutos continuos sin conexiones ni actividad detectada**. Cuenta conexiones abiertas aunque estén esperando, consultas breves por TCP mediante contadores de red, escrituras en todas las bases, mantenimiento, replicación y transacciones preparadas. Las comprobaciones son sólo de lectura y se repiten justo antes de cada parada. Una señal de uso, un error o una interrupción de las muestras impiden apagarla y el registro explica el motivo. Una aplicación sin comprobación de uso confiable sigue encendida, incluso si se marca **Sólo cuando la uso**. Authentik, Linkwarden, accesos, autenticación y otras bases quedan protegidos.
+
+La autorización corresponde al ID completo, creación, imagen y puertos locales de las instancias auditadas; no se transfiere a contenedores nuevos con el mismo nombre. **Siempre encendida** permite excluir una base local. Cada parada se registra antes de actuar y ofrece **Volver a encender**; las aplicaciones omitidas nunca se inician al deshacer. PostgreSQL se apaga con SIGTERM y espera sin plazo de cierre forzado, para dejar terminar conexiones que aparezcan entre comprobación y señal. En ese caso puede rechazar conexiones nuevas mientras termina; una espera no se informa como parada o restauración confirmada.
+
+La limpieza opcional se limita a caché de compilación de Docker sin uso desde hace siete días; nunca usa `system prune`, borra volúmenes ni vacía `/tmp` o la caché de RAM. La vista nueva sólo se habilita cuando el backend anuncia compatibilidad, para soportar el montaje separado de `public/`.
+
+Los datos se guardan en `optimizer.json` y `optimizer-history.json`, junto a `config.json`. Las acciones requieren autenticación. [Inventario y diagnóstico inicial](docs/inventario-servidor-2026-10-03.md). Validación: `pnpm run test`, `pnpm run check`, `pnpm run build`; recorridos de navegador con `scripts/optimizer-browser-qa.js` contra `pnpm run qa:serve` (acciones operativas simuladas). `pnpm exec bun --no-env-file run scripts/optimizer-activity-qa.ts` observa bases locales durante dos minutos y abre una transacción real de sólo lectura después de preparar la propuesta: verifica que se omita la base, con todas las órdenes de apagado/inicio/limpieza bloqueadas. No ejecutarlo mientras otra instancia de QA esté muestreando las mismas bases.
+
+Cada sección tiene una URL propia: `/archivos`, `/biblioteca`, `/agentes`, `/configuracion`, etc. El inicio `/` muestra acciones rápidas, archivos abiertos en este navegador, modificaciones recientes de la biblioteca, cambios guardados de agentes y actividad del servidor. Los respaldos existentes se identifican como tales, sin inventar historial de ediciones.
+
+Archivos y Biblioteca guardan carpeta o colección, búsqueda, orden, vista, selección, foco y scroll. Atrás/Adelante recuperan el estado de cada entrada del historial; recargar conserva la ubicación y los visores o editores abiertos. La última ubicación por sección se recuerda en este navegador. Los enlaces permiten abrir otra pestaña o copiar una ubicación. El editor avisa antes de abandonar cambios sin guardar.
+
+**Archivos → Nuevo archivo** crea un archivo vacío en la carpeta actual con cualquier nombre y extensión, incluidos `.txt`, `.env`, `.env.local`, JSON y nombres sin extensión. También aparece en clic derecho sobre el espacio vacío o una carpeta, y tiene el atajo `Ctrl/⌘ Alt N`. Crear nunca reemplaza un nombre existente; el editor se abre automáticamente y revela los archivos ocultos recién creados. Guardar / `Ctrl/⌘ S` conserva la revisión previa de cambios. Para volver a editar extensiones desconocidas, usar clic derecho → Editar o Abrir como texto. Sólo se edita texto UTF-8 completo de hasta 512 KiB; binarios, otras codificaciones y lecturas truncadas quedan en solo lectura. Se preservan BOM UTF-8 y saltos CRLF. Las escrituras respetan los permisos del usuario del host; `.env` y sus variantes se crean con permisos `600`.
+
+Flechas, Inicio/Fin, Enter y selección con Shift/Ctrl funcionan sobre los archivos. Archivos incluye la barra de ubicación (`Ctrl/⌘ Shift L`) y subir de carpeta (`Alt ↑`); Biblioteca permite buscar con `/`, escribir para saltar por nombre y usar Esc/←/→ en el visor. Cada sección tiene ayuda de atajos, y `Ctrl/⌘ K` abre la paleta global.
+
+## Discos y transferencias
+
+Archivos muestra los discos físicos y sus volúmenes desde el host: internos, USB y otros discos externos, con capacidad, espacio libre y estado. La lista se actualiza al abrir la sección, al volver a la ventana y cada 12 segundos mientras está visible. «Actualizar discos» consulta nuevamente el sistema. Un volumen montado abre su carpeta; uno externo sin montar permite «Montar». Los formatos sin un volumen navegable permanecen visibles.
+
+El botón **Explorar discos** de la barra superior está disponible en todas las secciones. Inicio, Salud, Métricas, Almacenamiento, Proyectos, Agentes, Biblioteca, Compose, Drop y Respaldos muestran el mismo inventario. Los selectores de carpetas permiten recorrer cualquier disco montado, incluso en ubicaciones personalizadas; dos montajes del mismo volumen no duplican la capacidad.
+
+Proyectos y los documentos de agentes se buscan también en discos montados, con límites de profundidad, tiempo y cantidad de entradas. Biblioteca conserva sus carpetas elegidas: **Configuración → Agregar carpeta de un disco** incorpora otra ubicación; no se indexan discos completos automáticamente. Compose permite abrir YAML de otro disco. Métricas permite elegir el disco del gráfico; el historial de cada volumen empieza con sus primeras muestras reales. Las memorias y conversaciones de agentes registrados usan sus ubicaciones nativas y admiten configuraciones en otros discos.
+
+Las políticas de Respaldos permiten elegir un repositorio cifrado en otro disco. Las credenciales y los recibos permanecen en el estado privado del usuario; la recuperación conserva el repositorio del snapshot original y no reemplaza los archivos de trabajo. Es un destino local, no un respaldo externo al servidor.
+
+Los montajes conocidos se recuerdan entre reinicios. Un disco desconectado bloquea operaciones sobre su antigua ruta y Biblioteca conserva su índice previo hasta que vuelva a estar disponible. Los análisis de Almacenamiento agregan los discos como ubicaciones de revisión, sin habilitar borrados adicionales.
+
+Seleccioná archivos, pulsá **Copiar** o **Mover**, elegí el disco y la carpeta de destino y pulsá **Pegar acá**. También funcionan `Ctrl/⌘ C`, `Ctrl/⌘ X` y `Ctrl/⌘ V`. Las colisiones generan nombres de copia y nunca sobrescriben. Los movimientos fallidos conservan el portapapeles pendiente. El historial muestra progreso, cancelación y recuperación. Al mover entre filesystems se conserva un original oculto recuperable, que sigue ocupando espacio; la operación no promete liberarlo automáticamente.
+
+En Docker, el montaje del host debe propagar nuevos montajes: `/:/hostfs:ro,rslave`. Cambiar esa opción requiere recrear AXON. El montaje explícito de discos externos usa un helper limitado a dispositivos detectados y formatos permitidos, en `/mnt/axon-disks/`; exFAT/FAT/NTFS reciben el UID/GID del usuario configurado. Las transferencias siguen ejecutándose como ese usuario y verifican tanto el contenido como la identidad del montaje antes de escribir. No se formatean discos ni se modifican permisos de sus archivos existentes. Después de reiniciar el servidor, un disco sin montaje puede montarse nuevamente desde la lista.
+
+Si un disco conectado físicamente no aparece ni en `lsblk` ni en `lsusb`, revisar conexión, cable, puerto y alimentación: AXON sólo puede mostrar dispositivos reconocidos por Linux.
+
+## Subidas de Archivos
+
+Archivos sube por bloques de 8 MiB, sin un tope fijo para el tamaño total del archivo. Cada bloque se escribe directamente en el host; la memoria usada no crece con el tamaño del video. El disco debe tener espacio para el archivo nuevo completo, incluso al reemplazar uno existente.
+
+Las subidas se preparan en una carpeta temporal junto al destino y se publican mediante un reemplazo atómico al completarse. Cancelar o fallar conserva el archivo anterior. Los bloques y la confirmación final toleran reintentos; las sesiones inactivas se limpian después de una hora. Una pestaña abierta con el cliente anterior debe recargarse.
+
+Verificación: `pnpm run test` y `pnpm run build`.
+
 ## 🏗️ Arquitectura
 
 ```mermaid
@@ -185,7 +231,7 @@ services:
       - ./axon/public:/app/public:ro
       - ./cloudflared/config.yml:/app/cloudflared-config.yml
       - /var/run/docker.sock:/var/run/docker.sock
-      - /:/hostfs:ro                        # filesystem del host (read-only) para rutas reales
+      - /:/hostfs:ro,rslave                 # filesystem del host (read-only) para rutas reales
 ```
 
 ```bash
@@ -297,3 +343,38 @@ La pestaña **Proyectos** descubre automáticamente directorios con `package.jso
 ## 📄 Licencia
 
 MIT © Lucas Sabena
+
+### Tienda, apariencia y entregas
+
+- **Tienda** (`/tienda`) instala aplicaciones en el host para todos sus usuarios. Incluye 25 fichas y búsqueda en Flathub; instalación, actualización y desinstalación usan trabajos con progreso. DaVinci usa la descarga oficial del fabricante. Flatpak y Flathub se preparan desde la tienda; las aplicaciones gráficas necesitan el escritorio del host.
+- **Configuración → Apariencia** tiene modo Claro / Oscuro / Sistema y 10 presets de cada modo. Cada preset define colores, fuentes locales, densidad, radios y sombras. Sistema recuerda ambos temas. Las preferencias son de cada navegador.
+- **Biblioteca → Links** lista enlaces, archivos originales, vencimiento y actividad; permite editar, silenciar avisos y revocar. Las descargas cuentan inicios observados, no transferencias completadas; los visitantes usan identificadores anónimos y se retienen los últimos 100 eventos de cada link.
+- **ENTREGAS** admite enlaces simbólicos relativos a archivos conocidos dentro de las raíces. No sigue enlaces a directorios. Los links compartidos guardan destinos reales y sobreviven a la regeneración de los accesos directos. Las carpetas vacías también aparecen.
+
+El alcance implementado, mediciones, pruebas y siguientes mejoras están en [docs/mejoras-2026-10-03.md](docs/mejoras-2026-10-03.md).
+
+### Verificación de las mejoras
+
+`pnpm run check`, `pnpm run test` y `pnpm run build` verifican tipos, sintaxis y contratos. Los tests usan datos temporales; no se deben ejecutar dentro del servicio montado con `/hostfs`. Para verificar el runtime en una imagen aislada, ver los requisitos de fixtures y herramientas en el informe de Control claro al final de este documento.
+
+`pnpm run qa:serve` inicia una instancia local en `127.0.0.1:3459`, con configuración y sesión independientes. Los recorridos de `scripts/polish-browser-qa.js` y `scripts/expanded-browser-qa.js` prueban navegador con operaciones de host simuladas. `scripts/library-links-qa.ts` prueba videos reales temporales y una copia intacta de `entregas.sh`, sin escribir en la producción audiovisual. Los scripts `production-*-smoke.ts` verifican origen / alias; el de links crea y revoca un enlace corto de QA y descarga su ZIP. No ejecutarlos indiscriminadamente sobre otro entorno.
+
+Para desplegar usar **`axon-deploy`**, seguir `/tmp/axon-deploy.log` y verificar la URL pública. No ejecutar Compose inline desde herramientas de agentes.
+
+### Chats y memorias de agentes
+
+Agents incluye **Chats** (historial local por proyecto, búsqueda gradual, selección y exportación Markdown) y **Memorias** (Engram y memorias Markdown locales, edición con respaldos y comprobación de revisión). [Almacenes soportados, investigación, límites y validación](docs/chats-y-memorias-2026-10-04.md). Prueba visual local: `scripts/agent-context-browser-qa.js` sobre `pnpm run qa:serve`; las escrituras visuales usan fixtures y la integración real de Engram se verifica con datos aislados.
+
+**Agents → Limpiar residuales** permite selección múltiple, seleccionar todos los disponibles y una sola confirmación por lote. Cada agente residual tiene un acceso rápido junto a su fila. Conserva respaldos recuperables; archivar no libera espacio en disco. [Flujo y validación](docs/limpieza-residuales-2026-10-04.md).
+
+## Almacenamiento y migraciones (2026-10-04)
+
+Axon agrega `/almacenamiento` con análisis bajo demanda, limpieza seleccionada de fuentes compatibles, planes e historial SQLite; papelera compartida XDG/legacy; copia/movimiento durable y editor con revisión; accesos de Inicio e inventario físico. Compose separa borradores, revisión, aplicación y recuperación. Las migraciones exigen comparación y pruebas antes de una retirada explícita, conservando los datos.
+
+Casos no soportados tienen bloqueos visibles. La ejecución durable de desinstalación de programas, paridad completa de Filebrowser/Portainer y retención nativa de todos los gestores siguen pendientes. [Funciones, límites y evidencia](docs/maintenance-2026-10-04.md); [ADR 0001](docs/adr/0001-maintenance-ledger.md). Las mutaciones detrás del proxy requieren `AXON_PUBLIC_ORIGIN`. QA usa fixtures independientes.
+
+## Rediseño Control claro (2026-10-05)
+
+La interfaz usa la dirección A y conserva las veinte secciones, la navegación y los contratos existentes. Web Awesome se integra como componentes web locales; `pnpm run build:ui` genera el bundle desde la dependencia bloqueada. La navegación se agrupa, el tema rápido pasa al sol/luna del encabezado y los temas completos siguen en Apariencia. Los estilos compartidos están en `public/design-system.css` y los tokens en `public/themes.js`.
+
+[Alcance, pruebas, mediciones públicas y reversión](docs/redesign-implementation-2026-10-05/README.md). Para los tests de filesystem dentro de una imagen aislada, usar un directorio temporal exclusivo montado como `/tmp` en un filesystem permitido y añadir tmux/python3-websockets sólo a ese entorno de prueba; no ejecutar tests sobre `/hostfs` productivo.

@@ -1,3 +1,4 @@
+import type { FileVolume } from './file-volumes';
 import { readFile, writeFile, mkdir, readdir } from 'fs/promises';
 import { readFileSync } from 'fs';
 import * as path from 'path';
@@ -34,6 +35,8 @@ const series: Record<SeriesKey, MetricPoint[]> = {
   netTx: [],
 };
 
+const disks:Record<string,{name:string;path:string;series:MetricPoint[]}>= {};
+const diskKey=(v:FileVolume)=>v.uuid||v.device;
 let loaded = false;
 let started = false;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -55,6 +58,7 @@ async function loadMetrics(): Promise<void> {
           .slice(-MAX_SAMPLES);
       }
     }
+    for(const [key,value] of Object.entries(obj?._disks||{}).slice(0,64)){const v=value as any;if(typeof v.name==='string'&&typeof v.path==='string'&&Array.isArray(v.series))disks[key]={name:v.name,path:v.path,series:v.series.filter((p:any)=>p&&Number.isFinite(p.t)&&Number.isFinite(p.v)&&p.t>Date.now()-7*86400000).slice(-MAX_SAMPLES)};}
     const net = obj?._net;
     if (net && Number.isFinite(net.rx) && Number.isFinite(net.tx) && Date.now() - net.t < 15 * 60_000) {
       lastNet = net;
@@ -69,7 +73,7 @@ function saveSoon(): void {
     writeQueue = writeQueue.then(async () => {
       try {
         await mkdir(path.dirname(FILE), { recursive: true });
-        await writeFile(FILE, JSON.stringify({ _net: lastNet, ...series }));
+        await writeFile(FILE, JSON.stringify({ _net: lastNet, _disks:disks, ...series }));
       } catch { /* best-effort */ }
     });
   }, 10_000);
@@ -115,6 +119,7 @@ async function sample(): Promise<void> {
     push('cpu', t, stats.cpuPercent);
     push('mem', t, stats.memoryPercent);
     push('disk', t, stats.diskPercent);
+    for(const v of stats.disks||[])if(v.path&&v.used!=null&&v.size){const key=diskKey(v);if(!disks[key]&&Object.keys(disks).length>=64)continue;const d=disks[key]||={name:v.name,path:v.path,series:[]};d.name=v.name;d.path=v.path;d.series.push({t,v:Math.round(v.used/v.size*100)});d.series=d.series.filter(p=>p.t>t-7*86400000).slice(-MAX_SAMPLES);}
     push('load', t, Math.round((stats.loadAverage?.[0] ?? 0) * 100) / 100);
     const net = readNetTotals();
     if (net && lastNet) {
@@ -222,7 +227,7 @@ export function registerMetricsRoutes(app: Hono): void {
     const since = Date.now() - ms;
     const out: Partial<Record<SeriesKey, MetricPoint[]>> = {};
     for (const k of SERIES_KEYS) out[k] = series[k].filter((p) => p.t >= since);
-    return c.json({ ok: true, series: out, sampledSec: INTERVAL_MS / 1000 });
+    return c.json({ ok: true, series: out, disks:Object.entries(disks).map(([id,d])=>({id,name:d.name,path:d.path,series:d.series.filter(p=>p.t>=since)})), sampledSec: INTERVAL_MS / 1000 });
   });
 
   app.get('/api/metrics/procs', async (c) => {

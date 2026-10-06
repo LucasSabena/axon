@@ -5,17 +5,26 @@
   "scripts": {
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
-    "build": "bun build src/index.ts --outdir dist --target bun"
+    "build": "bun run scripts/build-ui.ts && bun build src/index.ts --outdir dist --target bun && mkdir -p dist/storage && cp src/storage/scan-host.py dist/scan-host.py && cp src/storage/trash-host.py dist/storage/trash-host.py && cp src/storage/file-task-host.py dist/storage/file-task-host.py && cp src/storage/compose-release-host.py dist/storage/compose-release-host.py && cp src/storage/installations-host.py dist/storage/installations-host.py && cp src/storage/versions-host.py dist/storage/versions-host.py && cp src/storage/edit-host.py dist/storage/edit-host.py && cp src/storage/volumes-host.py dist/storage/volumes-host.py && cp src/platform/backup-host.py dist/backup-host.py && cp src/platform/desktop-host.py dist/desktop-host.py",
+    "test": "bun run scripts/test.ts",
+    "check": "tsc --noEmit && bun run scripts/check-frontend.ts",
+    "qa:serve": "bun --no-env-file run scripts/qa-server.ts",
+    "qa:maintenance:read": "bun --no-env-file run scripts/maintenance-readonly.ts",
+    "build:ui": "bun run scripts/build-ui.ts",
+    "qa:platform:database": "bun --no-env-file run scripts/platform-database-qa.ts"
   },
   "dependencies": {
+    "@awesome.me/webawesome": "3.14.0",
     "@jsquash/jpeg": "^1.6.0",
     "hono": "^4.4.8",
     "js-yaml": "^4.1.0",
     "lucide": "^1.48.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
     "@types/bun": "latest",
-    "@types/js-yaml": "^4.0.9"
+    "@types/js-yaml": "^4.0.9",
+    "typescript": "^7.0.2"
   },
   "module": "src/index.ts",
   "type": "module",

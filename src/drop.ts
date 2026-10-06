@@ -1,3 +1,4 @@
+import { resolveHostPath } from './host-storage';
 import type { Context, Hono } from 'hono';
 import { mkdir, writeFile, unlink, stat, realpath } from 'fs/promises';
 import { readFileSync } from 'fs';
@@ -29,7 +30,6 @@ const MAX_DROPS = 100;
 const MAX_FILE_BYTES = 50 * 1024 * 1024; // 50 MB
 const MAX_TEXT_CHARS = 1_000_000;        // ~1 MB of text
 const TTL_MS = 24 * 60 * 60 * 1000;      // 24 h
-const SERVE_ROOTS = ['/home', '/tmp', '/srv', '/opt', '/mnt'];
 
 let drops: Drop[] = [];
 let writeQueue: Promise<void> = Promise.resolve();
@@ -47,6 +47,10 @@ function loadSync(): void {
   } catch { /* missing/corrupt — start empty */ }
 }
 loadSync();
+
+export function dropPathReferences(){
+  return drops.filter(d=>d.kind==='serve'&&d.hostPath&&d.expires>Date.now()).map(d=>({title:`Drop: ${d.name||'Archivo compartido'}`,path:d.hostPath!,detail:'Este link de Drop seguirá buscando el archivo en el origen y puede dejar de funcionar. Volvé a compartirlo desde el destino.'}));
+}
 
 function saveSoon(): void {
   if (saveTimer) return;
@@ -116,25 +120,9 @@ const shq = (s: string) => `'${s.replace(/'/g, `'"'"'`)}'`;
 // Serve paths must be absolute, normalized, and under a writable-ish root.
 // The lexical check alone is not enough — a symlink under an allowed root
 // would otherwise serve/write outside the allowlist, so the resolved real
-// path is re-checked against SERVE_ROOTS.
+// path is re-checked by the shared mount-aware host path policy.
 async function normalizeServePath(input: string): Promise<string | null> {
-  if (!input || typeof input !== 'string') return null;
-  const norm = path.resolve(input.trim());
-  const under = (p: string) => SERVE_ROOTS.some((r) => p === r || p.startsWith(r + '/'));
-  let probe = norm;
-  const tail: string[] = [];
-  while (true) {
-    try {
-      const real = await realpath(hostToContainer(probe));
-      const full = tail.length ? path.join(containerToHost(real), ...tail.reverse()) : containerToHost(real);
-      return under(full) ? full : null;
-    } catch {
-      tail.push(path.basename(probe));
-      const parent = path.dirname(probe);
-      if (parent === probe) return null;
-      probe = parent;
-    }
-  }
+  try{return await resolveHostPath(input);}catch{return null;}
 }
 
 // Write bytes to a host path. The host fs is mounted read-only at /hostfs, so
@@ -144,7 +132,7 @@ async function writeToHost(hostPath: string, data: Uint8Array): Promise<{ ok: bo
     const proc = hostSpawnInteractive(`cat > ${shq(hostPath)}`, { user: 'user' });
     const stdin = proc.stdin as {
       write(d: Uint8Array | string): number | Promise<number>;
-      flush(): void | Promise<void>;
+      flush(): number | Promise<number>;
       end(): void;
     };
     try {
@@ -239,7 +227,7 @@ export function registerDropRoutes(app: Hono): void {
 
   app.post('/api/drop/text', async (c) => {
     await sweep();
-    const body = await c.req.json<{ text?: string }>().catch(() => ({}));
+    const body = await c.req.json<{ text?: string }>().catch(() => ({} as { text?: string }));
     const text = String(body.text ?? '');
     if (!text.trim()) return fail(c, 400, 'Texto vacío');
     if (text.length > MAX_TEXT_CHARS) return fail(c, 413, 'Texto demasiado largo (máx. 1 MB)');
@@ -288,7 +276,7 @@ export function registerDropRoutes(app: Hono): void {
   // Register a drop pointing at an EXISTING host file (server → device pull).
   app.post('/api/drop/serve', async (c) => {
     await sweep();
-    const body = await c.req.json<{ path?: string }>().catch(() => ({}));
+    const body = await c.req.json<{ path?: string }>().catch(() => ({} as { path?: string }));
     const hostPath = await normalizeServePath(String(body.path || ''));
     if (!hostPath) return fail(c, 400, 'Ruta no permitida — solo bajo /home /tmp /srv /opt /mnt');
     const fsPath = hostToContainer(hostPath);
@@ -309,7 +297,7 @@ export function registerDropRoutes(app: Hono): void {
 
   // Server-side clipboard: "Enviar al servidor" / "Traer".
   app.post('/api/drop/clip', async (c) => {
-    const body = await c.req.json<{ text?: string }>().catch(() => ({}));
+    const body = await c.req.json<{ text?: string }>().catch(() => ({} as { text?: string }));
     clip = { text: String(body.text ?? '').slice(0, MAX_TEXT_CHARS), t: Date.now() };
     return c.json({ ok: true, t: clip.t });
   });

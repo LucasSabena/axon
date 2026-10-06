@@ -7,16 +7,16 @@
 'use strict';
 if (document.getElementById('tab-metrics')) return;
 
-const link = document.createElement('link');
-link.rel = 'stylesheet';
-link.href = '/feat-metrics.css';
-document.head.appendChild(link);
+if(!document.querySelector('link[href*="feat-metrics.css"]')) {
+  const link = document.createElement('link');link.rel='stylesheet';link.href='/feat-metrics.css';
+  document.head.insertBefore(link,document.querySelector('link[href^="/design-system.css"]'));
+}
 
 // ---------- DOM ----------
 const CARDS = [
   { key: 'cpu', title: 'CPU', unit: '%', color: '--accent', fb: '#5e6ad2', yMax: 100 },
   { key: 'mem', title: 'RAM', unit: '%', color: '--ok', fb: '#4cb782', yMax: 100 },
-  { key: 'disk', title: 'Disco', unit: '%', color: '--warn', fb: '#f2c94c', yMax: 100 },
+  { key: 'disk', title: 'Disco de sistema', unit: '%', color: '--warn', fb: '#f2c94c', yMax: 100 },
   { key: 'load', title: 'Load (1m)', unit: '', color: '--info', fb: '#4ea7fc' },
   { key: 'net', title: 'Red', unit: 'kB/s', net: true },
 ];
@@ -42,7 +42,7 @@ section.innerHTML = `
     ${CARDS.map((c) => `
       <div class="metric-card">
         <div class="metric-card-head">
-          <span class="metric-title">${c.title}${c.unit ? ` <span class="metric-unit">(${c.unit})</span>` : ''}</span>
+          <span class="metric-title">${c.key==='disk'?'<select id="metrics-disk-select" aria-label="Disco del gráfico"><option value="">Disco de sistema</option></select>':c.title}${c.unit ? ` <span class="metric-unit">(${c.unit})</span>` : ''}</span>
           <span class="metric-now" id="mx-now-${c.key}">-</span>
         </div>
         <canvas class="metric-canvas" id="mx-${c.key}"></canvas>
@@ -243,7 +243,10 @@ async function loadProcs() {
 
 async function loadMetrics() {
   try {
-    const { series } = await api(`/api/metrics?range=${encodeURIComponent(range)}`);
+    const { series, disks=[] } = await api(`/api/metrics?range=${encodeURIComponent(range)}`);
+    const select=document.getElementById('metrics-disk-select'),selected=select.value;
+    select.innerHTML='<option value="">Disco de sistema</option>'+disks.filter(d=>d.path!=='/').map(d=>`<option value="${esc(d.id)}">${esc(d.name)} · ${esc(d.path)}</option>`).join('');
+    select.value=selected;const disk=disks.find(d=>d.id===select.value);if(disk)series.disk=disk.series;
     renderSeries(series);
     document.getElementById('metrics-updated').textContent = `actualizado ${new Date().toLocaleTimeString('es-AR')}`;
   } catch (err) {
@@ -253,6 +256,7 @@ async function loadMetrics() {
 }
 
 // ---------- Wiring ----------
+document.getElementById('metrics-disk-select').addEventListener('change',loadMetrics);
 document.querySelectorAll('#metrics-ranges .chip').forEach((chip) => {
   chip.classList.toggle('active', chip.dataset.range === range);
   chip.addEventListener('click', () => {

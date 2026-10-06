@@ -40,8 +40,8 @@ section.className = 'tab-content';
 section.innerHTML = `
   <div class="logs-toolbar">
     <span class="logs-status logs-status-disconnected" id="logs-status">Desconectado</span>
-    <select id="logs-src" class="filter-input logs-src"><option value="">Cargando fuentes…</option></select>
-    <input type="text" id="logs-custom" class="filter-input hidden" placeholder="/ruta/al/archivo.log">
+    <select id="logs-src" aria-label="Fuente de logs" class="filter-input logs-src"><option value="">Cargando fuentes…</option></select>
+    <input type="text" id="logs-custom" aria-label="Ruta del archivo de logs" class="filter-input hidden" placeholder="/ruta/al/archivo.log">
     <button id="logs-connect" class="btn-primary"><i data-lucide="play" class="lucide-icon"></i> Conectar</button>
     <button id="logs-reconnect" class="btn-action hidden"><i data-lucide="rotate-cw" class="lucide-icon"></i> Reconectar</button>
     <span class="logs-sep"></span>
@@ -49,7 +49,7 @@ section.innerHTML = `
     <button id="logs-clear" class="btn-secondary" title="Limpiar"><i data-lucide="eraser" class="lucide-icon"></i></button>
     <button id="logs-follow" class="btn-secondary logs-toggle-on" title="Seguir abajo"><i data-lucide="arrow-down-to-line" class="lucide-icon"></i></button>
     <span class="logs-sep"></span>
-    <input type="text" id="logs-search" class="filter-input logs-search" placeholder="Buscar…">
+    <input type="text" id="logs-search" aria-label="Buscar en los logs" class="filter-input logs-search" placeholder="Buscar…">
     <button id="logs-prev" class="btn-secondary" title="Anterior"><i data-lucide="chevron-up" class="lucide-icon"></i></button>
     <button id="logs-next" class="btn-secondary" title="Siguiente"><i data-lucide="chevron-down" class="lucide-icon"></i></button>
     <span id="logs-match-count" class="logs-count"></span>

@@ -217,7 +217,12 @@
 
 /* ---------- Base ---------- */
 
-* { margin: 0; padding: 0; box-sizing: border-box; }
+* { box-sizing: border-box; }
+/* Native resets must not override the defaults on our web component hosts. */
+*:not(:where(wa-button, wa-dialog, wa-dropdown, wa-dropdown-item, wa-divider, wa-skeleton)) {
+  margin: 0;
+  padding: 0;
+}
 
 html { font-size: var(--font-size); }
 
@@ -782,7 +787,7 @@ summary { cursor: pointer; color: var(--text-dim); font-size: 0.83rem; padding: 
 
 #toast-container {
   position: fixed; bottom: 18px; right: 18px; z-index: 300;
-  display: flex; flex-direction: column; gap: 8px; max-width: 420px;
+  display: flex; flex-direction: column; gap: 8px; width:min(420px, calc(100vw - 32px));
 }
 .toast {
   background: var(--bg-overlay); border: 1px solid var(--border-strong);
@@ -796,6 +801,10 @@ summary { cursor: pointer; color: var(--text-dim); font-size: 0.83rem; padding: 
 .toast-error { border-left: 3px solid var(--danger); }
 .toast-warn { border-left: 3px solid var(--warn); }
 .toast-msg { white-space: pre-wrap; word-break: break-word; }
+.toast-content { flex:1; min-width:0; }
+.toast-close { color:var(--text-dim); background:transparent; border:0; padding:2px; cursor:pointer; flex-shrink:0; }
+.toast-close svg { margin:0; }
+.toast-detail { color:var(--accent); background:transparent; border:0; margin-top:6px; padding:0; font-size:12px; cursor:pointer; }
 .toast .toast-sub { display: block; margin-top: 4px; color: var(--text-dim); font-size: 0.78rem; font-family: var(--font-mono); }
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
 

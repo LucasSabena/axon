@@ -8,7 +8,10 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 // ---------- Lucide icons (vendored, optional) ----------
 
 const icon = (name, cls = '') => `<i data-lucide="${esc(name)}" class="lucide-icon${cls ? ' ' + cls : ''}"></i>`;
-const refreshIcons = () => { try { window.lucide?.createIcons(); } catch { /* icons are decorative */ } };
+const refreshIcons = () => {
+  try { window.lucide?.createIcons(); } catch { /* icons are decorative */ }
+  for (const button of document.querySelectorAll('button[title]:not([aria-label])')) if (!button.textContent.trim()) button.setAttribute('aria-label', button.title);
+};
 const isLucideName = (s) => /^[a-z0-9]+(-[a-z0-9]+)*$/.test(s || '');
 const CATEGORY_ICON = { project: 'folder-git-2', service: 'server', docker: 'container', system: 'cpu', unknown: 'help-circle' };
 const lucideName = (name, fallback = 'box') => (isLucideName(name) ? name : fallback);
@@ -26,48 +29,33 @@ function relTime(ts) {
 // ---------- API wrapper with error toasts ----------
 
 async function api(path, opts = {}) {
-  let res;
-  try {
-    res = await fetch(path, {
-      credentials: 'same-origin',
-      headers: opts.body ? { 'Content-Type': 'application/json' } : undefined,
-      ...opts,
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
-    });
-  } catch (err) {
-    throw { error: 'Sin conexión con el servidor', detail: String(err) };
-  }
-  let data;
-  try { data = await res.json(); } catch { data = {}; }
-  if (!res.ok || data.ok === false) {
-    // Session expired — drop back to the login screen instead of spamming
-    // "Unauthorized" toasts from every background poll.
-    if (res.status === 401) {
-      $('#login-screen')?.classList.remove('hidden');
-    }
-    const e = new Error(data.error || `HTTP ${res.status}`);
-    e.detail = data.detail;
-    e.command = data.command;
-    e.status = res.status;
-    e.raw = data;
-    throw e;
-  }
-  return data;
+  const ttl = path === '/api/stats' ? 1000 : /^\/api\/agents(?:\/[^/]+)?$/.test(path) ? 10_000 : 0;
+  return window.AxonUI.request(path, { cacheMs: ttl, ...opts });
 }
+document.addEventListener('axon:session-expired', () => {
+  $('#login-screen')?.classList.remove('hidden');
+  $('#main-screen')?.classList.add('hidden');
+});
 
 function toast(msg, type = 'error', detail = '', ms = 6000) {
   const box = $('#toast-container');
   const el = document.createElement('div');
   el.className = `toast toast-${type}`;
-  el.innerHTML = `<div class="toast-msg">${esc(msg)}</div>${detail ? `<details><summary>Detalle</summary><pre>${esc(detail)}</pre></details>` : ''}`;
-  box.appendChild(el);
-  setTimeout(() => el.classList.add('toast-show'), 10);
-  setTimeout(() => { el.classList.remove('toast-show'); setTimeout(() => el.remove(), 300); }, ms);
+  el.setAttribute('role',type==='error'?'alert':'status');
+  el.innerHTML = `${icon(type==='ok'?'circle-check':type==='warn'?'triangle-alert':'circle-alert')}<div class="toast-content"><div class="toast-msg">${esc(msg)}</div>${detail?'<button class="toast-detail">Ver detalle</button>':''}</div><button class="toast-close" aria-label="Cerrar aviso">${icon('x')}</button>`;
+  const close=()=>{clearTimeout(timer);el.remove();};
+  el.querySelector('.toast-close').onclick=close;
+  el.querySelector('.toast-detail')?.addEventListener('click',()=>{void window.AxonTransfers?.showError({message:msg,detail});close();});
+  box.appendChild(el);refreshIcons();
+  const timer=setTimeout(close,ms);
+  while(box.children.length>4)box.firstElementChild.remove();
 }
 
 function errToast(err) {
+  if(err.cancelled||err.presented)return;
+  if(err.raw?.code==='operation-pending'){void window.AxonTransfers.showError(err);return;}
   const parts = [err.detail, err.command ? `Comando: ${err.command}` : ''].filter(Boolean);
-  toast(err.message || 'Error', 'error', parts.join('\n\n'));
+  toast(err.message || 'No se pudo completar la acción', 'error', parts.join('\n\n'));
 }
 
 function fmtUptime(sec) {
@@ -80,19 +68,45 @@ function fmtUptime(sec) {
 
 // ---------- Auth ----------
 
+// Deferred feature scripts register their hooks before the authenticated boot event.
+const axonDomReady = document.readyState === 'complete' ? Promise.resolve()
+  : new Promise(resolve => document.addEventListener('DOMContentLoaded', resolve, { once:true }));
 async function initAuth() {
   try {
     const me = await api('/api/me');
+    await axonDomReady;
     $('#login-code').classList.toggle('hidden', !me.totpEnabled);
+    $('#login-code-label').classList.toggle('hidden', !me.totpEnabled);
     if (me.authenticated) {
+      await AxonAssets.features();
+      scanIntervalMs = me.scanIntervalMs || 5000;
+      $('#boot-screen').classList.add('hidden');
       $('#login-screen').classList.add('hidden');
       $('#main-screen').classList.remove('hidden');
       bootMain();
       return;
     }
-  } catch { /* fallthrough to login */ }
+  } catch (err) {
+    await axonDomReady;
+    if (err.status !== 401) {
+      $('#boot-message').textContent = err.message + '. Tus datos se conservan. Podés reintentar.';
+      $('#boot-retry').classList.remove('hidden');
+      return;
+    }
+  }
+  await axonDomReady;
+  $('#boot-screen').classList.add('hidden');
   $('#login-screen').classList.remove('hidden');
 }
+
+$('#boot-retry').addEventListener('click', () => { $('#boot-retry').classList.add('hidden'); $('#boot-message').textContent='Preparando tu espacio…'; void initAuth(); });
+
+$('#password-toggle').addEventListener('click', () => {
+  const visible = $('#password').type === 'password';
+  $('#password').type = visible ? 'text' : 'password';
+  $('#password-toggle').setAttribute('aria-label', visible ? 'Ocultar contraseña' : 'Mostrar contraseña');
+  $('#password-toggle').setAttribute('aria-pressed', String(visible));
+});
 
 $('#login-form').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -106,7 +120,7 @@ $('#login-form').addEventListener('submit', async (e) => {
   } catch (err) {
     $('#login-error').textContent = err.message;
     // Server says the 2FA code is wrong/required — make sure the field is visible.
-    if ((err.message || '').toLowerCase().includes('código')) $('#login-code').classList.remove('hidden');
+    if ((err.message || '').toLowerCase().includes('código')) { $('#login-code').classList.remove('hidden'); $('#login-code-label').classList.remove('hidden'); $('#login-code').focus(); }
   }
 });
 
@@ -126,17 +140,18 @@ const loaders = {
 };
 
 let activeTabName = 'ports';
+function activateAxonSection(tab, load = true) {
+  $$('.tab-btn').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
+  $$('.tab-content').forEach((t) => t.classList.toggle('active', t.id === `tab-${tab}`));
+  if (activeTabName === 'navegador' && tab !== 'navegador') unloadBrowser();
+  activeTabName = tab;
+  if (load) loaders[tab]?.();
+  document.dispatchEvent(new CustomEvent('axon:section', { detail: tab }));
+}
+window.activateAxonSection = activateAxonSection;
 $$('.tab-btn').forEach((btn) => {
   btn.addEventListener('click', () => {
-    $$('.tab-btn').forEach((b) => b.classList.remove('active'));
-    $$('.tab-content').forEach((t) => t.classList.remove('active'));
-    btn.classList.add('active');
-    $(`#tab-${btn.dataset.tab}`).classList.add('active');
-    // Leaving the browser tab tears the viewer down so it isn't streaming
-    // screencast frames in the background; the server Chrome keeps running.
-    if (activeTabName === 'navegador' && btn.dataset.tab !== 'navegador') unloadBrowser();
-    activeTabName = btn.dataset.tab;
-    loaders[btn.dataset.tab]?.();
+    activateAxonSection(btn.dataset.tab);
   });
 });
 
@@ -271,7 +286,7 @@ function isLocalClient() {
 function portLinksHtml(port, listeners) {
   const dot = healthDotFor(port, listeners);
   const net = netHost();
-  const proxy = `<a class="link-proxy" href="/p/${port}/" target="_blank" rel="noopener" title="Abrir :${port} a través del proxy (funciona incluso si el proceso solo escucha en 127.0.0.1)">${icon('route')} :${port}</a>`;
+  const proxy = `<a class="link-proxy" href="/p/${port}/" target="_blank" rel="noopener noreferrer" title="Abrir :${port} a través del proxy (funciona incluso si el proceso solo escucha en 127.0.0.1)">${icon('route')} :${port}</a>`;
 
   // Remote client (laptop via Tailscale/domain): localhost links don't reach the
   // server — route everything through the built-in proxy, or direct host:port
@@ -279,19 +294,23 @@ function portLinksHtml(port, listeners) {
   if (!isLocalClient()) {
     const hostIsIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(location.hostname);
     const direct = hostIsIp && remoteReachable(port, listeners)
-      ? `<a class="link-network" href="http://${location.hostname}:${port}" target="_blank" rel="noopener" title="Directo al servidor">${esc(location.hostname)}:${port}</a>`
+      ? `<a class="link-network" href="http://${location.hostname}:${port}" target="_blank" rel="noopener noreferrer" title="Directo al servidor">${esc(location.hostname)}:${port}</a>`
       : '';
     return `<span class="port-links">${dot}${direct}${proxy}</span>`;
   }
 
-  const local = `${dot}<a class="link-local" href="http://localhost:${port}" target="_blank" rel="noopener" title="Abrir localhost:${port}">localhost:${port}</a>`;
+  const local = `${dot}<a class="link-local" href="http://localhost:${port}" target="_blank" rel="noopener noreferrer" title="Abrir localhost:${port}">localhost:${port}</a>`;
   let remote = '';
   if (net) {
     remote = remoteReachable(port, listeners)
-      ? `<a class="link-network" href="http://${net}:${port}" target="_blank" rel="noopener" title="Abrir ${esc(net)}:${port}">${esc(net)}:${port}</a>`
+      ? `<a class="link-network" href="http://${net}:${port}" target="_blank" rel="noopener noreferrer" title="Abrir ${esc(net)}:${port}">${esc(net)}:${port}</a>`
       : `<span class="link-network link-dead" title="${esc(net)}:${port} no es accesible: este proceso solo escucha en 127.0.0.1 (usá --host o un dominio)">${esc(net)}:${port}</span>`;
   }
   return `<span class="port-links">${local}${remote}</span>`;
+}
+
+function domainLinksHtml(domains) {
+  return (domains || []).map(d => `<a class="domain-link" href="https://${esc(d.fullDomain)}" target="_blank" rel="noopener noreferrer">${icon('globe')} ${esc(d.subdomain)}</a>`).join(' ');
 }
 
 function processRow(p, isChild, groupRoot) {
@@ -303,8 +322,7 @@ function processRow(p, isChild, groupRoot) {
     ? `<span class="badge badge-python">${esc(p.identity.framework)}</span>` : '';
   const unitBadge = p.identity.unit
     ? `<span class="badge badge-other" title="Supervisado por ${esc(p.identity.unit)} — al cerrarlo se reinicia solo">${icon('refresh-ccw')} systemd</span>` : '';
-  const domainLink = p.domain
-    ? `<a class="domain-link" href="https://${esc(p.domain.fullDomain)}" target="_blank" rel="noopener">${icon('globe')} ${esc(p.domain.subdomain)}</a>` : '';
+  const domainLink = domainLinksHtml(p.domains || (p.domain ? [p.domain] : []));
   const folderCell = p.identity.projectRoot || p.cwd || '-';
   const actions = p.pid > 0
     ? `<button class="btn-action act-detail" data-pid="${p.pid}" title="Info">${icon('info')} Info</button>
@@ -337,6 +355,7 @@ function projectHeaderRow(root, procs) {
   const label = root.split('/').filter(Boolean).pop() || procs[0].identity.label;
   const allPorts = [...new Set(procs.flatMap((p) => p.ports || []))].sort((a, b) => a - b);
   const allListeners = procs.flatMap((p) => p.listeners || []);
+  const domains = [...new Map(procs.flatMap(p => p.domains || (p.domain ? [p.domain] : [])).map(d => [d.id, d])).values()];
   const ram = procs.reduce((s, p) => s + (p.memoryMb || 0), 0);
   const up = Math.max(0, ...procs.map((p) => p.uptimeSeconds || 0));
   const killable = procs.filter((p) => p.pid > 0 && !p.identity.protected).map((p) => p.pid);
@@ -350,7 +369,7 @@ function projectHeaderRow(root, procs) {
   tr.innerHTML = `
     <td class="icon-cell"><span class="group-caret">${icon('chevron-down')}</span></td>
     <td><strong>${icon('folder-git-2')} ${esc(label)}</strong> ${framework ? `<span class="badge badge-python">${esc(framework)}</span>` : ''} <span class="badge badge-node">Proyecto</span></td>
-    <td>${allPorts.map((pt) => portLinksHtml(pt, allListeners)).join(' ')}</td>
+    <td>${allPorts.map((pt) => portLinksHtml(pt, allListeners)).join(' ')} ${domainLinksHtml(domains)}</td>
     <td class="cmd-cell folder-path" title="${esc(root)}">${esc(root)}</td>
     <td>·</td>
     <td>${ram ? `${Math.round(ram)} MB` : '-'}</td>
@@ -442,7 +461,7 @@ $('#ports-table').addEventListener('click', async (e) => {
   } else if (btn.classList.contains('act-kill-all')) {
     const pids = (btn.dataset.pids || '').split(',').map((n) => parseInt(n, 10)).filter(Boolean);
     if (!pids.length) return;
-    if (!confirm(`Se cerrarán ${pids.length} proceso(s) del proyecto.\nPIDs: ${pids.join(', ')}`)) return;
+    if (!(await confirmDialog('Detener proyecto', `Se cerrarán ${pids.length} proceso(s) del proyecto.\nPIDs: ${pids.join(', ')}`, 'Detener'))) return;
     btn.disabled = true;
     let okCount = 0;
     let failCount = 0;
@@ -505,7 +524,7 @@ $('#kill-stop-service').addEventListener('click', async (e) => {
   const unit = btn.dataset.unit;
   const scope = btn.dataset.scope || 'user';
   if (!unit) return;
-  if (!confirm(`Detener el servicio "${unit}"?\nSe detiene de verdad (systemd no lo reinicia). También se puede deshabilitar para que no arranque solo.`)) return;
+  if (!(await confirmDialog('Detener servicio', `Se detiene ${unit}. También se puede deshabilitar para que no arranque solo.`, 'Detener'))) return;
   btn.disabled = true;
   try {
     await api('/api/systemd/stop', { method: 'POST', body: { unit, scope } });
@@ -614,18 +633,24 @@ $('#detail-domain-btn').addEventListener('click', () => {
 let jobPollTimer = null;
 let currentJobId = null;
 let programsData = [];
+let programsRefreshTimer = null;
+let programsChecking = false;
 
 async function loadPrograms(fresh = false) {
   try {
-    const { programs } = await api(fresh ? '/api/programs?fresh=1' : '/api/programs');
+    const { programs, checkingUpdates, checkingMetadata } = await api(fresh ? '/api/programs?fresh=1' : '/api/programs');
+    programsChecking = checkingUpdates || checkingMetadata;
+    $('#update-all-btn').disabled = !!programsChecking;
     programsData = programs || [];
-    $('#programs-updated').textContent = `Actualizado ${new Date().toLocaleTimeString()}`;
+    $('#programs-updated').textContent = checkingMetadata ? 'Comprobando versiones y cuentas…' : checkingUpdates ? 'Buscando nuevas versiones en segundo plano…' : `Actualizado ${new Date().toLocaleTimeString()}`;
+    clearTimeout(programsRefreshTimer);
+    if(programsChecking && activeTabName === 'programs' && !document.hidden) programsRefreshTimer=setTimeout(()=>loadPrograms(),checkingMetadata ? 1000 : 5000);
     renderPrograms(programsData);
     const pending = programsData.filter((p) => p.pendingUpdates || p.latestVersion).length;
     const nc = $('#nav-count-programs');
     if (nc) { nc.textContent = pending || ''; nc.classList.toggle('nav-alert', pending > 0); }
     // Cargar el inventario una sola vez al entrar a la sección
-    if (!installedData) loadInstalled().catch(() => {});
+    // Installed inventory is loaded explicitly in its own section.
   } catch (err) {
     errToast(err);
   }
@@ -647,12 +672,11 @@ function renderPrograms(programs) {
     const versionBadge = p.latestVersion
       ? `<span class="badge badge-bun" title="Hay una versión nueva">${icon('arrow-up')} ${esc(p.version || '?')} → ${esc(p.latestVersion)}</span>`
       : p.pendingUpdates ? `<span class="badge badge-bun">${esc(p.pendingUpdates)} updates</span>` : '';
-    const authHtml = p.auth ? `
+    const authHtml = p.metadataPending ? `<div class="program-auth listener-note">${icon('loader','spin')} Comprobando versión y cuenta…</div>` : p.auth ? `
       <div class="program-auth">
         <span class="health-dot ${p.auth.loggedIn ? 'health-ok' : 'health-bad'}"></span>
         <span class="${p.auth.loggedIn ? 'auth-account' : 'listener-note'}">${p.auth.loggedIn ? esc(p.auth.account || 'Sesión activa') : 'Sin sesión'}</span>
-        ${p.auth.loggedIn && p.auth.canLogout ? `<button class="auth-btn program-auth-act" data-id="${esc(p.id)}" data-act="logout" title="Cerrar sesión">${icon('log-out')} Salir</button>` : ''}
-        ${!p.auth.loggedIn && p.auth.canLogin ? `<button class="auth-btn program-auth-act" data-id="${esc(p.id)}" data-act="login" title="Inicia el flujo de login — la URL/código aparece en el log del job">${icon('log-in')} Entrar</button>` : ''}
+        ${['codex', 'claude-code'].includes(p.id) ? `<a class="auth-btn" href="/agentes?id=${p.id === 'codex' ? 'codex' : 'claude'}&tab=provider">${icon('users')} Cuentas</a>` : `${p.auth.loggedIn && p.auth.canLogout ? `<button class="auth-btn program-auth-act" data-id="${esc(p.id)}" data-act="logout" title="Cerrar sesión">${icon('log-out')} Salir</button>` : ''}${!p.auth.loggedIn && p.auth.canLogin ? `<button class="auth-btn program-auth-act" data-id="${esc(p.id)}" data-act="login" title="Inicia el flujo de login — la URL/código aparece en el log del job">${icon('log-in')} Entrar</button>` : ''}`}
         ${!p.auth.loggedIn && !p.auth.canLogin && p.auth.loginHint ? `<span class="auth-hint" title="${esc(p.auth.loginHint)}">${icon('info')} cómo entrar</span>` : ''}
       </div>` : '';
     card.innerHTML = `
@@ -675,8 +699,8 @@ function renderPrograms(programs) {
       <div class="program-actions">
         ${p.installed ? (hasUpdate
           ? `<button class="btn-primary program-update" data-id="${esc(p.id)}">${icon('arrow-up-circle')} Actualizar</button>`
-          : `<span class="program-ok">${icon('check-circle-2')} Al día</span>`)
-          : '<button class="btn-action" disabled>No instalado</button>'}
+          : `<span class="program-ok">${icon(programsChecking ? 'loader' : 'check-circle-2', programsChecking ? 'spin' : '')} ${programsChecking ? 'Comprobando versiones…' : 'Sin actualizaciones detectadas'}</span>`)
+          : p.installable ? `<button class="btn-action program-install" data-id="${esc(p.id)}">${icon('download')} Instalar</button>` : '<span class="listener-note">No instalado</span>'}
       </div>`;
     grid.appendChild(card);
   }
@@ -695,10 +719,12 @@ $('#programs-grid').addEventListener('click', async (e) => {
     } catch (err) { errToast(err); }
     return;
   }
-  const btn = e.target.closest('.program-update');
+  const btn = e.target.closest('.program-update, .program-install');
   if (!btn || btn.disabled) return;
   try {
-    const { job } = await api(`/api/programs/${btn.dataset.id}/update`, { method: 'POST' });
+    const install=btn.classList.contains('program-install');
+    if(install && !(await confirmDialog('Instalar programa', `Se instala ${programsData.find(p=>p.id===btn.dataset.id)?.name} en el host con pnpm.`, 'Instalar')))return;
+    const { job } = await api(`/api/programs/${btn.dataset.id}/${install?'install':'update'}`, { method: 'POST', busy:btn });
     openJobModal(job);
   } catch (err) {
     errToast(err);
@@ -706,8 +732,11 @@ $('#programs-grid').addEventListener('click', async (e) => {
 });
 
 $('#update-all-btn').addEventListener('click', async () => {
+  const pending=programsData.filter(p=>p.installed&&(p.latestVersion||p.pendingUpdates));
+  if(!pending.length){toast('No hay actualizaciones detectadas','ok');return;}
+  if(!await confirmDialog(`Actualizar ${pending.length} programas`,pending.map(p=>p.name).join(', '),'Actualizar'))return;
   try {
-    const { job } = await api('/api/programs/update-all', { method: 'POST' });
+    const { job } = await api('/api/programs/update-all', { method: 'POST',busy:$('#update-all-btn') });
     openJobModal(job);
   } catch (err) {
     errToast(err);
@@ -823,10 +852,10 @@ $('#jobs-history').addEventListener('click', async (e) => {
 $('#jobs-refresh').addEventListener('click', loadJobsHistory);
 
 function openJobModal(job) {
-  // Ask once for notification permission when the user first runs a job —
-  // job completion then alerts even with the tab unfocused (remote usage).
-  if ('Notification' in window && Notification.permission === 'default') {
-    Notification.requestPermission().catch(() => {});
+  if (currentJobId !== job.id) {
+    const pre = $('#job-log'), selection = window.getSelection();
+    if (selection && pre.contains(selection.anchorNode)) selection.removeAllRanges();
+    pre.dataset.logText = ''; pre.scrollTop = 0;
   }
   currentJobId = job.id;
   $('#job-modal').classList.remove('hidden');
@@ -837,10 +866,14 @@ function openJobModal(job) {
   }
 }
 
+let jobPollFlight = false;
 async function pollJob() {
-  if (!currentJobId) return;
+  if (!currentJobId || jobPollFlight) return;
+  jobPollFlight = true;
+  const id = currentJobId;
   try {
-    const { job } = await api(`/api/jobs/${currentJobId}`);
+    const { job } = await api(`/api/jobs/${id}`);
+    if (currentJobId !== id) return;
     renderJob(job);
     if (job.status !== 'running') {
       clearInterval(jobPollTimer);
@@ -852,22 +885,18 @@ async function pollJob() {
       } else {
         toast(`${job.title} completado`, 'ok');
       }
-      // OS notification when the tab isn't focused — useful when managing remotely
-      if ((document.hidden || !document.hasFocus()) && 'Notification' in window && Notification.permission === 'granted') {
-        new Notification(job.title, {
-          body: failed.length ? `${failed.length} paso(s) fallaron` : 'Completado',
-          icon: '/icons/app.svg',
-        });
-      }
       loadPrograms().catch(() => {});
       loadJobsHistory().catch(() => {});
+      document.dispatchEvent(new CustomEvent('axon:job-complete', { detail: job }));
     }
-  } catch {
-    // Job deleted or endpoint unreachable — stop polling instead of
-    // hammering a 404 every second until the modal is closed.
-    clearInterval(jobPollTimer);
-    jobPollTimer = null;
-  }
+  } catch (error) {
+    if (currentJobId !== id) return;
+    if (error.status === 404 || error.status === 401) {
+      clearInterval(jobPollTimer); jobPollTimer = null;
+    }
+    $('#job-status').textContent = error.status === 404 ? 'Trabajo no disponible' : 'Sin conexión · reintentando';
+    $('#job-status').className = 'logs-status logs-status-disconnected';
+  } finally { jobPollFlight = false; }
 }
 
 function renderJob(job) {
@@ -900,13 +929,29 @@ function renderJob(job) {
   }
   refreshIcons();
   const pre = $('#job-log');
-  const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
-  pre.textContent = job.log;
-  if (atBottom) pre.scrollTop = pre.scrollHeight;
+  const text = AxonTerminalTools.clean(job.log);
+  AxonTerminalTools.renderLog(pre, text);
+  const links = [...new Set(AxonTerminalTools.urls(text).map(link => link.url))].slice(-8);
+  const box = $('#job-login-links'), signature = JSON.stringify(links);
+  if (box.dataset.signature !== signature) {
+    box.dataset.signature = signature;
+    box.replaceChildren();
+    for (const url of links) {
+      const row = document.createElement('div'); row.className = 'job-login-link';
+      const a = document.createElement('a'); a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.textContent = url;
+      const button = document.createElement('button'); button.type = 'button'; button.className = 'btn-secondary'; button.textContent = 'Copiar link'; button.onclick = () => AxonTerminalTools.copy(url);
+      row.append(a, button); box.append(row);
+    }
+  }
 }
+
+$('#job-copy').addEventListener('click', () => AxonTerminalTools.copy($('#job-log').dataset.logText || $('#job-log').textContent));
+$('#job-select').addEventListener('click', () => { const range = document.createRange(); range.selectNodeContents($('#job-log')); const s = window.getSelection(); s.removeAllRanges(); s.addRange(range); });
+$('#job-bottom').addEventListener('click', () => { const pre = $('#job-log'); pre.scrollTop = pre.scrollHeight; });
 
 $('#job-close').addEventListener('click', () => {
   $('#job-modal').classList.add('hidden');
+  currentJobId = null;
   if (jobPollTimer) { clearInterval(jobPollTimer); jobPollTimer = null; }
 });
 
@@ -937,10 +982,10 @@ function renderProjects(projects) {
       ? p.running.ports.map((pt) => portLinksHtml(pt, p.running.listeners)).join(' ')
       : (p.port ? `:${p.port}` : '-');
     tr.innerHTML = `
-      <td><strong>${esc(p.name)}</strong>${p.framework ? ` <span class="badge badge-python">${esc(p.framework)}</span>` : ''}</td>
+      <td><a class="project-hub-link" href="/proyectos?id=${encodeURIComponent(p.id)}"><strong>${esc(p.name)}</strong></a>${p.framework ? ` <span class="badge badge-python">${esc(p.framework)}</span>` : ''}</td>
       <td><span class="badge ${TYPE_BADGE[p.type] || 'badge-other'}">${esc(p.type)}</span></td>
       <td><span class="badge ${running ? 'badge-status-running' : 'badge-status-stopped'}">${running ? `corriendo · pid ${p.running.pid}` : 'detenido'}</span></td>
-      <td>${ports}</td>
+      <td>${ports} ${domainLinksHtml(p.domains)}</td>
       <td class="cmd-cell" title="${esc(p.cwd)}">${esc(p.cwd)}</td>
       <td><div class="actions">
         ${running
@@ -964,11 +1009,8 @@ $('#projects-table').addEventListener('click', async (e) => {
   const project = list.find((p) => p.id === id);
 
   if (btn.classList.contains('pj-start')) {
-    btn.disabled = true;
-    btn.innerHTML = icon('loader', 'spin');
-    refreshIcons();
     try {
-      const res = await api(`/api/projects/${id}/start`, { method: 'POST' });
+      const res = await api(`/api/projects/${id}/start`, { method: 'POST',busy:btn });
       toast(`Iniciado (pid ${res.pid})`, 'ok', res.command || '');
       loadProjects();
     } catch (err) {
@@ -979,8 +1021,9 @@ $('#projects-table').addEventListener('click', async (e) => {
       loadProjects();
     }
   } else if (btn.classList.contains('pj-stop')) {
+    if(!await confirmDialog('Detener proyecto',`Se detiene ${project?.name || 'el proyecto'} y deja de atender solicitudes.`,'Detener'))return;
     try {
-      await api(`/api/projects/${id}/stop`, { method: 'POST' });
+      await api(`/api/projects/${id}/stop`, { method: 'POST',busy:btn });
       toast('Proyecto detenido', 'ok');
       loadProjects();
     } catch (err) { errToast(err); }
@@ -1043,9 +1086,9 @@ function openProjectEdit(project) {
 $('#project-edit-cancel').addEventListener('click', () => $('#project-edit-modal').classList.add('hidden'));
 $('#project-edit-delete').addEventListener('click', async () => {
   const id = $('#project-edit-id').value;
-  if (!id || !confirm('¿Eliminar el proyecto del panel? (no borra archivos)')) return;
+  if (!id || !(await confirmDialog('Eliminar proyecto del panel', 'Los archivos del proyecto se conservan.'))) return;
   try {
-    await api(`/api/projects/${id}`, { method: 'DELETE' });
+    await api(`/api/projects/${id}`, { method: 'DELETE',busy:$('#project-edit-delete') });
     $('#project-edit-modal').classList.add('hidden');
     loadProjects();
   } catch (err) { errToast(err); }
@@ -1087,7 +1130,7 @@ async function loadDocker() {
       const ports = ct.publicPorts.length
         ? ct.publicPorts.map((p) => portLinksHtml(p, null)).join(' ')
         : esc(ct.ports || '-');
-      const domainLink = ct.domain ? `<a class="domain-link" href="https://${esc(ct.domain.fullDomain)}" target="_blank">${icon('globe')} ${esc(ct.domain.subdomain)}</a>` : '';
+      const domainLink = ct.domain ? `<a class="domain-link" href="https://${esc(ct.domain.fullDomain)}" target="_blank" rel="noopener noreferrer">${icon('globe')} ${esc(ct.domain.subdomain)}</a>` : '';
       tr.innerHTML = `
         <td><strong>${esc(ct.names)}</strong>${ct.composeProject ? ` <span class="listener-note">${esc(ct.composeProject)}</span>` : ''}</td>
         <td class="cmd-cell">${esc(ct.image)}</td>
@@ -1117,18 +1160,17 @@ $('#docker-table').addEventListener('click', async (e) => {
   if (!btn) return;
   const id = btn.dataset.id;
   if (btn.classList.contains('dk-stop')) {
-    if (!confirm('¿Parar este contenedor?')) return;
+    if (!(await confirmDialog('Detener contenedor', 'Sus servicios van a dejar de responder hasta que vuelvas a iniciarlo.', 'Detener'))) return;
     try {
-      await api(`/api/docker/${id}/stop`, { method: 'POST' });
+      await api(`/api/docker/${id}/stop`, { method: 'POST',busy:btn });
       toast('Contenedor detenido', 'ok');
       loadDocker();
     } catch (err) { errToast(err); }
   } else if (btn.classList.contains('dk-start') || btn.classList.contains('dk-restart')) {
     const restart = btn.classList.contains('dk-restart');
-    if (restart && !confirm(`¿Reiniciar ${id}?`)) return;
-    btn.disabled = true;
+    if (restart && !(await confirmDialog('Reiniciar contenedor', `Se reinicia ${id}.`, 'Reiniciar'))) return;
     try {
-      await api(`/api/docker/${id}/${restart ? 'restart' : 'start'}`, { method: 'POST' });
+      await api(`/api/docker/${id}/${restart ? 'restart' : 'start'}`, { method: 'POST',busy:btn });
       toast(restart ? 'Contenedor reiniciado' : 'Contenedor iniciado', 'ok');
       loadDocker();
     } catch (err) { errToast(err); loadDocker(); }
@@ -1168,8 +1210,8 @@ async function loadDomains() {
       const tr = document.createElement('tr');
       tr.dataset.domainId = d.id;
       tr.innerHTML = `
-        <td class="sel-col"><input type="checkbox" class="dm-sel" data-id="${d.id}"${domainSel.has(d.id) ? ' checked' : ''}></td>
-        <td><a class="domain-link" href="https://${esc(d.fullDomain)}" target="_blank">${icon('globe')} ${esc(d.fullDomain)}</a></td>
+        <td class="sel-col"><input type="checkbox" class="dm-sel" aria-label="Seleccionar ${esc(d.fullDomain)}" data-id="${d.id}"${domainSel.has(d.id) ? ' checked' : ''}></td>
+        <td><a class="domain-link" href="https://${esc(d.fullDomain)}" target="_blank" rel="noopener noreferrer">${icon('globe')} ${esc(d.fullDomain)}</a></td>
         <td class="domain-status"><span class="health-dot health-unknown"></span> <span class="listener-note">…</span></td>
         <td>${esc(d.projectName)} <span class="listener-note">${esc(d.processType)}</span></td>
         <td class="cmd-cell">${esc(d.target)}</td>
@@ -1236,19 +1278,46 @@ function updateDomainBulkbar() {
   $('#domains-sel-all').checked = n > 0 && n === document.querySelectorAll('.dm-sel').length;
 }
 
-function confirmDialog(title, body, okLabel = 'Eliminar') {
+let pendingConfirm = null;
+async function confirmDialog(title, body, okLabel = 'Eliminar') {
+  if (pendingConfirm) await pendingConfirm(false);
+  await customElements.whenDefined('wa-dialog');
+  const dialog = $('#confirm-modal');
+  await dialog.updateComplete;
+  const trigger = document.activeElement;
+  let settled = false, closeFlight;
   return new Promise((resolve) => {
     $('#confirm-title').textContent = title;
     $('#confirm-body').textContent = body;
     $('#confirm-ok').textContent = okLabel;
-    $('#confirm-modal').classList.remove('hidden');
-    const done = (v) => {
-      $('#confirm-modal').classList.add('hidden');
-      $('#confirm-ok').onclick = $('#confirm-cancel').onclick = null;
-      resolve(v);
+    dialog.label = title;
+    const done = value => {
+      if (settled) return closeFlight;
+      settled = true;
+      closeFlight = new Promise(finished => {
+        const finish = () => {
+          dialog.classList.add('hidden');
+          dialog.removeEventListener('wa-hide', cancel);
+          $('#confirm-ok').onclick = $('#confirm-cancel').onclick = null;
+          if (pendingConfirm === done) pendingConfirm = null;
+          if (trigger?.isConnected) trigger.focus({preventScroll:true});
+          resolve(value); finished();
+        };
+        if (dialog.dialog?.open) {
+          dialog.addEventListener('wa-after-hide', finish, {once:true});
+          dialog.open = false;
+        } else finish();
+      });
+      return closeFlight;
     };
+    const cancel = () => done(false);
+    pendingConfirm = done;
+    dialog.addEventListener('wa-hide', cancel);
     $('#confirm-ok').onclick = () => done(true);
     $('#confirm-cancel').onclick = () => done(false);
+    dialog.classList.remove('hidden');
+    dialog.open = true;
+    dialog.addEventListener('wa-after-show', () => $('#confirm-cancel').focus(), {once:true});
   });
 }
 
@@ -1283,7 +1352,7 @@ $('#domains-del-sel').addEventListener('click', async () => {
   );
   if (!ok) return;
   try {
-    const res = await api('/api/domains/bulk-delete', { method: 'POST', body: { ids } });
+    const res = await api('/api/domains/bulk-delete', { method: 'POST', body: { ids },busy:$('#domains-del-sel') });
     removeDomainRows(ids.filter((id) => !(res.failedIds || []).includes(id)));
     toast(`${res.removed} eliminado${res.removed === 1 ? '' : 's'}${res.failed ? `, ${res.failed} fallaron` : ''}`, res.failed ? 'warn' : 'ok');
     if (!res.syncOk) toast('El sync del túnel falló — revisá cloudflared', 'err');
@@ -1305,7 +1374,7 @@ $('#domains-table').addEventListener('click', async (e) => {
     const ok = await confirmDialog('Eliminar dominio', 'Se borra el DNS de Cloudflare y la ruta del túnel.');
     if (!ok) return;
     try {
-      await api(`/api/domains/${id}`, { method: 'DELETE' });
+      await api(`/api/domains/${id}`, { method: 'DELETE',busy:btn });
       removeDomainRows([id]);
       toast('Dominio eliminado', 'ok');
       loadDomains();
@@ -1359,7 +1428,7 @@ $('#domain-form').addEventListener('submit', async (e) => {
     }
     $('#domain-modal').classList.add('hidden');
     toast('Dominio guardado', 'ok');
-    loadDomains();
+    await Promise.all([loadDomains(), loadPorts(), loadProjects()]);
   } catch (err) {
     $('#domain-error').textContent = err.message + (err.detail ? ` — ${err.detail}` : '');
   }
@@ -1367,7 +1436,7 @@ $('#domain-form').addEventListener('submit', async (e) => {
 
 // ---------- Settings ----------
 
-$('#settings-btn').addEventListener('click', async () => {
+async function loadSettings() {
   try {
     const { config } = await api('/api/config');
     const s = config.settings;
@@ -1380,37 +1449,55 @@ $('#settings-btn').addEventListener('click', async () => {
       .map(([port, svc]) => `${port}:${svc.name}:${svc.icon || ''}`)
       .join('\n');
     $('#settings-notify-url').value = s.notifyUrl || '';
+    $('#settings-notify-provider').value = s.notifyProvider || 'auto';
+    $('#settings-host-user').value = s.hostUser || '';
+    localStorage.setItem('axon:scan-interval', String(s.scanIntervalMs));
     updateTotpStatus(!!config.auth?.totpEnabled);
     $('#settings-error').textContent = '';
     $('#settings-modal').classList.remove('hidden');
+    window.AxonSettings?.loaded();
   } catch (err) { errToast(err); }
-});
+}
+$('#settings-btn').addEventListener('click', () => window.AxonNavigation?.ready
+  ? window.AxonNavigation.go('/configuracion') : loadSettings());
+window.AxonPages ||= {};
+window.AxonPages.settings = { restore: loadSettings };
 
-$('#settings-cancel').addEventListener('click', () => $('#settings-modal').classList.add('hidden'));
+$('#settings-cancel').addEventListener('click', () => {
+  if (window.AxonNavigation?.ready) {
+    if (window.AxonNavigation.current.index > 0) history.back(); else window.AxonNavigation.go('/');
+  } else $('#settings-modal').classList.add('hidden');
+});
 
 $('#settings-form').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const numList = (v) => v.split(/[,\n]/).map((x) => parseInt(x.trim(), 10)).filter((n) => !Number.isNaN(n));
+  const numList = (v) => v.split(/[,\n]/).map(x=>x.trim()).filter(Boolean).map(x=>{if(!/^\d+$/.test(x))throw new Error('Los puertos y PID deben ser números enteros, separados por comas.');return Number(x);});
   const strList = (v) => v.split(/[,\n]/).map((x) => x.trim()).filter(Boolean);
-  const knownServices = {};
-  for (const line of $('#settings-known-services').value.split('\n')) {
-    const m = line.match(/^(\d+):([^:]+):?(.*)$/);
-    if (m) knownServices[m[1]] = { name: m[2].trim(), icon: m[3].trim() || 'wrench' };
-  }
   try {
+    const knownServices = {};
+    for (const line of $('#settings-known-services').value.split('\n').map(x=>x.trim()).filter(Boolean)) {
+      const m = line.match(/^(\d+):([^:]+):?(.*)$/);
+      if(!m)throw new Error('Cada servicio conocido debe usar el formato puerto:nombre:icono.');
+      knownServices[m[1]] = { name: m[2].trim(), icon: m[3].trim() || 'wrench' };
+    }
     await api('/api/config', {
       method: 'PUT',
       body: {
-        scanIntervalMs: parseInt($('#settings-scan-interval').value, 10) || 5000,
+        scanIntervalMs: Number($('#settings-scan-interval').value),
         protectedPids: numList($('#settings-protected-pids').value),
         protectedPorts: numList($('#settings-protected-ports').value),
         ignoredPatterns: strList($('#settings-ignored-patterns').value),
         scanDirs: strList($('#settings-scan-dirs').value),
         notifyUrl: $('#settings-notify-url').value.trim(),
+        notifyProvider: $('#settings-notify-provider').value,
+        hostUser: $('#settings-host-user').value.trim(),
         knownServices,
       },
     });
-    $('#settings-modal').classList.add('hidden');
+    if (!window.AxonNavigation?.ready) $('#settings-modal').classList.add('hidden');
+    localStorage.setItem('axon:scan-interval', $('#settings-scan-interval').value);
+    scanIntervalMs = Number($('#settings-scan-interval').value); scheduleSectionPoll();
+    window.AxonSettings?.loaded();
     toast('Configuración guardada', 'ok');
   } catch (err) {
     $('#settings-error').textContent = err.message;
@@ -1478,37 +1565,37 @@ $('#totp-code').addEventListener('keydown', (e) => {
 // ---------- Boot ----------
 
 let portsTimer = null;
+let scanIntervalMs = 5000;
 
 function bootMain() {
+  document.dispatchEvent(new Event('axon:authenticated'));
   loadStats();
-  loadPorts();
-  // Preload the other sections so sidebar counters are populated immediately
-  loadProjects().catch(() => {});
-  loadDocker().catch(() => {});
-  loadDomains().catch(() => {});
-  loadPrograms().catch(() => {});
-  setInterval(loadStats, 5000);
-  portsTimer = setInterval(() => {
-    // don't clobber the table while a modal that depends on ports data is open
-    if ($('#kill-modal').classList.contains('hidden') && $('#tab-ports').classList.contains('active')) {
-      loadPorts();
+  // Only the visible section loads; counters are filled when visited.
+  setInterval(() => { if (!document.hidden && !$('#main-screen').classList.contains('hidden')) loadStats(); }, 5000);
+  scheduleSectionPoll();
+}
+function scheduleSectionPoll() {
+  clearTimeout(portsTimer);
+  portsTimer = setTimeout(async () => {
+    if (!document.hidden && !$('#main-screen').classList.contains('hidden') && !document.querySelector('.modal:not(.hidden)') && ['ports','projects','docker','domains'].includes(activeTabName)) {
+      await loaders[activeTabName]?.();
     }
-  }, 5000);
+    scheduleSectionPoll();
+  }, Math.max(1000, Math.min(60_000, scanIntervalMs)));
+
 }
 
 // ---------- Theme + sidebar ----------
 
-const THEME_KEY = 'pm-theme';
-function setTheme(t) {
-  document.documentElement.dataset.theme = t;
-  localStorage.setItem(THEME_KEY, t);
-  $$('.theme-option').forEach((b) => b.classList.toggle('active', b.dataset.theme === t));
-  drawSpark('spark-cpu', sparkHist.cpu);
-  drawSpark('spark-ram', sparkHist.ram);
-}
-$$('.theme-option').forEach((b) => b.addEventListener('click', () => setTheme(b.dataset.theme)));
-setTheme(localStorage.getItem(THEME_KEY) || 'axon');
-
+function setTheme(t) { window.AxonThemes?.select(t); }
+document.addEventListener('axon:theme', () => {
+  drawSpark('spark-cpu', sparkHist.cpu); drawSpark('spark-ram', sparkHist.ram);
+  const style = getComputedStyle(document.documentElement);
+  for (const tab of termSessions.values()) if(tab.term) {
+    tab.term.options.theme = { background:style.getPropertyValue('--terminal-bg').trim(), foreground:style.getPropertyValue('--terminal-fg').trim(), cursor:style.getPropertyValue('--accent').trim() };
+    tab.term.options.fontFamily = style.getPropertyValue('--font-mono').trim();
+  }
+});
 $('#sidebar-collapse').addEventListener('click', () => {
   document.body.classList.toggle('sidebar-collapsed');
   localStorage.setItem('pm-sidebar', document.body.classList.contains('sidebar-collapsed') ? '1' : '0');
@@ -1532,6 +1619,10 @@ let cmdkItems = [];
 function cmdkCommands() {
   const net = netHost();
   const cmds = [
+    {icon:'house',label:'Ir a Inicio',hint:'sección',run:()=>gotoTab('dashboard')},
+    {icon:'folder-open',label:'Ir a Archivos',hint:'sección',run:()=>gotoTab('files')},
+    {icon:'images',label:'Ir a Biblioteca',hint:'sección',run:()=>gotoTab('library')},
+    {icon:'terminal',label:'Ir a Terminal',hint:'sección',run:()=>gotoTab('terminal')},
     { icon: 'plug', label: 'Ir a Puertos', hint: 'sección', run: () => gotoTab('ports') },
     { icon: 'folder-git-2', label: 'Ir a Proyectos', hint: 'sección', run: () => gotoTab('projects') },
     { icon: 'package', label: 'Ir a Programas', hint: 'sección', run: () => gotoTab('programs') },
@@ -1779,27 +1870,42 @@ function saveTermSessions() {
 
 // opts.exec: open a docker exec shell into that container id/name instead of a
 // tmux session. opts.label: text shown on the tab (defaults to name).
-function openTermTab(name, cwd, opts = {}) {
+async function openTermTab(name, cwd, opts = {}) {
+  if(cwd&&!opts.exec){try{await api('/api/files?path='+encodeURIComponent(cwd));}catch(e){errToast(e);return;}}
+  try { await AxonAssets.terminal(); } catch (err) { errToast(err); return; }
   if (termSessions.has(name)) { activateTermTab(name); return termSessions.get(name); }
   const page = document.createElement('div');
   page.className = 'term-page';
   $('#term-pages').appendChild(page);
 
-  const t = new Terminal({ cursorBlink: true, fontSize: 14, fontFamily: 'JetBrains Mono, monospace', theme: { background: '#0b0e14' } });
+  const t = new Terminal({ cursorBlink: true, fontSize: Math.max(12, Math.min(20, Number(localStorage.getItem('axon:terminal-font')) || 14)), fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--font-mono').trim(), theme: { background: getComputedStyle(document.documentElement).getPropertyValue('--terminal-bg').trim(), foreground: getComputedStyle(document.documentElement).getPropertyValue('--terminal-fg').trim(), cursor: getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() } });
   const fit = new FitAddon.FitAddon();
   t.loadAddon(fit);
   t.open(page);
+  t.options.scrollback = 10000;
+  t.options.altClickMovesCursor = false;
+  t.options.linkHandler = { activate: (_event, url) => AxonTerminalTools.open(url) };
+  AxonTerminalTools.attach(t, page);
 
-  const tabBtn = document.createElement('button');
+  const tabBtn = document.createElement('div');
   tabBtn.className = 'term-tab';
-  tabBtn.innerHTML = `${icon('terminal')} <span>${esc(opts.label || name)}</span> <span class="term-tab-x" data-x="1">×</span>`;
-  tabBtn.addEventListener('click', (e) => {
-    if (e.target.dataset.x) { closeTermTab(name); return; }
-    activateTermTab(name);
+  tabBtn.innerHTML = `<button class="term-tab-select" type="button">${icon('terminal')} <span>${esc(opts.label || name)}</span></button><button class="term-tab-x" type="button" aria-label="Cerrar sesión ${esc(opts.label || name)}">×</button>`;
+  tabBtn.querySelector('.term-tab-select').addEventListener('click', () => activateTermTab(name));
+  tabBtn.querySelector('.term-tab-x').addEventListener('click', async () => {
+    if(opts.exec && !(await confirmDialog('Cerrar terminal del contenedor', 'Se cierra esta sesión interactiva.', 'Cerrar sesión')))return;
+    closeTermTab(name);
   });
   $('#term-tabs').appendChild(tabBtn);
 
-  const sess = { term: t, fit, ws: null, page, tabBtn, name, exec: opts.exec || '', pendingCwd: cwd || '' };
+  const sess = { term: t, fit, ws: null, page, tabBtn, name, exec: opts.exec || '', pendingCwd: cwd || '', pendingCommand: opts.command || '', retries: 0, closed: false, retryTimer: null };
+  t.parser.registerOscHandler(777, data => {
+    if (data !== 'axon-ready') return false;
+    if (sess.ws?.readyState === 1) {
+      if (sess.pendingCwd) { sess.ws.send(JSON.stringify({ t: 'i', d: `cd '${sess.pendingCwd.replace(/'/g, `'"'"'`)}'\n` })); sess.pendingCwd = ''; }
+      if (sess.pendingCommand) { sess.ws.send(JSON.stringify({ t: 'i', d: sess.pendingCommand + '\n' })); sess.pendingCommand = ''; }
+    }
+    return true;
+  });
   termSessions.set(name, sess);
   saveTermSessions();
 
@@ -1812,7 +1918,15 @@ function openTermTab(name, cwd, opts = {}) {
   return sess;
 }
 
+function updateTermStatus() {
+  const el = $('#term-connection'), sess = termSessions.get(activeTerm);
+  if (!el) return;
+  const ready = sess?.ws?.readyState;
+  el.textContent = !sess ? 'Sin sesión' : ready === 1 ? `Conectada · ${sess.name}` : ready === 0 ? 'Conectando…' : 'Desconectada · podés reconectar';
+}
 function connectTermTab(sess) {
+  if (sess.closed || sess.ws?.readyState === 0 || sess.ws?.readyState === 1) return;
+  clearTimeout(sess.retryTimer);
   const old = sess.ws;
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const wsUrl = sess.exec
@@ -1824,24 +1938,36 @@ function connectTermTab(sess) {
   sess.ws = ws;
   if (old) { try { old.close(); } catch { /* gone */ } }
   ws.binaryType = 'arraybuffer';
+  updateTermStatus();
   ws.onopen = () => {
+    if (sess.ws !== ws || sess.closed) return;
+    sess.retries = 0; updateTermStatus();
     sess.tabBtn.classList.remove('term-tab-offline');
-    if (sess.pendingCwd) { ws.send(JSON.stringify({ t: 'i', d: `cd ${JSON.stringify(sess.pendingCwd)}\n` })); sess.pendingCwd = ''; }
   };
-  ws.onmessage = (e) => sess.term.write(new Uint8Array(e.data));
+  ws.onmessage = (e) => {
+    if (sess.ws !== ws || sess.closed) return;
+    sess.term.write(typeof e.data === 'string' ? e.data : new Uint8Array(e.data));
+  };
   ws.onclose = () => {
     // A stale socket closing must not mark the replacement as offline.
-    if (sess.ws !== ws) return;
-    sess.term.write('\r\n\x1b[33m[desconectado — click para reconectar]\x1b[0m\r\n');
+    if (sess.ws !== ws || sess.closed) return;
+    updateTermStatus();
+    if (!sess.exec && sess.retries < 6) {
+      const delay = Math.min(15_000, 1000 * 2 ** sess.retries++);
+      sess.retryTimer = setTimeout(() => { if (!document.hidden && activeTabName === 'terminal') connectTermTab(sess); }, delay);
+    }
+    sess.term.write('\r\n[desconectado — click para reconectar]\r\n');
     sess.tabBtn.classList.add('term-tab-offline');
   };
 }
 
 function activateTermTab(name) {
   activeTerm = name;
+  updateTermStatus();
   for (const [n, s] of termSessions) {
     s.page.classList.toggle('active', n === name);
     s.tabBtn.classList.toggle('active', n === name);
+    s.tabBtn.querySelector('.term-tab-select')?.setAttribute('aria-pressed', String(n===name));
   }
   const s = termSessions.get(name);
   if (s) requestAnimationFrame(() => { s.fit.fit(); s.term.focus(); });
@@ -1850,6 +1976,7 @@ function activateTermTab(name) {
 function closeTermTab(name) {
   const s = termSessions.get(name);
   if (!s) return;
+  s.closed = true; clearTimeout(s.retryTimer);
   try { s.ws?.close(); } catch { /* gone */ }
   s.term.dispose();
   s.page.remove();
@@ -1861,13 +1988,14 @@ function closeTermTab(name) {
     if (next) activateTermTab(next);
     else activeTerm = null;
   }
+  updateTermStatus();
 }
 
 function openTerm(cwd) {
   document.querySelector('.tab-btn[data-tab="terminal"]')?.click();
   if (cwd) {
     termCounter++;
-    openTermTab(`axon-term-${termCounter}`, cwd);
+    openTermTab(`axon-term-${Date.now().toString(36)}-${termCounter}`, cwd);
   } else if (!termSessions.size) {
     termCounter++;
     openTermTab('axon-term');
@@ -1877,7 +2005,7 @@ function openTerm(cwd) {
 // Reconnect on click when offline
 $('#term-pages').addEventListener('click', () => {
   const s = termSessions.get(activeTerm);
-  if (s && s.ws?.readyState !== 1) connectTermTab(s);
+  if (s && s.ws?.readyState > 1) connectTermTab(s);
 });
 
 $('#term-btn').addEventListener('click', () => openTerm());
@@ -1885,21 +2013,16 @@ $('#term-new-tab').addEventListener('click', () => {
   termCounter++;
   openTermTab(`axon-term-${termCounter}`);
 });
-window.addEventListener('resize', () => { if (activeTerm) termSessions.get(activeTerm)?.fit.fit(); });
+new ResizeObserver(() => { if (activeTerm && activeTabName === 'terminal') termSessions.get(activeTerm)?.fit.fit(); }).observe($('#term-pages'));
+document.addEventListener('axon:terminal-font', e => { for(const s of termSessions.values()) s.term.options.fontSize = e.detail; termSessions.get(activeTerm)?.fit.fit(); });
+document.addEventListener('visibilitychange', () => { if(!document.hidden && activeTabName === 'terminal') { const s=termSessions.get(activeTerm); if(s)connectTermTab(s); } });
 
 // openTermCmd(cmd): open a fresh terminal tab and type a command into it —
 // used by other features (docker exec, journalctl viewer, kill menus).
-function openTermCmd(cmd) {
+function openTermCmd(cmd, opts = {}) {
   document.querySelector('.tab-btn[data-tab="terminal"]')?.click();
   termCounter++;
-  const sess = openTermTab(`axon-term-${termCounter}`);
-  const t = setInterval(() => {
-    if (sess.ws?.readyState === 1) {
-      clearInterval(t);
-      sess.ws.send(JSON.stringify({ t: 'i', d: cmd + '\n' }));
-    }
-  }, 200);
-  setTimeout(() => clearInterval(t), 8000);
+  return openTermTab(`axon-term-${Date.now().toString(36)}-${termCounter}`, null, { ...opts, command: cmd });
 }
 
 // openTermExec(id, name): open a fresh terminal tab running an interactive
@@ -1912,14 +2035,16 @@ function openTermExec(id, name) {
   openTermTab(`pm-exec-${termCounter}`, '', { exec: id, label });
 }
 
-loaders.terminal = () => {
+loaders.terminal = async () => {
+  try { await AxonAssets.terminal(); } catch (err) { errToast(err); return; }
+  updateTermStatus();
   if (!termSessions.size) {
     const saved = savedTermSessions();
     termCounter = saved.length;
-    for (const name of saved) openTermTab(name);
-    if (!termSessions.size) openTermTab('axon-term');
+    for (const name of saved) await openTermTab(name);
+    if (!termSessions.size) await openTermTab('axon-term');
   } else if (activeTerm) {
-    termSessions.get(activeTerm)?.fit.fit();
+    const s=termSessions.get(activeTerm); s?.fit.fit(); if(s)connectTermTab(s);
   }
 };
 
@@ -1930,19 +2055,28 @@ loaders.terminal = () => {
 const BROWSER_PORT = 5800;
 const browserUrl = `/p/${BROWSER_PORT}/?autoconnect=true&resize=scale&path=p/${BROWSER_PORT}/websockify`;
 let browserLoaded = false;
+let browserTicket = 0;
 
-function loadBrowser() {
-  if (!browserLoaded) {
+async function loadBrowser() {
+  if (browserLoaded) return;
+  const ticket = ++browserTicket, status = $('#browser-state');
+  status.dataset.state='loading'; status.innerHTML=`${icon('loader','spin')} Conectando con Chromium…`; refreshIcons();
+  try {
+    const result=await api('/api/browser/status');
+    if(ticket!==browserTicket)return;
+    if(!result.available)throw new Error('Chromium no responde. Revisá el contenedor desde Docker.');
     $('#browser-frame').src = browserUrl;
     browserLoaded = true;
-  }
+    status.textContent='Abriendo la sesión del navegador…';
+  } catch(e) { if(ticket!==browserTicket)return;status.dataset.state='error';status.textContent=e.message + ' Usá Recargar para reintentar.'; }
 }
-function unloadBrowser() {
-  if (browserLoaded) {
-    $('#browser-frame').src = 'about:blank';
-    browserLoaded = false;
-  }
+function unloadBrowser(force = false) {
+  // Preserve the established viewer when moving between sections.
+  if (force) { browserTicket++; $('#browser-frame').src='about:blank'; browserLoaded=false; }
 }
+$('#browser-frame').addEventListener('load',()=>{
+  if(browserLoaded){$('#browser-state').dataset.state='ready';$('#browser-state').textContent='Visor del navegador cargado';}
+});
 
 loaders.navegador = loadBrowser;
 
@@ -1962,7 +2096,7 @@ async function openInServerBrowser(url) {
 window.openInServerBrowser = openInServerBrowser;
 
 $('#browser-open-ext').addEventListener('click', () => window.open(browserUrl, '_blank', 'noopener'));
-$('#browser-reload').addEventListener('click', () => { unloadBrowser(); loadBrowser(); });
+$('#browser-reload').addEventListener('click', e => AxonUI.busy(e.currentTarget, async () => { unloadBrowser(true); await loadBrowser(); }));
 
 // ---------- QR pairing ----------
 
@@ -1988,7 +2122,7 @@ $('#pair-close').addEventListener('click', () => $('#pair-modal').classList.add(
 // ---------- Remote power ----------
 
 async function powerAction(action, word) {
-  const typed = prompt(`El servidor se va a ${word === 'REINICIAR' ? 'reiniciar' : 'apagar'} y el dashboard se desconecta.\n\nEscribí ${word} para confirmar:`);
+  const typed = await window.AxonSettings.promptPower(word);
   if (typed === null) return;
   try {
     await api('/api/system/power', { method: 'POST', body: { action, confirm: typed.trim().toUpperCase() } });

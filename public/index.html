@@ -9,30 +9,42 @@
   <link rel="icon" type="image/svg+xml" href="/marca/favicon.svg">
   <link rel="apple-touch-icon" href="/marca/app%20icon.svg">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>AXON</title>
-  <link rel="stylesheet" href="/app.css?v=18">
-  <link rel="stylesheet" href="/feat-files.css?v=21">
-  <link rel="stylesheet" href="/feat-scripts.css?v=18">
-  <link rel="stylesheet" href="/feat-metrics.css?v=18">
-  <link rel="stylesheet" href="/feat-drop.css?v=18">
-  <link rel="stylesheet" href="/feat-ops.css?v=18">
-  <link rel="stylesheet" href="/feat-notify.css?v=18">
-  <link rel="stylesheet" href="/feat-compose.css?v=18">
-  <link rel="stylesheet" href="/feat-agents.css?v=18">
-  <link rel="stylesheet" href="/feat-library.css?v=2">
+  <link rel="stylesheet" href="/app.css?v=20261005f">
+  <link rel="axon-feature" data-axon-style="/feat-files.css?v=20261004maintenance">
+  <link rel="axon-feature" data-axon-style="/feat-scripts.css?v=18">
+  <link rel="axon-feature" data-axon-style="/feat-metrics.css?v=18">
+  <link rel="axon-feature" data-axon-style="/feat-drop.css?v=18">
+  <link rel="axon-feature" data-axon-style="/feat-ops.css?v=18">
+  <link rel="axon-feature" data-axon-style="/feat-notify.css?v=18">
+  <link rel="axon-feature" data-axon-style="/feat-compose.css?v=20261004maintenance">
+  <link rel="axon-feature" data-axon-style="/feat-agents.css?v=20">
+  <link rel="axon-feature" data-axon-style="/agent-context.css?v=1">
+  <link rel="axon-feature" data-axon-style="/feat-library.css?v=7481e71e1c95">
+  <link rel="axon-feature" data-axon-style="/navigation.css?v=1">
+  <link rel="axon-feature" data-axon-style="/dashboard.css?v=1">
+  <link rel="axon-feature" data-axon-style="/polish.css?v=1">
+  <link rel="axon-feature" data-axon-style="/maintenance.css?v=1">
+  <link rel="axon-feature" data-axon-style="/platform.css?v=1">
+  <link rel="axon-feature" data-axon-style="/vendor/webawesome/styles/themes/default.css?v=3.14.0">
+  <link rel="stylesheet" href="/design-system.css?v=20261005-menu">
 </head>
 <body>
   <div id="app">
+    <div id="boot-screen" class="boot-screen" role="status"><img src="/marca/Isotipo.svg" alt=""><span class="boot-spinner" aria-hidden="true"></span><p id="boot-message">Preparando tu espacio…</p><button type="button" id="boot-retry" class="btn-secondary hidden">Reintentar</button></div>
     <div id="login-screen" class="login-screen hidden">
       <div class="login-box">
         <div class="brand"><img src="/marca/isologotipo.svg" alt="AXON" class="brand-logo"></div>
+        <span class="login-eyebrow">TU ESPACIO DE CONTROL</span><h1>Bienvenido a Axon</h1><p class="login-intro">Proyectos, archivos y servidor. Todo en un lugar.</p>
         <form id="login-form">
+          <label for="username">Usuario</label>
           <input type="text" id="username" placeholder="Usuario" autocomplete="username" required>
-          <input type="password" id="password" placeholder="Contraseña" autocomplete="current-password" required>
-          <input type="text" id="login-code" class="hidden" placeholder="Código de verificación" autocomplete="one-time-code" inputmode="numeric" maxlength="6">
+          <label for="password">Contraseña</label><div class="password-field"><input type="password" id="password" placeholder="Contraseña" autocomplete="current-password" required><button type="button" id="password-toggle" class="icon-btn" aria-label="Mostrar contraseña" aria-pressed="false"><i data-lucide="eye"></i></button></div>
+          <label for="login-code" id="login-code-label" class="hidden">Código de tu autenticador</label><input type="text" id="login-code" class="hidden" placeholder="Código de verificación" autocomplete="one-time-code" inputmode="numeric" maxlength="6">
           <button type="submit" class="btn-primary">Ingresar</button>
-          <div id="login-error" class="error"></div>
+          <div id="login-error" class="error" role="alert" aria-live="polite"></div><p class="login-security"><i data-lucide="shield-check"></i> Acceso privado a tu servidor</p>
         </form>
       </div>
     </div>
@@ -46,6 +58,7 @@
           </div>
 
           <nav class="sidebar-nav">
+            <button class="nav-item tab-btn" data-tab="dashboard"><i data-lucide="house" class="lucide-icon"></i><span class="nav-label">Inicio</span></button>
             <div class="nav-section-label"><span>Monitor</span></div>
             <button class="nav-item tab-btn active" data-tab="ports">
               <i data-lucide="plug" class="lucide-icon"></i>
@@ -57,6 +70,10 @@
               <span class="nav-label">Proyectos</span>
               <span class="nav-count" id="nav-count-projects"></span>
             </button>
+            <button class="nav-item tab-btn" data-tab="backups"><i data-lucide="archive" class="lucide-icon"></i><span class="nav-label">Respaldos</span></button>
+            <button class="nav-item tab-btn" data-tab="audit"><i data-lucide="history" class="lucide-icon"></i><span class="nav-label">Historial</span></button>
+            <button class="nav-item tab-btn" data-tab="access"><i data-lucide="key-round" class="lucide-icon"></i><span class="nav-label">Integraciones</span></button>
+            <button class="nav-item tab-btn" data-tab="desktop"><i data-lucide="monitor" class="lucide-icon"></i><span class="nav-label">Escritorio</span></button>
             <button class="nav-item tab-btn" data-tab="docker">
               <i data-lucide="container" class="lucide-icon"></i>
               <span class="nav-label">Docker</span>
@@ -81,6 +98,7 @@
             </button>
 
             <div class="nav-section-label"><span>Sistema</span></div>
+            <button class="nav-item tab-btn" data-tab="storage"><i data-lucide="hard-drive" class="lucide-icon"></i><span class="nav-label">Almacenamiento</span></button>
             <button class="nav-item tab-btn" data-tab="programs">
               <i data-lucide="package" class="lucide-icon"></i>
               <span class="nav-label">Programas</span>
@@ -93,21 +111,7 @@
           </nav>
 
           <div class="sidebar-footer">
-            <div class="nav-section-label"><span>Tema</span></div>
-            <div class="theme-picker">
-              <button class="theme-option active" data-theme="axon">
-                <span class="theme-swatch axon"></span><span class="nav-label">Axon</span>
-              </button>
-              <button class="theme-option" data-theme="linear">
-                <span class="theme-swatch linear"></span><span class="nav-label">Linear</span>
-              </button>
-              <button class="theme-option" data-theme="netdata">
-                <span class="theme-swatch netdata"></span><span class="nav-label">Netdata</span>
-              </button>
-              <button class="theme-option" data-theme="warp">
-                <span class="theme-swatch warp"></span><span class="nav-label">Warp</span>
-              </button>
-            </div>
+            <span class="sidebar-caption">Tu espacio de trabajo</span>
             <div class="sidebar-toggle-row">
               <button class="sidebar-toggle" id="sidebar-collapse" title="Colapsar">
                 <i data-lucide="panel-left-close" class="lucide-icon"></i>
@@ -123,17 +127,29 @@
               <i data-lucide="search" class="lucide-icon"></i> Buscar o ejecutar…
               <kbd>⌘K</kbd>
             </button>
+            <div class="topbar-actions">
+              <button type="button" class="icon-btn" id="host-disks-open" aria-label="Explorar discos" title="Explorar discos"><i data-lucide="hard-drive"></i></button>
+              <button type="button" class="icon-btn" id="theme-toggle" aria-label="Cambiar modo de color" title="Cambiar modo de color"><i data-lucide="sun"></i></button>
+              <button id="notif-bell" class="icon-btn" title="Notificaciones" aria-label="Notificaciones"><i data-lucide="bell" class="lucide-icon"></i><span id="notif-badge" class="hidden"></span></button>
+              <wa-dropdown id="account-menu" placement="bottom-end" distance="8">
+                <button slot="trigger" class="account-trigger" aria-label="Menú de cuenta"><span class="account-avatar">A</span><i data-lucide="chevron-down"></i></button>
+                <wa-dropdown-item value="terminal"><span slot="icon" aria-hidden="true"><i data-lucide="terminal"></i></span>Abrir terminal</wa-dropdown-item>
+                <wa-dropdown-item value="pair"><span slot="icon" aria-hidden="true"><i data-lucide="qr-code"></i></span>Vincular dispositivo</wa-dropdown-item>
+                <wa-dropdown-item value="appearance"><span slot="icon" aria-hidden="true"><i data-lucide="sun-moon"></i></span>Apariencia</wa-dropdown-item>
+                <wa-dropdown-item value="settings"><span slot="icon" aria-hidden="true"><i data-lucide="settings"></i></span>Configuración y seguridad</wa-dropdown-item>
+                <wa-divider></wa-divider>
+                <wa-dropdown-item value="logout" variant="danger"><span slot="icon" aria-hidden="true"><i data-lucide="log-out"></i></span>Cerrar sesión</wa-dropdown-item>
+              </wa-dropdown>
+            </div>
+            <div hidden id="legacy-shell-controls">
+              <button id="term-btn" type="button">Terminal</button><button id="pair-btn" type="button">Vincular dispositivo</button><button id="settings-btn" type="button">Configuración</button><button id="logout-btn" type="button">Salir</button><button id="theme-current" type="button">Elegir tema</button>
             <div id="server-stats" class="server-stats">
               <div class="stat" title="CPU"><span class="stat-label">CPU</span><canvas class="spark" id="spark-cpu" width="56" height="16"></canvas><span class="stat-value" id="stat-cpu">-</span></div>
               <div class="stat" title="RAM"><span class="stat-label">RAM</span><canvas class="spark" id="spark-ram" width="56" height="16"></canvas><span class="stat-value" id="stat-ram">-</span></div>
               <div class="stat" title="Disco"><span class="stat-label">DISK</span><span class="stat-value" id="stat-disk">-</span></div>
               <div class="stat" title="Load average"><span class="stat-label">LOAD</span><span class="stat-value" id="stat-load">-</span></div>
             </div>
-            <button id="term-btn" class="btn-secondary" title="Terminal del servidor"><i data-lucide="terminal" class="lucide-icon"></i></button>
-            <button id="pair-btn" class="btn-secondary" title="Vincular otro dispositivo (QR)"><i data-lucide="qr-code" class="lucide-icon"></i></button>
-            <button id="settings-btn" class="btn-secondary" title="Configuración"><i data-lucide="settings" class="lucide-icon"></i></button>
-            <button id="notif-bell" class="btn-secondary" title="Notificaciones"><i data-lucide="bell" class="lucide-icon"></i><span id="notif-badge" class="hidden"></span></button>
-            <button id="logout-btn" class="btn-secondary" title="Salir"><i data-lucide="log-out" class="lucide-icon"></i></button>
+            </div>
           </header>
 
           <main class="content">
@@ -270,7 +286,7 @@
                 <table id="domains-table">
                   <thead>
                     <tr>
-                      <th class="sel-col"><input type="checkbox" id="domains-sel-all"></th>
+                      <th class="sel-col"><input type="checkbox" id="domains-sel-all" aria-label="Seleccionar todos los dominios"></th>
                       <th>Dominio</th>
                       <th>Estado</th>
                       <th>Proyecto</th>
@@ -305,9 +321,14 @@
               </div>
               <p class="listener-note browser-note">Chrome real corriendo en el servidor — los localhost, las cookies y las sesiones son del servidor. Todo lo que veas acá ocurre allá.</p>
               <div class="browser-frame-wrap">
+                <div id="browser-state" class="browser-state" role="status" aria-live="polite"></div>
                 <iframe id="browser-frame" title="Navegador del servidor" allow="clipboard-read; clipboard-write"></iframe>
               </div>
             </section>
+            <section id="tab-backups" class="tab-content"><div class="section-header"><h2>Respaldos</h2></div><div id="backup-content" class="platform-view"></div></section>
+            <section id="tab-audit" class="tab-content"><div class="section-header"><h2>Historial de operaciones</h2></div><div id="audit-content" class="platform-view"></div></section>
+            <section id="tab-access" class="tab-content"><div class="section-header"><h2>Integraciones</h2></div><div id="access-content" class="platform-view"></div></section>
+            <section id="tab-desktop" class="tab-content"><div class="section-header"><h2>Escritorio del servidor</h2></div><div id="desktop-content" class="platform-view"></div></section>
           </main>
         </div>
       </div>
@@ -416,7 +437,9 @@
           <button type="button" id="job-close" class="btn-secondary">Cerrar</button>
         </div>
       </div>
-      <pre id="job-log" class="logs-pre"></pre>
+      <div id="job-login-links" class="job-login-links" aria-label="Enlaces del login"></div>
+      <div class="job-output-tools"><span class="listener-note">Podés seleccionar texto y abrir los enlaces.</span><button type="button" id="job-copy" class="btn-secondary">Copiar salida</button><button type="button" id="job-select" class="btn-secondary">Seleccionar todo</button><button type="button" id="job-bottom" class="btn-secondary">Ir al final</button></div>
+      <pre id="job-log" class="logs-pre" tabindex="0" aria-label="Salida de la tarea"></pre>
     </div>
   </div>
 
@@ -503,16 +526,14 @@
   </div>
 
   <!-- Generic confirm modal -->
-  <div id="confirm-modal" class="modal hidden">
-    <div class="modal-content">
-      <h3 id="confirm-title">Confirmar</h3>
-      <p id="confirm-body" class="listener-note"></p>
-      <div class="modal-actions">
-        <button id="confirm-cancel" class="btn-secondary">Cancelar</button>
-        <button id="confirm-ok" class="btn-danger">Eliminar</button>
-      </div>
+  <wa-dialog id="confirm-modal" class="hidden" label="Confirmar" light-dismiss>
+    <span id="confirm-title" slot="label">Confirmar</span>
+    <p id="confirm-body" class="confirmation-message"></p>
+    <div slot="footer" class="confirmation-actions">
+      <wa-button id="confirm-cancel" appearance="outlined">Cancelar</wa-button>
+      <wa-button id="confirm-ok" variant="danger">Eliminar</wa-button>
     </div>
-  </div>
+  </wa-dialog>
 
   <!-- QR pairing modal -->
   <div id="pair-modal" class="modal hidden">
@@ -568,22 +589,48 @@
 
   <div id="toast-container"></div>
 
-  <link rel="stylesheet" href="/vendor/xterm.css">
-  <script src="/vendor/xterm.js"></script>
-  <script src="/vendor/xterm-addon-fit.js"></script>
-  <script src="/vendor/qrcode.js"></script>
-  <script src="/vendor/lucide.min.js?v=18"></script>
-  <script src="/app.js?v=18"></script>
-  <script src="/feat-files.js?v=21"></script>
-  <script src="/feat-scripts.js?v=18"></script>
-  <script src="/feat-logs.js?v=18"></script>
-  <script src="/feat-metrics.js?v=18"></script>
-  <script src="/feat-drop.js?v=18"></script>
-  <script src="/feat-ops.js?v=18"></script>
-  <script src="/feat-notify.js?v=18"></script>
-  <script src="/feat-compose.js?v=18"></script>
-  <script src="/feat-agents.js?v=18"></script>
-  <script src="/feat-library.js?v=2"></script>
-  <script src="/mobile.js?v=18"></script>
+  <script type="text/axon-feature" data-src="/vendor/qrcode.js"></script>
+  <script defer src="/vendor/lucide.min.js?v=18"></script>
+  <script defer src="/assets.js?v=20261005a"></script>
+  <script defer src="/request-client.js?v=1"></script>
+  <script defer src="/interaction.js?v=1"></script>
+  <script defer src="/themes.js?v=1"></script>
+  <link rel="axon-feature" data-axon-style="/agent-accounts.css?v=3">
+  <link rel="axon-feature" data-axon-style="/agent-usage.css?v=1">
+  <link rel="axon-feature" data-axon-style="/agent-consumption.css?v=1">
+  <script type="text/axon-feature" data-src="/terminal-tools.js?v=1"></script>
+  <script defer src="/app.js?v=20261005f"></script>
+  <link rel="stylesheet" href="/host-storage.css?v=1">
+  <script defer src="/host-storage.js?v=1"></script>
+  <link rel="stylesheet" href="/transfer-review.css?v=20261005f">
+  <script defer src="/transfer-review.js?v=20261005f"></script>
+  <script type="text/axon-feature" data-src="/feat-files.js?v=20261005f"></script>
+  <script type="text/axon-feature" data-src="/feat-scripts.js?v=18"></script>
+  <script type="text/axon-feature" data-src="/feat-logs.js?v=18"></script>
+  <script type="text/axon-feature" data-src="/feat-metrics.js?v=18"></script>
+  <script type="text/axon-feature" data-src="/feat-drop.js?v=18"></script>
+  <script type="text/axon-feature" data-src="/feat-ops.js?v=18"></script>
+  <link rel="axon-feature" data-axon-style="/optimizer.css?v=1">
+  <script type="text/axon-feature" data-src="/optimizer.js?v=2"></script>
+  <script type="text/axon-feature" data-src="/feat-notify.js?v=19"></script>
+  <script type="text/axon-feature" data-src="/feat-compose.js?v=20261004maintenance"></script>
+  <script type="text/axon-feature" data-src="/agent-context.js?v=1"></script>
+  <script type="text/axon-feature" data-src="/agent-usage.js?v=1"></script>
+  <script type="text/axon-feature" data-src="/agent-consumption.js?v=1"></script>
+  <script type="text/axon-feature" data-src="/agent-accounts.js?v=3"></script>
+  <script type="text/axon-feature" data-src="/feat-agents.js?v=20261004consumption"></script>
+  <script type="text/axon-feature" data-src="/feat-library.js?v=10ddf49bbe08"></script>
+  <script type="text/axon-feature" data-src="/dashboard.js?v=1"></script>
+  <script type="text/axon-feature" data-src="/storage.js?v=20261005f"></script>
+  <script type="text/axon-feature" data-src="/home-links.js?v=1"></script>
+  <script type="text/axon-feature" data-src="/app-migrations.js?v=1"></script>
+  <script type="text/axon-feature" data-src="/app-store.js?v=20261004maintenance"></script>
+  <script type="text/axon-feature" data-src="/settings.js?v=1"></script>
+  <script type="text/axon-feature" data-src="/view-controls.js?v=20261004accounts"></script>
+  <script type="text/axon-feature" data-src="/platform.js?v=1"></script>
+  <script type="text/axon-feature" data-src="/platform-operations.js?v=1"></script>
+  <script type="text/axon-feature" data-src="/shell.js?v=20261005f"></script>
+  <script type="text/axon-feature" data-module="true" data-src="/navigation.js?v=1"></script>
+  <script type="text/axon-feature" data-src="/mobile.js?v=19"></script>
 </body>
 </html>

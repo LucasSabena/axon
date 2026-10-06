@@ -1,0 +1,34 @@
+[
+  {
+    "id": "d03ce9c579a051a0e8e1b12b8129f1a0dcd59c49d74163cc22870159d01f22e5",
+    "created": "2026-09-30T05:24:46.993913186Z",
+    "image": "postgres:16-alpine",
+    "imageId": "sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229",
+    "name": "demo-postgres",
+    "portBindings": [
+      {
+        "hostIp": "127.0.0.1",
+        "hostPort": 5432,
+        "containerPort": 5432
+      }
+    ],
+    "purpose": "Desarrollo y pruebas locales de Demo y Example App; la API pública usa Neon.",
+    "verifiedAt": "2026-10-03"
+  },
+  {
+    "id": "c8b32e78a6be47aff53e5be1cff830e32fd3e1695d60bd2ed00d4ae1c58d6ff7",
+    "created": "2026-09-20T00:29:14.379668758Z",
+    "image": "pgvector/pgvector:pg16",
+    "imageId": "sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b",
+    "name": "example-postgres",
+    "portBindings": [
+      {
+        "hostIp": "127.0.0.1",
+        "hostPort": 5434,
+        "containerPort": 5432
+      }
+    ],
+    "purpose": "Desarrollo local de Example Studio (example-builder).",
+    "verifiedAt": "2026-10-03"
+  }
+]

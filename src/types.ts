@@ -30,6 +30,8 @@ export interface Identity {
 }
 
 export interface PortProcess {
+  domains?: DomainMapping[];
+  domain?: DomainMapping;
   pid: number;
   ppid: number;
   user: string;
@@ -153,6 +155,9 @@ export interface ProgramDef {
 }
 
 export interface ProgramView {
+  metadataPending?: boolean;
+  installable?: boolean;
+  packageName?: string;
   id: string;
   name: string;
   icon: string;
@@ -219,6 +224,7 @@ export interface AppConfig {
     scanDirs: string[];
     hostUser: string;
     notifyUrl?: string;
+    notifyProvider?: 'auto' | 'ntfy' | 'gotify' | 'discord';
     knownServices: Record<string, KnownService>;
   };
 }

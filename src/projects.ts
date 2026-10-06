@@ -1,3 +1,5 @@
+import { resolveHostPath, projectSearchRoots } from './host-storage';
+import { lstat, stat } from 'node:fs/promises';
 import { readFile, writeFile, readdir } from 'fs/promises';
 import * as path from 'path';
 import {
@@ -63,19 +65,21 @@ interface PackageJsonShape {
 }
 
 export async function detectProjectsOnDisk(): Promise<Project[]> {
-  const dirs = configRef?.settings.scanDirs?.length
-    ? configRef.settings.scanDirs
-    : [`/home/${configRef?.settings.hostUser || 'root'}/Proyectos`];
-  const found: Project[] = [];
-  for (const dir of dirs) {
-    await scanDir(dir, found, 0);
-  }
+  const dirs=await projectSearchRoots(getProjectScanDirs());
+  const found:Project[]=[];
+  const budget={visited:new Set<string>(),entries:0,deadline:Date.now()+20_000};
+  for(const dir of dirs)await scanDir(dir,found,0,budget);
   // Self-exclusion: never offer axon itself as a startable project.
   return found.filter((p) => !p.cwd.endsWith('/axon'));
 }
 
-async function scanDir(dir: string, found: Project[], depth: number) {
-  if (depth > 4) return;
+export function getProjectScanDirs(){return configRef?.settings.scanDirs||[];}
+async function scanDir(dir: string, found: Project[], depth: number,budget:{visited:Set<string>;entries:number;deadline:number}) {
+  if(depth>4||budget.entries>=20_000||Date.now()>budget.deadline)return;
+  let info;try{info=await lstat(hostToContainer(dir));}catch{return;}
+  if(!info.isDirectory()||info.isSymbolicLink())return;
+  const key=info.dev+':'+info.ino;if(budget.visited.has(key))return;budget.visited.add(key);
+  budget.entries++;
   const entries = await hostDirEntries(dir);
   if (entries.includes('package.json') || entries.includes('pyproject.toml') ||
       entries.includes('requirements.txt') || entries.includes('Cargo.toml') ||
@@ -86,18 +90,18 @@ async function scanDir(dir: string, found: Project[], depth: number) {
     if (!entries.includes('pnpm-workspace.yaml') && !entries.includes('turbo.json')) return;
   }
   for (const entry of entries) {
+    if(++budget.entries>20_000||Date.now()>budget.deadline)return;
     if (SKIP_DIRS.has(entry) || entry.startsWith('.')) continue;
     const sub = path.join(dir, entry);
     if (await isHostDir(sub)) {
-      await scanDir(sub, found, depth + 1);
+      await scanDir(sub, found, depth + 1,budget);
     }
   }
 }
 
 async function isHostDir(hostPath: string): Promise<boolean> {
   try {
-    const { stat } = await import('fs/promises');
-    return (await stat(hostToContainer(hostPath))).isDirectory();
+    return (await lstat(hostToContainer(hostPath))).isDirectory();
   } catch {
     return false;
   }
@@ -212,6 +216,7 @@ export async function refreshRunning(): Promise<Project[]> {
 }
 
 export async function startProject(project: Project): Promise<{ ok: boolean; error?: string; pid?: number; command?: string; needsInstall?: boolean }> {
+  try{await resolveHostPath(project.cwd,{directory:true});}catch(e){return {ok:false,error:e instanceof Error?e.message:'Disco no disponible'};}
   const command = project.command;
   if (!command) {
     return { ok: false, error: 'El proyecto no tiene comando de arranque. Editá el proyecto y definilo.' };
@@ -278,6 +283,7 @@ export function installCommand(project: Project): string {
 
 export async function installDeps(project: Project): Promise<{ ok: boolean; output?: string; error?: string; command: string }> {
   const command = installCommand(project);
+  try{await resolveHostPath(project.cwd,{directory:true,fresh:true});}catch(e){return {ok:false,command,error:e instanceof Error?e.message:'Disco no disponible'};}
   const res = await hostExec(`cd ${shq(project.cwd)} && ${command} 2>&1`, {
     user: 'user',
     timeoutMs: 10 * 60_000,

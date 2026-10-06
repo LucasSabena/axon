@@ -145,10 +145,13 @@ export function hostToContainer(hostPath: string): string {
   return HOST_FS + (hostPath.startsWith('/') ? hostPath : '/' + hostPath);
 }
 
-export function containerToHost(containerPath: string): string {
+export function containerToHost(containerPath: string, mountRoot = HOST_FS): string {
   if (!containerPath) return containerPath;
-  if (HOST_FS && containerPath.startsWith(HOST_FS + '/')) {
-    return containerPath.slice(HOST_FS.length);
+  // realpath('/hostfs/') drops its trailing slash. The mount itself is the
+  // host's '/', not an application directory called /hostfs.
+  if (mountRoot && containerPath === mountRoot) return '/';
+  if (mountRoot && containerPath.startsWith(mountRoot + '/')) {
+    return containerPath.slice(mountRoot.length);
   }
   return containerPath;
 }

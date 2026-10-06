@@ -75,7 +75,7 @@
 
         '<div class="card drop-card">' +
           '<div class="drop-card-title">' + icon('upload') + ' Subir → servidor</div>' +
-          '<div id="drop-zone" class="drop-zone" role="button" tabindex="0">' +
+          '<div id="drop-zone" class="drop-zone" role="group" aria-label="Subir un archivo al servidor" tabindex="0">' +
             '<div class="drop-zone-inner">' + icon('upload') +
               '<span>Arrastrá un archivo acá o <button type="button" class="drop-link" id="drop-browse">elegilo</button></span>' +
               '<small>máx. 50 MB</small>' +

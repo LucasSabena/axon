@@ -5,6 +5,14 @@ import { createReadStream } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import * as path from 'node:path';
+import { registerFileUploadRoutes } from './file-uploads';
+import { recordEvent } from './events';
+import { registerSharedTrashRoutes, type FileOperations } from './file-operations';
+import {FileTransfers,publicTransferPlan,legacyTransferProgress} from './file-transfers';
+import {actor,body as maintenanceBody,only,protect,requestOrigin} from './storage/http';
+import {MaintenanceError} from './storage/types';
+import { volumeForPath } from './file-volumes';
+import { hostVolumes, initHostStorage, resolveHostPath } from './host-storage';
 
 // ---------------------------------------------------------------------------
 // File manager routes — browse / read / edit / upload / download host files.
@@ -18,13 +26,14 @@ import * as path from 'node:path';
 const WRITE_USER: 'user' | 'root' = 'user';
 
 const MAX_READ_BYTES = 512 * 1024; // /api/files/read truncates past this
-const MAX_UPLOAD_BYTES = 64 * 1024 * 1024; // /api/files/upload refuses bigger
 
 // Roots a normalized path must live under. $HOME is resolved lazily.
-const STATIC_ROOTS = ['/etc', '/var', '/opt', '/srv', '/tmp', '/mnt', '/media', '/home'];
+
 
 let cachedHome: string | null = null;
+let fixtureHome:string|undefined;
 async function homeDir(): Promise<string> {
+  if(fixtureHome)return fixtureHome;
   if (cachedHome) return cachedHome;
   try {
     const res = await hostExec('printf %s "$HOME"', { user: 'user', timeoutMs: 10_000 });
@@ -41,38 +50,8 @@ async function homeDir(): Promise<string> {
 // Normalize + validate a client-supplied path. Returns the resolved absolute
 // host path or a Spanish error message.
 async function resolveAllowed(input: string | undefined | null): Promise<{ path?: string; error?: string }> {
-  const home = await homeDir();
-  let raw = (input ?? '').trim();
-  if (!raw || raw === '~') raw = home;
-  else if (raw.startsWith('~/')) raw = home + raw.slice(1);
-
-  let p: string;
-  try {
-    p = path.posix.resolve(raw);
-  } catch {
-    return { error: 'Ruta inválida' };
-  }
-  const roots = [home, ...STATIC_ROOTS];
-  const inside = (q: string) => roots.some((r) => q === r || q.startsWith(r.endsWith('/') ? r : r + '/'));
-  if (!inside(p)) return { error: 'Ruta fuera de los directorios permitidos' };
-  // Symlink escape guard: resolve the deepest existing ancestor and re-check
-  // the allowlist on the resolved location.
-  let probe = p;
-  const tail: string[] = [];
-  while (true) {
-    try {
-      const real = await realpath(hostToContainer(probe));
-      const hostReal = containerToHost(real);
-      const full = tail.length ? path.posix.join(hostReal, ...tail.reverse()) : hostReal;
-      if (!inside(full)) return { error: 'Ruta fuera de los directorios permitidos' };
-      return { path: full };
-    } catch {
-      tail.push(path.posix.basename(probe));
-      const parent = path.posix.dirname(probe);
-      if (parent === probe) return { error: 'Ruta fuera de los directorios permitidos' };
-      probe = parent;
-    }
-  }
+  try {return {path:await resolveHostPath(input?.trim()||await homeDir(),{root:true})};}
+  catch(e){return {error:e instanceof Error?e.message:'Ruta inválida'};}
 }
 
 // POSIX single-quote escaping: 'foo'bar' -> 'foo'"'"'bar'
@@ -81,38 +60,16 @@ const shq = (s: string) => `'${s.replace(/'/g, `'"'"'`)}'`;
 // Write a buffer to a host path. The host fs is mounted read-only at /hostfs,
 // so bytes are streamed through stdin of a host-side `cat > dest` (nsenter).
 // Command-line payloads hit the 128KB MAX_ARG_STRLEN limit well under
-// MAX_UPLOAD_BYTES, so base64 argv chunks are not an option.
-async function writeHostFile(
-  hostPath: string,
-  buf: Buffer
-): Promise<{ ok: boolean; error?: string; detail?: string }> {
-  try {
-    const proc = hostSpawnInteractive(`cat > ${shq(hostPath)}`, { user: WRITE_USER });
-    const stdin = proc.stdin as {
-      write(d: Uint8Array | string): number | Promise<number>;
-      flush(): void | Promise<void>;
-      end(): void;
-    };
-    try {
-      for (let off = 0; off < buf.length; off += 1 << 20) {
-        await stdin.write(buf.subarray(off, off + (1 << 20)));
-      }
-      await stdin.flush();
-    } catch { /* shell may have failed the redirect — report below */ }
-    try { stdin.end(); } catch { /* already closed */ }
-    const [code, stderr] = await Promise.all([
-      proc.exited,
-      new Response(proc.stderr as ReadableStream<Uint8Array>).text(),
-    ]);
-    if (code === 0) return { ok: true };
-    return {
-      ok: false,
-      error: 'No se pudo escribir el archivo',
-      detail: stderr.trim().slice(0, 500) || `exit ${code}`,
-    };
-  } catch (err) {
-    return { ok: false, error: 'No se pudo escribir el archivo', detail: String(err) };
-  }
+// upload sizes, so base64 argv chunks are not an option.
+async function writeHostFile(hostPath:string,buf:Buffer,revision:string):Promise<{ok:boolean;error?:string;conflict?:boolean;revision?:string}> {
+  try{
+    const script=await readFile(new URL('./storage/edit-host.py',import.meta.url),'utf8');
+    const proc=hostSpawnInteractive(`python3 -c ${shq(script)} ${shq(JSON.stringify({path:hostPath,revision,size:buf.length}))}`,{user:WRITE_USER});
+    const input=proc.stdin as {write(d:Uint8Array):number|Promise<number>;flush():number|Promise<number>;end():void};
+    const result=new Response(proc.stdout as ReadableStream<Uint8Array>).text(),errors=new Response(proc.stderr as ReadableStream<Uint8Array>).text();
+    try{await input.write(buf);await input.flush();}finally{input.end();}
+    const [output,,code]=await Promise.all([result,errors,proc.exited]);if(code!==0)throw new Error();return JSON.parse(output);
+  }catch{return {ok:false,error:'La edición no se confirmó. Se conservó el original; revisá permisos y compará nuevamente.'};}
 }
 
 const MIME: Record<string, string> = {
@@ -283,7 +240,23 @@ function parseRange(
   return { start, end };
 }
 
-export function registerFilesRoutes(app: Hono): void {
+export function registerFilesRoutes(app: Hono, operations?: FileOperations, transfers?: FileTransfers,qaHome?:string): void {
+  fixtureHome=qaHome;
+  if(qaHome)initHostStorage(qaHome);
+  registerFileUploadRoutes(app, resolveAllowed);
+  app.get('/api/files/volumes',async c=>{
+    c.header('Cache-Control','private, no-store');
+    actor(c);
+    return c.json(await hostVolumes.snapshot(true));
+  });
+  protect(app,'/api/files/volumes');
+  app.post('/api/files/volumes/:id/mount',async c=>{
+    if(qaHome)throw new MaintenanceError('QA: montaje del host bloqueado',403);
+    actor(c);
+    if(c.req.header('origin')!==requestOrigin(c))throw new MaintenanceError('Origen no permitido',403);
+    only(await maintenanceBody(c),[]);
+    return c.json(await hostVolumes.mount(c.req.param('id')));
+  });
   // ---------- List directory ----------
   app.get('/api/files', async (c) => {
     const r = await resolveAllowed(c.req.query('path'));
@@ -344,7 +317,9 @@ export function registerFilesRoutes(app: Hono): void {
         (a.type === 'dir' ? 0 : 1) - (b.type === 'dir' ? 0 : 1) ||
         a.name.localeCompare(b.name, 'es', { sensitivity: 'base', numeric: true })
     );
-    return c.json({ ok: true, path: r.path, home: await homeDir(), entries });
+    const volume=volumeForPath((await hostVolumes.snapshot().catch(()=>({volumes:[]}))).volumes,r.path);
+    return c.json({ ok: true, path: r.path, home: await homeDir(), entries,
+      volume:volume?{id:volume.id,token:volume.id+':'+volume.mountId,path:volume.path,readOnly:volume.readOnly}:null });
   });
 
   // ---------- Read text file (512KB cap) ----------
@@ -364,11 +339,25 @@ export function registerFilesRoutes(app: Hono): void {
     let fh: Awaited<ReturnType<typeof open>> | null = null;
     try {
       fh = await open(cp, 'r');
+      const before=await fh.stat({bigint:true});
+      const parent=await stat(hostToContainer(path.dirname(r.path)),{bigint:true});
       const buf = Buffer.alloc(MAX_READ_BYTES + 1);
       const { bytesRead } = await fh.read(buf, 0, MAX_READ_BYTES + 1, 0);
       const truncated = bytesRead > MAX_READ_BYTES;
-      const content = buf.subarray(0, Math.min(bytesRead, MAX_READ_BYTES)).toString('utf-8');
-      return c.json({ ok: true, path: r.path, content, truncated });
+      const bytes = buf.subarray(0, Math.min(bytesRead, MAX_READ_BYTES));
+      let content: string;
+      let binary = bytes.some(b => b < 32 && ![9, 10, 13].includes(b));
+      try {
+        // Keep a UTF-8 BOM intact when editing. Invalid encodings must not be
+        // silently replaced and saved over the original bytes.
+        content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+      } catch {
+        binary = true;
+        content = bytes.toString('utf-8');
+      }
+      const after=await fh.stat({bigint:true});if(before.ino!==after.ino||before.size!==after.size||before.mtimeNs!==after.mtimeNs)return c.json({ok:false,error:'El archivo cambió durante la lectura; volvé a abrirlo'},409);
+      const revision=truncated?null:createHash('sha256').update(JSON.stringify({dev:String(after.dev),ino:String(after.ino),size:String(after.size),mtimeNs:String(after.mtimeNs),mode:String(after.mode),parentDev:String(parent.dev),parentIno:String(parent.ino),sha:createHash('sha256').update(bytes).digest('hex')})).digest('hex');
+      return c.json({ ok: true, path: r.path, content, truncated, binary,revision });
     } catch (e: any) {
       return c.json(
         { ok: false, error: 'No se pudo leer el archivo', detail: String(e?.message || e) },
@@ -446,7 +435,7 @@ export function registerFilesRoutes(app: Hono): void {
       const len = range.end - range.start + 1;
       const stream = Readable.toWeb(
         createReadStream(cp, { start: range.start, end: range.end })
-      ) as ReadableStream;
+      ) as unknown as ReadableStream;
       return new Response(stream, {
         status: 206,
         headers: {
@@ -456,7 +445,7 @@ export function registerFilesRoutes(app: Hono): void {
         },
       });
     }
-    const stream = Readable.toWeb(createReadStream(cp)) as ReadableStream;
+    const stream = Readable.toWeb(createReadStream(cp)) as unknown as ReadableStream;
     return new Response(stream, {
       headers: { ...baseHeaders, 'Content-Length': String(st.size) },
     });
@@ -478,7 +467,7 @@ export function registerFilesRoutes(app: Hono): void {
 
     const name = path.posix.basename(r.path);
     const ascii = name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_') || 'archivo';
-    const stream = Readable.toWeb(createReadStream(cp)) as ReadableStream;
+    const stream = Readable.toWeb(createReadStream(cp)) as unknown as ReadableStream;
     return new Response(stream, {
       headers: {
         'Content-Type': guessMime(name),
@@ -489,8 +478,51 @@ export function registerFilesRoutes(app: Hono): void {
     });
   });
 
+  // ---------- Create an empty file, without replacing existing entries ----------
+  app.post('/api/files/create', async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const name = body?.name;
+    if (typeof body?.path !== 'string' || !body.path.trim()) {
+      return c.json({ ok: false, error: 'Elegí una carpeta destino' }, 400);
+    }
+    if (typeof name !== 'string' || !name.trim() || name === '.' || name === '..' ||
+        /[/\\\x00-\x1f\x7f]/.test(name) || Buffer.byteLength(name, 'utf8') > 255) {
+      return c.json({ ok: false, error: 'Nombre inválido: usá un nombre sin barras, de hasta 255 bytes' }, 400);
+    }
+    // Resolve the parent only: following an existing leaf symlink would create
+    // a different file instead of reporting the name collision.
+    const parent = await resolveAllowed(body.path);
+    if (!parent.path) return c.json({ ok: false, error: parent.error }, 403);
+    const directory = await stat(hostToContainer(parent.path)).catch(() => null);
+    if (!directory) return c.json({ ok: false, error: 'La carpeta destino no existe' }, 404);
+    if (!directory.isDirectory()) return c.json({ ok: false, error: 'El destino no es una carpeta' }, 400);
+    const dest = path.posix.join(parent.path, name);
+    const privateFile = /^\.env(?:\.|$)/i.test(name);
+    // A hard link commits the empty file atomically and exclusively. Unlike
+    // cat/touch/mv it cannot overwrite a file, directory or broken symlink,
+    // even when two requests race. Both names live on the same filesystem.
+    const result = await hostExec(
+      `cd ${shq(parent.path)} || exit 13; ` +
+      `if [ -e ${shq(name)} ] || [ -L ${shq(name)} ]; then exit 17; fi; ` +
+      `temp=$(mktemp -- .axon-new.XXXXXXXXXX) || exit 13; ` +
+      `trap 'rm -f -- "$temp"' EXIT; ` +
+      `chmod ${privateFile ? '600' : '644'} -- "$temp" || exit 13; ` +
+      `if ln -T -- "$temp" ${shq(name)}; then exit 0; fi; ` +
+      `if [ -e ${shq(name)} ] || [ -L ${shq(name)} ]; then exit 17; fi; exit 13`,
+      { user: WRITE_USER, timeoutMs: 10_000 }
+    );
+    if (!result.ok) return c.json({ ok: false,
+      error: result.code === 17 ? 'Ya existe un archivo o carpeta con ese nombre' : 'No se pudo crear el archivo. Revisá los permisos de la carpeta',
+    }, result.code === 17 ? 409 : 403);
+    recordEvent('file', `Archivo creado: ${name}`, dest,
+      { section: 'files', params: { path: parent.path, item: name, edit: '1' } });
+    return c.json({ ok: true, path: dest, size: 0 }, 201);
+  });
+
   // ---------- Write file ({path, content} or {path, b64}) ----------
   app.post('/api/files/write', async (c) => {
+    if(operations)transferActor(c);
+    if(Number(c.req.header('content-length')||0)>2*1024*1024)return c.json({ok:false,error:'La edición supera el límite'},413);
     let body: any;
     try {
       body = await c.req.json();
@@ -509,9 +541,15 @@ export function registerFilesRoutes(app: Hono): void {
       return c.json({ ok: false, error: 'Falta el campo content o b64' }, 400);
     }
 
-    const res = await writeHostFile(r.path, buf);
-    if (!res.ok) return c.json({ ok: false, error: res.error, detail: res.detail }, 500);
-    return c.json({ ok: true, path: r.path, size: buf.length });
+    if(buf.length>MAX_READ_BYTES)return c.json({ok:false,error:'La edición supera 512 KiB'},413);
+    if(typeof body.revision!=='string'||! /^(?:[a-f0-9]{64}|missing)$/.test(body.revision))return c.json({ok:false,error:'Recargá el archivo para obtener su revisión antes de guardar'},409);
+    const res = await writeHostFile(r.path, buf,body.revision);
+    if (!res.ok) return c.json({ ok: false, error: res.error }, res.conflict?409:500);
+    const name=path.posix.basename(r.path);
+    const agentDoc=['AGENTS.MD','CLAUDE.MD','GEMINI.MD','SOUL.MD','INSTRUCTIONS.MD'].includes(name.toUpperCase());
+    recordEvent(agentDoc?'agent':'file', `${agentDoc?'Documento de agente editado':'Archivo editado'}: ${name}`, r.path,
+      { section: 'files', params: { path: path.posix.dirname(r.path), item: path.posix.basename(r.path), edit: '1' } });
+    return c.json({ ok: true, path: r.path, size: buf.length,revision:res.revision });
   });
 
   // ---------- Mkdir ----------
@@ -535,308 +573,49 @@ export function registerFilesRoutes(app: Hono): void {
     return c.json({ ok: true, path: r.path });
   });
 
-  // ---------- Rename / move ----------
-  app.post('/api/files/rename', async (c) => {
-    let body: any;
-    try {
-      body = await c.req.json();
-    } catch {
-      return c.json({ ok: false, error: 'Cuerpo JSON inválido' }, 400);
-    }
-    const rf = await resolveAllowed(body?.from);
-    if (!rf.path) return c.json({ ok: false, error: rf.error }, 403);
-    const rt = await resolveAllowed(body?.to);
-    if (!rt.path) return c.json({ ok: false, error: rt.error }, 403);
-    if (rf.path === rt.path) return c.json({ ok: true });
-    if (await hostExists(rt.path)) {
-      return c.json({ ok: false, error: 'Ya existe un archivo con ese nombre' }, 409);
-    }
-
-    const res = await hostExec(`mv -- ${shq(rf.path)} ${shq(rt.path)}`, { user: WRITE_USER, timeoutMs: 30_000 });
-    if (!res.ok) {
-      return c.json(
-        { ok: false, error: 'No se pudo renombrar', detail: res.stderr || res.stdout || `exit ${res.code}` },
-        500
-      );
-    }
-    return c.json({ ok: true, from: rf.path, to: rt.path });
+  // Transfers share the durable host worker with Library and maintenance.
+  const transferActor=(c:any)=>{const by=actor(c);if(c.req.header('origin')!==requestOrigin(c))throw new MaintenanceError('Origen no permitido',403);return by;};
+  const transferPaths=async(input:any)=>{
+    const from=await resolveAllowed(input?.from),to=await resolveAllowed(input?.to);
+    if(!from.path||!to.path)throw new MaintenanceError(from.error||to.error||'Ruta no permitida',403);
+    const sourceMountId=await hostVolumes.validate(from.path,input?.fromVolume);
+    const destinationMountId=await hostVolumes.validate(to.path,input?.toVolume);
+    return {from:from.path,to:to.path,...(!qaHome?{sourceMountId:sourceMountId||undefined,destinationMountId:destinationMountId||undefined}:{})};
+  };
+  protect(app,'/api/files/transfers');
+  app.post('/api/files/transfers/plans',async c=>{
+    if(!transfers)throw new MaintenanceError('Motor de transferencias no disponible',503);
+    const by=transferActor(c),input=await maintenanceBody(c);only(input,['mode','from','to','fromVolume','toVolume']);
+    if(!['copy','move'].includes(String(input.mode)))throw new MaintenanceError('Modo inválido',400);
+    const paths=await transferPaths(input);return c.json({ok:true,plan:publicTransferPlan(await transfers.plan(input.mode as 'copy'|'move',paths.from,paths.to,by,paths))},201);
+  });
+  app.post('/api/files/transfers/:id/execute',async c=>{
+    if(!transfers)throw new MaintenanceError('Motor de transferencias no disponible',503);
+    const by=transferActor(c),input=await maintenanceBody(c);only(input,['digest','reviewDigest']);
+    return c.json({ok:true,operation:await transfers.execute(c.req.param('id'),String(input.digest),by,typeof input.reviewDigest==='string'?input.reviewDigest:undefined)},202);
+  });
+  app.post('/api/files/transfers/:id/recover',async c=>{only(await maintenanceBody(c),[]);if(!transfers)throw new MaintenanceError('Motor no disponible',503);return c.json({ok:true,operation:await transfers.recover(c.req.param('id'),actor(c))});});
+  app.get('/api/files/transfers',async c=>{if(!transfers)throw new MaintenanceError('Motor no disponible',503);return c.json({ok:true,operations:await transfers.list(actor(c))});});
+  app.get('/api/files/transfers/:id',async c=>{if(!transfers)throw new MaintenanceError('Motor no disponible',503);return c.json({ok:true,operation:await transfers.status(c.req.param('id'),actor(c))});});
+  for(const [route,mode] of [['rename','move'],['copy','copy']] as const)app.post('/api/files/'+route,async c=>{
+    if(!transfers)throw new MaintenanceError('Motor de transferencias no disponible',503);
+    const by=transferActor(c),input=await maintenanceBody(c);only(input,['from','to']);const paths=await transferPaths(input);
+    if(paths.from===paths.to)return c.json({ok:true,...paths});
+    const operation=await transfers.quick(mode,paths.from,paths.to,by);return c.json({ok:true,...paths,operation});
   });
 
-  // ---------- Copy (cp -a) ----------
-  app.post('/api/files/copy', async (c) => {
-    let body: any;
-    try {
-      body = await c.req.json();
-    } catch {
-      return c.json({ ok: false, error: 'Cuerpo JSON inválido' }, 400);
-    }
-    const rf = await resolveAllowed(body?.from);
-    if (!rf.path) return c.json({ ok: false, error: rf.error }, 403);
-    const rt = await resolveAllowed(body?.to);
-    if (!rt.path) return c.json({ ok: false, error: rt.error }, 403);
-    if (rf.path === rt.path || rt.path.startsWith(rf.path + '/')) {
-      return c.json({ ok: false, error: 'No se puede copiar un elemento dentro de sí mismo' }, 400);
-    }
-    if (await hostExists(rt.path)) {
-      return c.json({ ok: false, error: 'Ya existe un archivo con ese nombre' }, 409);
-    }
+  // Permanent deletion always requires a frozen storage selection and a durable receipt.
+  app.post('/api/files/delete',c=>c.json({ok:false,error:'El borrado permanente requiere un plan revisado. Enviá el elemento a papelera y abrí Almacenamiento → Limpieza para analizar y eliminar sólo la selección.'},409));
 
-    const res = await hostExec(`cp -a -- ${shq(rf.path)} ${shq(rt.path)}`, {
-      user: WRITE_USER,
-      timeoutMs: 300_000,
-    });
-    if (!res.ok) {
-      return c.json(
-        { ok: false, error: 'No se pudo copiar', detail: res.stderr || res.stdout || `exit ${res.code}` },
-        500
-      );
-    }
-    return c.json({ ok: true, from: rf.path, to: rt.path });
-  });
+  // Old tabs must reload into the chunked client. Parsing the old multipart
+  // request would put the entire video in memory before we can validate it.
+  app.post('/api/files/upload', (c) => c.json({
+    ok: false, error: 'Actualizá la página para usar la subida de archivos por partes',
+  }, 409));
 
-  // ---------- Delete (rm -rf, guarded) ----------
-  app.post('/api/files/delete', async (c) => {
-    let body: any;
-    try {
-      body = await c.req.json();
-    } catch {
-      return c.json({ ok: false, error: 'Cuerpo JSON inválido' }, 400);
-    }
-    if (body?.confirm !== true) {
-      return c.json({ ok: false, error: 'Se requiere confirmación (confirm: true)' }, 400);
-    }
-    const r = await resolveAllowed(body?.path);
-    if (!r.path) return c.json({ ok: false, error: r.error }, 403);
-
-    const segments = r.path.split('/').filter(Boolean).length;
-    if (r.path === '/' || r.path === '/home' || r.path === '/etc' || segments < 3) {
-      return c.json({ ok: false, error: 'Ruta de borrado no permitida' }, 403);
-    }
-
-    const res = await hostExec(`rm -rf -- ${shq(r.path)}`, { user: WRITE_USER, timeoutMs: 120_000 });
-    if (!res.ok) {
-      return c.json(
-        { ok: false, error: 'No se pudo eliminar', detail: res.stderr || res.stdout || `exit ${res.code}` },
-        500
-      );
-    }
-    return c.json({ ok: true, path: r.path });
-  });
-
-  // ---------- Upload (multipart; ?path= is the target dir) ----------
-  app.post('/api/files/upload', async (c) => {
-    const rd = await resolveAllowed(c.req.query('path'));
-    if (!rd.path) return c.json({ ok: false, error: rd.error }, 403);
-
-    let body: Record<string, unknown>;
-    try {
-      body = await c.req.parseBody();
-    } catch {
-      return c.json({ ok: false, error: 'No se pudo procesar el formulario' }, 400);
-    }
-    const f = body['file'];
-    if (!(f instanceof File)) {
-      return c.json({ ok: false, error: 'Falta el archivo (campo "file")' }, 400);
-    }
-    if (f.size > MAX_UPLOAD_BYTES) {
-      return c.json({ ok: false, error: `El archivo supera el límite de ${MAX_UPLOAD_BYTES / 1024 / 1024} MB` }, 413);
-    }
-
-    // An explicit `name` field overrides the multipart filename — used when the
-    // client renamed a conflicting upload ("keep both").
-    const reqName = typeof body['name'] === 'string' && body['name'] ? body['name'] : f.name;
-    const name = path.posix.basename(reqName || 'archivo').replace(/[^\S ]/g, '');
-    if (!name || name === '.' || name === '..') {
-      return c.json({ ok: false, error: 'Nombre de archivo inválido' }, 400);
-    }
-    // Folder uploads carry the file's webkitRelativePath ("subdir/a/b.txt")
-    // in a `rel` field — keep the intermediate dirs, sanitizing each segment.
-    const rel = typeof body['rel'] === 'string' ? body['rel'] : '';
-    const dirParts = rel
-      .split('/')
-      .slice(0, -1)
-      .map((s) => s.replace(/[^\S ]/g, ''))
-      .filter((s) => s && s !== '.' && s !== '..' && !s.includes('/') && !s.includes('\\'));
-    const targetDir = path.posix.join(rd.path, ...dirParts);
-    const rdDir = await resolveAllowed(targetDir);
-    if (!rdDir.path) return c.json({ ok: false, error: rdDir.error }, 403);
-    // The target dir may not exist yet (first file of a folder upload).
-    const mk = await hostExec(`mkdir -p -- ${shq(rdDir.path)}`, { user: WRITE_USER, timeoutMs: 15_000 });
-    if (!mk.ok) {
-      return c.json({ ok: false, error: 'No se pudo crear la carpeta destino', detail: mk.stderr || `exit ${mk.code}` }, 500);
-    }
-    const rt = await resolveAllowed(path.posix.join(rdDir.path, name));
-    if (!rt.path) return c.json({ ok: false, error: rt.error }, 403);
-
-    const buf = Buffer.from(await f.arrayBuffer());
-    const res = await writeHostFile(rt.path, buf);
-    if (!res.ok) return c.json({ ok: false, error: res.error, detail: res.detail }, 500);
-    return c.json({ ok: true, path: rt.path, size: buf.length });
-  });
-
-  // ---------- Trash ----------
-  // Trash is a real directory under the host user's home — the file manager
-  // browses it like any other folder. A JSON manifest maps each trashed name
-  // back to its original location for restore.
-  const TRASH_MANIFEST = '.manifest.json';
-  const trashDir = async () => `${await homeDir()}/.local/share/axon-trash`;
-
-  interface TrashItem {
-    id: string;
-    name: string;
-    orig: string;
-    type: string;
-    ts: number;
-  }
-
-  async function readTrashManifest(dir: string): Promise<TrashItem[]> {
-    const res = await hostExec(`cat ${shq(path.posix.join(dir, TRASH_MANIFEST))} 2>/dev/null || true`, {
-      user: WRITE_USER,
-      timeoutMs: 10_000,
-    });
-    try {
-      const m = JSON.parse(res.stdout || '[]');
-      return Array.isArray(m) ? m : [];
-    } catch {
-      return [];
-    }
-  }
-
-  async function writeTrashManifest(dir: string, items: TrashItem[]) {
-    await writeHostFile(path.posix.join(dir, TRASH_MANIFEST), Buffer.from(JSON.stringify(items)));
-  }
-
-  const randId = () => Math.random().toString(36).slice(2, 8);
-
-  app.get('/api/files/trash/info', async (c) => {
-    const dir = await trashDir();
-    const items = await readTrashManifest(dir);
-    return c.json({ ok: true, dir, count: items.length });
-  });
-
-  app.post('/api/files/trash', async (c) => {
-    let body: any;
-    try {
-      body = await c.req.json();
-    } catch {
-      return c.json({ ok: false, error: 'Cuerpo JSON inválido' }, 400);
-    }
-    const paths: string[] = Array.isArray(body?.paths) ? body.paths : [];
-    if (!paths.length || paths.length > 500) {
-      return c.json({ ok: false, error: 'Lista de rutas inválida' }, 400);
-    }
-    const dir = await trashDir();
-    const mk = await hostExec(`mkdir -p -- ${shq(dir)}`, { user: WRITE_USER, timeoutMs: 15_000 });
-    if (!mk.ok) return c.json({ ok: false, error: 'No se pudo crear la papelera', detail: mk.stderr }, 500);
-
-    const manifest = await readTrashManifest(dir);
-    const done: { orig: string; trashed: string; name: string }[] = [];
-    const failed: { path: string; error: string }[] = [];
-
-    for (const input of paths) {
-      const r = await resolveAllowed(input);
-      if (!r.path) {
-        failed.push({ path: String(input), error: r.error || 'Ruta inválida' });
-        continue;
-      }
-      const segments = r.path.split('/').filter(Boolean).length;
-      if (r.path === dir || r.path.startsWith(dir + '/') || segments < 3) {
-        failed.push({ path: r.path, error: 'No se puede enviar a la papelera' });
-        continue;
-      }
-      // Type before moving — the manifest needs it for a sane restore.
-      let type = 'file';
-      try {
-        const st = await lstat(hostToContainer(r.path));
-        type = st.isDirectory() ? 'dir' : 'file';
-      } catch {
-        failed.push({ path: r.path, error: 'No existe' });
-        continue;
-      }
-      const id = `${Date.now().toString(36)}${randId()}`;
-      const trashed = path.posix.join(dir, id);
-      const res = await hostExec(`mv -- ${shq(r.path)} ${shq(trashed)}`, { user: WRITE_USER, timeoutMs: 120_000 });
-      if (!res.ok) {
-        failed.push({ path: r.path, error: res.stderr || `exit ${res.code}` });
-        continue;
-      }
-      manifest.push({ id, name: path.posix.basename(r.path), orig: r.path, type, ts: Date.now() });
-      done.push({ orig: r.path, trashed: id, name: path.posix.basename(r.path) });
-    }
-    if (done.length) await writeTrashManifest(dir, manifest);
-    return c.json({ ok: !failed.length, items: done, failed });
-  });
-
-  app.post('/api/files/trash/restore', async (c) => {
-    let body: any;
-    try {
-      body = await c.req.json();
-    } catch {
-      return c.json({ ok: false, error: 'Cuerpo JSON inválido' }, 400);
-    }
-    const ids: string[] = Array.isArray(body?.ids) ? body.ids : [];
-    if (!ids.length) return c.json({ ok: false, error: 'Sin elementos' }, 400);
-    const dir = await trashDir();
-    const manifest = await readTrashManifest(dir);
-    const keep = new Set(manifest.map((m) => m.id));
-    const restored: { from: string; to: string }[] = [];
-    const failed: { id: string; error: string }[] = [];
-    const remove = new Set<string>();
-
-    for (const id of ids) {
-      const entry = manifest.find((m) => m.id === id);
-      if (!entry) {
-        failed.push({ id, error: 'No está en la papelera' });
-        continue;
-      }
-      const src = path.posix.join(dir, id);
-      // Restore to the original path; on collision, append a marker suffix.
-      let dest = entry.orig;
-      const parent = path.posix.dirname(dest);
-      await hostExec(`mkdir -p -- ${shq(parent)}`, { user: WRITE_USER, timeoutMs: 15_000 });
-      const base = path.posix.basename(dest);
-      const stem = base.includes('.') ? base.slice(0, base.lastIndexOf('.')) : base;
-      const ext = base.includes('.') ? base.slice(base.lastIndexOf('.')) : '';
-      for (let i = 0; await hostExists(dest) && i < 100; i++) {
-        dest = path.posix.join(parent, `${stem} (restaurado${i ? ` ${i + 1}` : ''})${ext}`);
-      }
-      const res = await hostExec(`mv -- ${shq(src)} ${shq(dest)}`, { user: WRITE_USER, timeoutMs: 120_000 });
-      if (!res.ok) {
-        failed.push({ id, error: res.stderr || `exit ${res.code}` });
-        continue;
-      }
-      remove.add(id);
-      restored.push({ from: src, to: dest });
-    }
-    if (remove.size) {
-      await writeTrashManifest(dir, manifest.filter((m) => !remove.has(m.id)));
-    } else if (!keep.size) {
-      await writeTrashManifest(dir, manifest);
-    }
-    return c.json({ ok: !failed.length, restored, failed });
-  });
-
-  app.post('/api/files/trash/empty', async (c) => {
-    let body: any = {};
-    try {
-      body = await c.req.json();
-    } catch { /* empty body ok if confirm comes via query */ }
-    if (body?.confirm !== true) {
-      return c.json({ ok: false, error: 'Se requiere confirmación (confirm: true)' }, 400);
-    }
-    const dir = await trashDir();
-    // Only contents — never the trash dir itself. Explicit pattern avoids
-    // surprises if $HOME resolution ever misbehaves.
-    const res = await hostExec(
-      `find ${shq(dir)} -mindepth 1 -maxdepth 1 ! -name ${shq(TRASH_MANIFEST)} -exec rm -rf -- {} + && : > ${shq(path.posix.join(dir, TRASH_MANIFEST))} || true`,
-      { user: WRITE_USER, timeoutMs: 120_000 }
-    );
-    if (!res.ok) {
-      return c.json({ ok: false, error: 'No se pudo vaciar la papelera', detail: res.stderr }, 500);
-    }
-    await writeTrashManifest(dir, []);
-    return c.json({ ok: true });
-  });
+  const randId = () => crypto.randomUUID();
+  // Archivos, Biblioteca y Almacenamiento share the same durable trash service.
+  if (operations) registerSharedTrashRoutes(app, operations);
 
   // ---------- Detailed stat (properties dialog) ----------
   app.get('/api/files/stat', async (c) => {
@@ -1012,93 +791,19 @@ export function registerFilesRoutes(app: Hono): void {
     return c.json({ ok: false, error: 'Operación inválida' }, 400);
   });
 
-  // ---------- Copy with progress (rsync-style polling via du) ----------
-  // Long copies get a detached cp plus a du-based percentage; the sync
-  // /api/files/copy stays for instant small copies.
-  interface CopyJob {
-    id: string;
-    src: string;
-    dest: string;
-    total: number;
-    done: boolean;
-    error: string | null;
-    started: number;
-    proc?: ReturnType<typeof hostSpawn>;
-  }
-  const copyJobs = new Map<string, CopyJob>();
-  const pruneJobs = () => {
-    const cut = Date.now() - 10 * 60_000;
-    for (const [id, j] of copyJobs) if (j.done && j.started < cut) copyJobs.delete(id);
-  };
-
-  app.post('/api/files/copyjob', async (c) => {
-    let body: any;
-    try {
-      body = await c.req.json();
-    } catch {
-      return c.json({ ok: false, error: 'Cuerpo JSON inválido' }, 400);
-    }
-    const rf = await resolveAllowed(body?.from);
-    if (!rf.path) return c.json({ ok: false, error: rf.error }, 403);
-    const rt = await resolveAllowed(body?.to);
-    if (!rt.path) return c.json({ ok: false, error: rt.error }, 403);
-    if (rf.path === rt.path || rt.path.startsWith(rf.path + '/')) {
-      return c.json({ ok: false, error: 'No se puede copiar un elemento dentro de sí mismo' }, 400);
-    }
-    if (await hostExists(rt.path)) {
-      return c.json({ ok: false, error: 'Ya existe un archivo con ese nombre' }, 409);
-    }
-    const du = await hostExec(`du -sb -- ${shq(rf.path)} 2>/dev/null | cut -f1`, {
-      user: WRITE_USER,
-      timeoutMs: 120_000,
-    });
-    const total = du.ok ? parseInt(du.stdout.trim(), 10) || 0 : 0;
-    const proc = hostSpawn(`cp -a -- ${shq(rf.path)} ${shq(rt.path)}`, { user: WRITE_USER });
-    const job: CopyJob = {
-      id: `${Date.now().toString(36)}${randId()}`,
-      src: rf.path,
-      dest: rt.path,
-      total,
-      done: false,
-      error: null,
-      started: Date.now(),
-      proc,
-    };
-    copyJobs.set(job.id, job);
-    proc.exited.then(async (code) => {
-      const errTxt = await new Response(proc.stderr).text().catch(() => '');
-      job.done = true;
-      if (code !== 0) job.error = errTxt.trim() || `exit ${code}`;
-      pruneJobs();
-    });
-    return c.json({ ok: true, jobId: job.id, total });
+  // Compatibility API for the existing progress chips. No in-memory job map.
+  app.post('/api/files/copyjob',async c=>{
+    if(!transfers)throw new MaintenanceError('Motor no disponible',503);
+    const by=transferActor(c),input=await maintenanceBody(c);only(input,['from','to','mode','fromVolume','toVolume']);const paths=await transferPaths(input);
+    const mode=input.mode==='move'?'move':'copy';const plan=await transfers.plan(mode,paths.from,paths.to,by,paths);
+    await transfers.execute(plan.id,plan.digest,by);return c.json({ok:true,jobId:plan.id,total:plan.logicalBytes},202);
   });
-
-  app.get('/api/files/copyjob/:id', async (c) => {
-    const job = copyJobs.get(c.req.param('id'));
-    if (!job) return c.json({ ok: false, error: 'Trabajo no encontrado' }, 404);
-    let copied = 0;
-    const du = await hostExec(`du -sb -- ${shq(job.dest)} 2>/dev/null | cut -f1 || true`, {
-      user: WRITE_USER,
-      timeoutMs: 30_000,
-    });
-    if (du.ok) copied = parseInt(du.stdout.trim(), 10) || 0;
-    const pct = job.total > 0 ? Math.min(100, Math.round((copied / job.total) * 100)) : (job.done ? 100 : 0);
-    return c.json({ ok: true, pct: job.done && !job.error ? 100 : pct, copied, total: job.total, done: job.done, error: job.error });
+  app.get('/api/files/copyjob/:id',async c=>{
+    if(!transfers)throw new MaintenanceError('Motor no disponible',503);
+    return c.json(legacyTransferProgress(await transfers.status(c.req.param('id'),actor(c))));
   });
-
-  app.delete('/api/files/copyjob/:id', async (c) => {
-    const job = copyJobs.get(c.req.param('id'));
-    if (!job) return c.json({ ok: false, error: 'Trabajo no encontrado' }, 404);
-    try {
-      job.proc?.kill('SIGKILL');
-    } catch { /* already gone */ }
-    job.done = true;
-    job.error = 'Cancelado';
-    // Partial copy is moved out of the way rather than deleted outright.
-    if (await hostExists(job.dest)) {
-      await hostExec(`rm -rf -- ${shq(job.dest)}`, { user: WRITE_USER, timeoutMs: 120_000 });
-    }
-    return c.json({ ok: true });
+  app.delete('/api/files/copyjob/:id',async c=>{
+    if(!transfers)throw new MaintenanceError('Motor no disponible',503);
+    return c.json({ok:true,operation:await transfers.cancel(c.req.param('id'),transferActor(c))});
   });
 }
