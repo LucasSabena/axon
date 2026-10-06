@@ -129,6 +129,12 @@ test('blocked transfers explain collisions and protect the recovery ledger and i
   expect(await readFile(f.home+'/source','utf8')).toBe('original');expect(await readFile(f.home+'/target','utf8')).toBe('existing');
   await expect(f.transfers.plan('move',f.home+'/.local/share',f.home+'/ledger-copy',actor)).rejects.toThrow('registro de recuperación');
   expect(await lstat(f.home+'/ledger-copy').then(()=>true,()=>false)).toBe(false);
+  await mkdir(f.home+'/.local/share/axon/format-backups/disk',{recursive:true});await writeFile(f.home+'/.local/share/axon/format-backups/disk/payload','resguardo');
+  const rescue=await f.transfers.plan('move',f.home+'/.local/share/axon/format-backups/disk',f.home+'/resguardo',actor);
+  await f.transfers.execute(rescue.id,rescue.digest,actor);expect((await finished(f,rescue.id)).state).toBe('verified');expect(await readFile(f.home+'/resguardo/payload','utf8')).toBe('resguardo');
+  await expect(f.transfers.plan('move',f.home+'/.local/share/axon',f.home+'/state',actor)).rejects.toThrow('registro de recuperación');
+  await expect(f.transfers.plan('move',f.home+'/.local/share/axon/agent-accounts',f.home+'/accounts',actor)).rejects.toThrow('registro de recuperación');
+  await expect(f.transfers.plan('copy',f.home+'/source',f.home+'/.local/share/axon/dest',actor)).rejects.toThrow('registro de recuperación');
  }finally{await f.clean();}
 });
 

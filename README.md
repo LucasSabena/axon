@@ -1,78 +1,164 @@
 # AXON
 
-> Panel visual para gestionar **puertos activos**, **programas instalados** (con actualización en un click), proyectos de desarrollo, contenedores Docker y subdominios de Cloudflare — todo desde una interfaz web.
->
-> **Arquitectura:** la app corre en un contenedor Docker pero ejecuta todos los comandos del sistema **en el host** vía `nsenter` (nombrespaces mount+pid+net de PID 1) y lee el filesystem del host montado en `/hostfs` (read-only). Esto hace que vea y controle el sistema real: pnpm/npm/node del usuario, apt/snap del sistema, procesos y rutas reales.
+Panel web para administrar un servidor Linux: procesos, puertos, proyectos, Docker, archivos, biblioteca multimedia y agentes de IA. Desarrollado con Bun, Hono y JavaScript/CSS, con 20 temas y navegación adaptable a escritorio y celular.
 
-[![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
-[![Bun](https://img.shields.io/badge/Bun-000?logo=bun&logoColor=white)](https://bun.sh/)
-[![Hono](https://img.shields.io/badge/Hono-E36002?logo=hono&logoColor=white)](https://hono.dev/)
-[![Cloudflare](https://img.shields.io/badge/Cloudflare-F38020?logo=cloudflare&logoColor=white)](https://www.cloudflare.com/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Checks](https://github.com/LucasSabena/axon/actions/workflows/ci.yml/badge.svg)](https://github.com/LucasSabena/axon/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
----
+## Instalar
 
-## 📸 Vista previa
+Necesitás **Linux**, **Docker Engine**, **Docker Compose 2.20 o posterior**, **Git** y **Python 3.10 o posterior**. El usuario que instala debe poder ejecutar Docker. El instalador no instala Docker ni cambia los servicios del sistema. Cloudflare es opcional.
 
-```text
-┌──────────────┬──────────────────────────────────────────────────────────────┐
-│ AXON         │  ⌘K Buscar…        CPU▁▂▅ RAM▃▅ DISK 69%  LOAD 0.9   ⚙  ⏻  │
-│              │                                                              │
-│ MONITOR      │  Puertos abiertos              [Todos][Proyectos][Servicios] │
-│ ▸ Puertos 52 │                                                              │
-│   Proyectos  │  ▾ web-sofi                      ASTRO      /home/u/Proyectos│
-│   Docker  31 │     ⚡ :4322 ●  localhost:4322   100.x.x.x:4322   [Info][⏻] │
-│   Dominios 22│                                                              │
-│              │  🔒 sshd          SYSTEMD  localhost:22   100.x.x.x:22       │
-│ SISTEMA      │  ⚙  DNS           SYSTEMD  localhost:53   ̶1̶0̶0̶.̶x̶.̶x̶.̶x̶:̶5̶3̶      │
-│   Programas  │                                                              │
-│   Config     │  (links de red tachados = el servicio solo bindea 127.0.0.1) │
-│              │                                                              │
-│ TEMA         │                                                              │
-│ Linear/Net./ │                                                              │
-│ Warp   admin │                                                              │
-└──────────────┴──────────────────────────────────────────────────────────────┘
+```bash
+curl -fsSL https://raw.githubusercontent.com/LucasSabena/axon/main/install.sh -o /tmp/axon-install.sh
+bash /tmp/axon-install.sh
 ```
 
-> **Click en cualquier fila** abre un modal con Info, Stats en tiempo real, Logs y variables de entorno.
->
-> **Pestaña Proyectos**: detecta automáticamente proyectos en disco, los agrupa por carpeta, y permite iniciar/detener, ver logs, editar, agregar manualmente o eliminar del panel (sin borrar archivos).
+También podés revisar el código antes de ejecutarlo:
 
----
+```bash
+git clone https://github.com/LucasSabena/axon.git
+cd axon
+bash install.sh
+```
 
-## ✨ Características
+Abrí **http://localhost:3457**. El usuario inicial es `admin`; la contraseña se genera al instalar y se guarda en un archivo privado:
 
-- 🎨 **3 temas visuales** conmutables en runtime (Linear, Netdata, Warp) — completamente tokenizados con CSS custom properties: colores, tipografías, densidad y radios por tema.
-- 🗂️ **Sidebar colapsable** con contadores vivos por sección y selector de tema.
-- ⌨️ **Command palette** (`Ctrl/⌘+K`): navegar secciones, abrir puertos en localhost o IP de red, cerrar procesos, lanzar updates, cambiar de tema.
-- 📈 **Sparklines** de CPU/RAM en vivo en la topbar.
-- 🧩 **Detección de systemd**: procesos supervisados se etiquetan y el cierre ofrece "Detener servicio" en vez de un kill que respawnea.
-- 🔌 **Puertos (core)**: todos los listeners TCP/UDP del host, clasificados en Proyecto / Servicio / Sistema. Cada puerto se tracea al **root del repo git** (no solo el cwd), con detección de framework (Next.js, Astro, Vite, React, Django, FastAPI, Go, Rust…), ruta real, usuario, RAM y uptime. Cierre con **preview** (árbol de procesos + puertos a liberar + advertencias), SIGTERM→SIGKILL, y protección de daemons del sistema (sshd, systemd, dockerd, BBDD…).
-- 📦 **Programas**: registro de programas actualizables (apt, snap, pnpm globals, bun, uv, pipx, rustup, apps .deb como ChatGPT/Chrome/VS Code…). Cada botón ejecuta los comandos reales por pasos con **log en vivo** y errores explícitos (comando + exit code + stderr). Botón "Actualizar todo". Inventario completo: apps desktop (.desktop + íconos), snaps, paquetes apt.
-- 🔍 **Descubrimiento automático** de proyectos en disco (monorepo-aware) con arranque/parada/logs ejecutándose en el host con el usuario real.
-- 🌐 **Asignación de subdominios** personalizados en un clic, integrado con Cloudflare DNS y Cloudflare Tunnel.
-- 📊 **Estadísticas del servidor** en vivo: CPU, RAM, disco y load average.
-- 📦 **Docker** con dominios asignados, logs, stats y env vars.
-- 🖱️ **Detalle por proyecto/contenedor**: comando, CWD, CPU, memoria, uptime, threads, logs y env.
-- ✏️ **Edición de dominios** sin eliminar y recrear.
-- 🔒 **Autenticación** por cookie segura con sesiones firmadas.
-- 🛡️ **Sanitización** automática de variables sensibles (tokens, keys, passwords).
-- 📥 **Importación** masiva de dominios existentes desde la configuración remota del túnel de Cloudflare.
-- 📁 **Proyectos**: descubrimiento automático de proyectos en disco, agrupados por carpeta, con arranque/parada, logs vía polling HTTP, edición, agregado manual y eliminación del panel.
-- 🔧 **Configuración editable** desde la UI.
-- 🔗 **Links local y network** para cada servicio.
-- 🌐 **Dominio genérico**: funciona con cualquier dominio mediante `BASE_DOMAIN`.
-- 🤖 **Agents de IA**: detecta los agentes instalados (Codex, Claude Code, Devin, OpenCode, Gemini, Antigravity, OpenChamber, Cursor, Windsurf) y las skills compartidas (`~/.agents`). Vista master-detail con skills, MCP servers, plugins y cuentas de cada agente: activar/desactivar con el mecanismo nativo de cada uno (`enabled` en `config.toml`, `enabledPlugins`, prefijo `-`, parking a `_disabledMcpServers`, rename `SKILL.md.off`), borrar, agregar skills/MCPs nuevos (con propagación a otros agentes), login/logout y update vía jobs. Toda escritura deja backup `.axonbak`.
-  - **Búsqueda global**: el input del rail filtra agentes y encuentra items en TODOS los agentes (salta al agente + pestaña + item resaltado).
-  - **Matriz MCP×agente**: pseudo-vista que muestra qué MCP está activo en cada agente, con toggles por celda.
-  - **Item drawer**: click en una fila → panel con config completa, archivo fuente y acciones.
-  - **Health check**: los MCPs remotos (URL http) se pueden verificar con curl desde la fila o el drawer.
-  - **Config visual**: pestaña Config con labels/descripciones estilo VS Code Settings (bool→toggle, textos→input, objetos gestionados en su pestaña), sección **Credenciales** que expone secrets anidados (`provider.x.apiKey`, headers de MCPs) enmascarados con reemplazo, y lista de **backups `.axonbak`** con restauración.
-  - **Tab Doc**: el archivo de instrucciones global de cada agente (AGENTS.md, CLAUDE.md…) se ve/edita/crea desde su detalle.
-  - **Documentos**: pseudo-vista que descubre AGENTS.md/CLAUDE.md/reglas globales y de proyecto (barrido de `~/Proyectos`, `~/server-stack` y proyectos registrados), agrupados por proyecto, con lectura renderizada y edición; además lista **proyectos sin doc** con botón "Crear AGENTS.md".
-  - **⌘K**: comandos `Agente: <nombre>`, `Agents: matriz de MCPs` y `Agents: documentos` en la paleta.
+```bash
+cat "$HOME/.local/share/axon-install/initial-password.txt"
+```
 
----
+Cambiala desde Configuración y activá 2FA si lo necesitás. Cada instalación genera su propio secreto de sesión y empieza sin dominios ni proyectos ficticios.
+
+El comando queda en `$HOME/.local/bin/axon`. Si esa carpeta no está en tu `PATH`, usá la ruta completa:
+
+```bash
+"$HOME/.local/bin/axon" status
+```
+
+AXON administra el host a través de Docker privilegiado, `nsenter`, el socket de Docker y un montaje de lectura del host. Tiene permisos de administración del servidor. La instalación escucha en **127.0.0.1** por defecto; accedé mediante un túnel SSH o configurá tu propio proxy con HTTPS.
+
+```bash
+# Desde tu computadora, para un AXON instalado en otro servidor:
+ssh -L 3457:127.0.0.1:3457 usuario@servidor
+# Luego abrí http://localhost:3457 en tu computadora.
+```
+
+Opciones del instalador:
+
+```bash
+bash install.sh --port 3458 --name axon-personal
+bash install.sh --root "$HOME/Servicios/axon" --host-user tuusuario
+# Con un proxy ya configurado para este origen:
+bash install.sh --origin https://axon.example.com
+# Para acceso directo por red local, si lo necesitás:
+bash install.sh --bind 0.0.0.0 --origin http://servidor:3457
+```
+
+## Actualizar
+
+Para instalaciones hechas con este instalador:
+
+```bash
+axon update
+axon status
+```
+
+`update` corre en segundo plano y sigue aunque cierres la terminal o SSH. El estado y el registro permiten comprobar cuándo terminó:
+
+```bash
+tail -f "$HOME/.local/share/axon-install/update.log"
+# O esperar desde la misma terminal:
+axon update --wait
+# Instalar una publicación concreta:
+axon update --ref v1.1.0 --wait
+```
+
+La actualización obtiene una revisión concreta de GitHub y construye la imagen **antes de detener la versión actual**. Durante el cambio hace una copia de los datos del panel con la aplicación detenida, conserva `.env` y comprueba que `/api/health` responda con la revisión nueva. El frontend y el backend salen de la misma imagen; no se monta `public/` por separado.
+
+Si falla la construcción, la versión actual sigue funcionando. Si falla el arranque, intenta recuperar automáticamente la imagen anterior. Si la recuperación también falla, `status` muestra `recovery-required` con el error, sin indicar que el cambio terminó correctamente.
+
+También podés volver a la versión anterior:
+
+```bash
+axon rollback --wait
+```
+
+Los datos siguen montados en la misma carpeta al actualizar o volver de versión. **Rollback cambia el código, no restaura una copia antigua de tus datos.** Para una migración de datos incompatible usá el respaldo y las instrucciones de esa publicación. El actualizador conserva imágenes, versiones y respaldos; no borra volúmenes, credenciales nativas ni aplicaciones del servidor.
+
+Más detalles: [instalación, recuperación y migración](docs/installation.md).
+
+## Si ya tenías AXON instalado con Compose
+
+El comando nuevo administra únicamente sus propias instalaciones. No toma control de un contenedor existente ni modifica su Compose automáticamente.
+
+Podés continuar con tu despliegue anterior, actualizando el repositorio y reconstruyendo la imagen. Conservá `.env`, `data/` y los montajes necesarios del host. Eliminá cualquier montaje separado de `public/` para evitar una interfaz de una versión y un backend de otra.
+
+Para pasar al instalador nuevo, hacé primero un respaldo, detené **sólo AXON** desde tu Compose anterior y usá:
+
+```bash
+bash install.sh \
+  --existing-data /ruta/axon-anterior/data \
+  --env-file /ruta/axon-anterior/.env \
+  --host-user tuusuario \
+  --origin https://axon.example.com
+```
+
+Esto **copia** los datos originales a la instalación nueva y conserva el login. No borra el despliegue anterior; evitá ejecutar ambos paneles sobre el mismo servidor durante operaciones de administración. Si usás dominios gestionados por Cloudflare, agregá `--cloudflared-config /ruta/config.yml`. Las cuentas y los historiales nativos de agentes permanecen en el home de su usuario.
+
+## Agentes: cuentas, cuotas y consumo
+
+- Cuentas separadas y selector de cuenta activa para las herramientas compatibles. Codex puede aplicar la selección al servidor y a su conexión de escritorio, esperando a que terminen las tareas activas.
+- Terminal con selección de texto, enlaces copiables y sesiones persistentes para conectar las cuentas.
+- Cuotas disponibles por cuenta, ventanas de uso y próximos reinicios cuando el proveedor publica esos datos. Los errores o datos vencidos se muestran como tales.
+- Consumo histórico con filtros **hoy, 7, 15, 30 días y todo**, además de proveedor, modelo y cuenta cuando existe atribución verificable.
+- Desglose de input, output, lectura/escritura de caché y razonamiento. La estimación de API usa el catálogo público de [Models.dev](https://models.dev), actualizado automáticamente al consultar si pasaron 24 horas, y permite refrescarlo manualmente.
+- Chats y memorias agrupados por proyecto, búsqueda, lectura de historiales nativos y edición de memorias con control de conflictos y respaldo.
+
+Para cambiar cuentas de **Codex Desktop conectado por SSH**, el selector usa `websockets` en el Python del host. En una instalación nueva podés preparar esa dependencia, aislada del Python del sistema:
+
+```bash
+# Requiere python3-venv; ejecutar como el mismo usuario --host-user:
+axon setup-agents
+```
+
+Luego conectá tus cuentas desde Agentes. El cambio de cuenta no convierte una sesión ya iniciada con un perfil explícito en otra cuenta. Los proveedores, versiones y planes difieren: una cuota no disponible no significa ilimitada y una herramienta instalada no implica una cuenta conectada. [Alcance de consumo y precios](docs/agents-usage.md).
+
+## Qué incluye
+
+- Salud del servidor, CPU, memoria, disco, procesos y diagnóstico de uso. Optimización con propuesta, revalidación y recuperación; los servicios desconocidos y las bases de datos empiezan protegidos.
+- Puertos y procesos, proyectos de desarrollo, logs, terminal y programas del host.
+- Docker, edición y despliegue de Compose con borradores y registro persistente de operaciones.
+- Archivos: navegación, edición de texto, creación, transferencias, subidas por bloques y papelera recuperable.
+- Biblioteca multimedia: colecciones, favoritos, visualización, compartir y herramientas de procesamiento según dependencias disponibles.
+- Tienda de aplicaciones, mantenimiento, inventario, migraciones, enlaces y notificaciones.
+- Temas, navegación por URL, búsqueda y autenticación con 2FA.
+
+El panel no trae cuentas, API keys ni herramientas de IA preconectadas. Las acciones de instalación y administración se ejecutan en el servidor que aloja AXON, con el usuario configurado.
+
+## Desarrollo
+
+Requiere Bun y pnpm. Usá **pnpm** para gestionar paquetes.
+
+```bash
+pnpm install --frozen-lockfile
+pnpm run check
+pnpm run test
+pnpm run test:installer
+pnpm run build
+```
+
+Los tests de cuentas de escritorio requieren `websockets==15.0.1` en el Python de desarrollo. Los tests usan fixtures temporales y no necesitan cuentas reales. Para probar la interfaz con datos aislados:
+
+```bash
+pnpm run qa:serve
+```
+
+El servidor de QA usa un origen y secreto independientes y bloquea operaciones sobre el host real. Para ejecución propia, configurá un `SESSION_SECRET` nuevo y un `CONFIG_PATH` válido; el instalador se ocupa de generar ambos para producción.
+
+La CI comprueba tipos, JavaScript, regresiones, construcción, instalador, recuperación y arranque de la imagen Docker con la revisión exacta. Actualmente la validación de instalación se realiza en Linux x86_64; no se declara soporte verificado para otras arquitecturas.
+
+## Funciones en detalle
 
 ## Navegación y dashboard
 
@@ -120,230 +206,6 @@ Las subidas se preparan en una carpeta temporal junto al destino y se publican m
 
 Verificación: `pnpm run test` y `pnpm run build`.
 
-## 🏗️ Arquitectura
-
-```mermaid
-flowchart TB
-    subgraph Internet
-        User[Navegador del usuario]
-    end
-
-    subgraph Cloudflare
-        DNS[DNS CNAME<br/>*.tu-dominio.com]
-        Tunnel[Cloudflare Tunnel]
-    end
-
-    subgraph Servidor
-        PM[AXON<br/>Bun + Hono :3457]
-        Cloudflared[cloudflared]
-        DockerSock[/var/run/docker.sock]
-        ProcFs[/proc]
-        Config[(data/config.json)]
-    end
-
-    User -->|HTTPS| DNS
-    DNS --> Tunnel
-    Tunnel --> Cloudflared
-    Cloudflared --> PM
-    PM -->|ss /proc| ProcFs
-    PM -->|docker ps| DockerSock
-    PM -->|REST| Cloudflare
-    PM --> Config
-```
-
----
-
-## 🚀 Instalación
-
-### Requisitos
-
-- [Docker](https://docs.docker.com/engine/install/) + Docker Compose
-- [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) ya configurado
-- Credenciales de Cloudflare con permisos para DNS del dominio
-
-### 1. Clonar el repositorio
-
-```bash
-git clone https://github.com/LucasSabena/axon.git
-cd axon
-```
-
-### 2. Crear el archivo de entorno
-
-```bash
-cp .env.example .env
-```
-
-Editá `.env` con tus valores:
-
-```env
-CLOUDFLARE_EMAIL=tu-email@example.com
-CLOUDFLARE_API_KEY=tu-api-key-global
-CLOUDFLARE_API_TOKEN=          # opcional si usás API Key
-CLOUDFLARE_ZONE_ID=tu-zone-id
-CLOUDFLARE_ACCOUNT_ID=tu-account-id
-CLOUDFLARE_TUNNEL_ID=tu-tunnel-id
-
-# Dominio base para subdominios (ej. example.com -> app.example.com)
-BASE_DOMAIN=tu-dominio.com
-
-SESSION_SECRET=una-clave-larga-y-aleatoria
-```
-
-> **Nota:** La API Key global de Cloudflare tiene más permisos que un token; AXON prioriza `CLOUDFLARE_EMAIL` + `CLOUDFLARE_API_KEY`.
-
-### 3. Crear la configuración inicial
-
-```bash
-cp data/config.example.json data/config.json
-```
-
-La primera vez que iniciés sesión con el usuario por defecto (`admin` / `admin`) se generará el hash de la contraseña.
-
-> Cambiá la contraseña por una segura desde el mismo archivo `data/config.json` o borrando el hash para que se regenere.
-
-### 4. Levantar con Docker Compose
-
-Usá este servicio como ejemplo dentro de tu `docker-compose.yml`:
-
-```yaml
-services:
-  axon:
-    build: ./axon
-    container_name: axon
-    restart: unless-stopped
-    pid: host
-    network_mode: host
-    privileged: true
-    env_file:
-      - ./axon/.env
-    environment:
-      PORT: 3457
-      CONFIG_PATH: /app/data/config.json
-      CLOUDFLARED_CONFIG: /app/cloudflared-config.yml
-      CLOUDFLARE_ZONE_ID: ${CLOUDFLARE_ZONE_ID}
-      CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID}
-      CLOUDFLARE_TUNNEL_ID: ${CLOUDFLARE_TUNNEL_ID}
-      HOST_USER: tu-usuario-del-host        # usuario para comandos a nivel de usuario (pnpm, bun, systemctl --user)
-      PROJECT_SCAN_DIRS: /home/tu-usuario/Proyectos
-    volumes:
-      - ./axon/data:/app/data
-      - ./axon/public:/app/public:ro
-      - ./cloudflared/config.yml:/app/cloudflared-config.yml
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /:/hostfs:ro,rslave                 # filesystem del host (read-only) para rutas reales
-```
-
-```bash
-docker compose up -d --build axon
-```
-
-### 5. Acceder
-
-- Local: `http://localhost:3457`
-- Público: agregá una entrada en tu Cloudflare Tunnel apuntando a `http://localhost:3457`
-- Usuario por defecto: `admin` / `admin`
-
----
-
-## 🔄 Actualización
-
-```bash
-cd axon
-git pull origin main
-cd ..
-docker compose up -d --build axon
-```
-
-Tus dominios y configuración se guardan en `data/config.json`, que persiste fuera de la imagen.
-
----
-
-## ⚙️ Configuración
-
-### `data/config.json`
-
-```json
-{
-  "auth": {
-    "username": "admin",
-    "passwordHash": "..."
-  },
-  "domains": [],
-  "projects": [],
-  "settings": {
-    "scanIntervalMs": 5000,
-    "protectedPids": [1, 2],
-    "protectedPorts": [22, 80, 443, 9090, 9443],
-    "ignoredPatterns": [],
-    "scanDirs": ["/home/tu-usuario/Proyectos"],
-    "hostUser": "tu-usuario-del-host"
-  }
-}
-```
-
-| Campo | Descripción |
-|-------|-------------|
-| `scanIntervalMs` | Frecuencia de refresco de la UI |
-| `protectedPids` | PIDs que no se pueden matar |
-| `protectedPorts` | Puertos que no se muestran como asignables |
-| `ignoredPatterns` | Procesos a ocultar en la pestaña Desarrollo |
-
-### Variables de entorno
-
-| Variable | Descripción |
-|----------|-------------|
-| `CLOUDFLARE_EMAIL` | Email de la cuenta Cloudflare (para API Key global) |
-| `CLOUDFLARE_API_KEY` | API Key global de Cloudflare |
-| `CLOUDFLARE_API_TOKEN` | API Token alternativo (no usado si hay API Key) |
-| `CLOUDFLARE_ZONE_ID` | Zone ID del dominio en Cloudflare |
-| `CLOUDFLARE_ACCOUNT_ID` | Account ID de Cloudflare |
-| `CLOUDFLARE_TUNNEL_ID` | Tunnel ID de Cloudflare |
-| `BASE_DOMAIN` | Dominio base para subdominios (ej. `example.com`) |
-| `SESSION_SECRET` | Clave para firmar cookies de sesión |
-
-### Importar dominios existentes
-
-Si ya tenés subdominios creados manualmente en Cloudflare, andá a la pestaña **Dominios** y usá el botón **Importar desde Cloudflare** (o llamá a `POST /api/domains/import`).
-
-### Gestión de proyectos
-
-La pestaña **Proyectos** descubre automáticamente directorios con `package.json` o `requirements.txt`, los agrupa por carpeta padre y permite:
-
-- **Detectar** proyectos nuevos (`POST /api/projects/detect`).
-- **Agregar** un proyecto manualmente.
-- **Iniciar** un proyecto (`POST /api/projects/:id/start`).
-- **Detener** un proyecto (`POST /api/projects/:id/stop`).
-- Ver **logs en vivo** vía polling HTTP (`GET /api/projects/:id/logs?tail=N`).
-- **Editar** o **eliminar** del panel (sin borrar archivos).
-- Ver links **Local** (`http://localhost:<port>`) y **Network** (`http://<ip>:<port>`).
-
----
-
-## 🔐 Seguridad
-
-- Nunca commitees `data/config.json` ni `.env`.
-- Las variables de entorno sensibles se ocultan automáticamente en la UI.
-- El contenedor requiere `privileged: true`, `pid: host` y `network_mode: host` para poder leer `/proc`, usar `ss` y el socket de Docker.
-- Ejecutá AXON solo en redes privadas de confianza.
-
----
-
-## 🛣️ Roadmap
-
-- [x] Soporte para editar configuración desde la UI.
-- [x] Histórico de logs con polling HTTP.
-- [x] Arrancar/parar proyectos desde el panel.
-- [x] Proyectos agrupados por carpeta con detección, edición y eliminación.
-- [ ] Soporte multi-usuario con roles.
-- [ ] Tests automatizados.
-
----
-
-## 📄 Licencia
-
-MIT © Lucas Sabena
-
 ### Tienda, apariencia y entregas
 
 - **Tienda** (`/tienda`) instala aplicaciones en el host para todos sus usuarios. Incluye 25 fichas y búsqueda en Flathub; instalación, actualización y desinstalación usan trabajos con progreso. DaVinci usa la descarga oficial del fabricante. Flatpak y Flathub se preparan desde la tienda; las aplicaciones gráficas necesitan el escritorio del host.
@@ -378,3 +240,7 @@ Casos no soportados tienen bloqueos visibles. La ejecución durable de desinstal
 La interfaz usa la dirección A y conserva las veinte secciones, la navegación y los contratos existentes. Web Awesome se integra como componentes web locales; `pnpm run build:ui` genera el bundle desde la dependencia bloqueada. La navegación se agrupa, el tema rápido pasa al sol/luna del encabezado y los temas completos siguen en Apariencia. Los estilos compartidos están en `public/design-system.css` y los tokens en `public/themes.js`.
 
 [Alcance, pruebas, mediciones públicas y reversión](docs/redesign-implementation-2026-10-05/README.md). Para los tests de filesystem dentro de una imagen aislada, usar un directorio temporal exclusivo montado como `/tmp` en un filesystem permitido y añadir tmux/python3-websockets sólo a ese entorno de prueba; no ejecutar tests sobre `/hostfs` productivo.
+
+## Licencia
+
+[MIT](LICENSE).

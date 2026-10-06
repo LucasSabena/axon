@@ -347,8 +347,9 @@ try:
   if len(os.listdir(base))>=200:raise Guard('Límite de registros: revisá las operaciones anteriores antes de crear más')
   source=req['from'];destination=req['to'];mode=req['mode']
   if mode not in ('copy','move','purge') or source==destination or destination.startswith(source.rstrip('/')+'/'):raise Guard('Transferencia inválida')
-  protected=home+'/.local/share/axon'
-  if source==protected or source.startswith(protected+'/') or protected.startswith(source.rstrip('/')+'/') or destination==protected or destination.startswith(protected+'/'):raise Guard('El registro de recuperación está protegido; seleccioná una carpeta que no lo contenga')
+  protected=home+'/.local/share/axon';recovery=protected+'/format-backups'
+  source_state=source==protected or protected.startswith(source.rstrip('/')+'/') or (source.startswith(protected+'/') and not (source==recovery or source.startswith(recovery+'/')))
+  if source_state or destination==protected or destination.startswith(protected+'/'):raise Guard('El registro de recuperación está protegido; seleccioná una carpeta que no lo contenga')
   src=anchor(os.path.dirname(source));dst=anchor(os.path.dirname(destination));handles.extend([src,dst])
   for key,fd in (('sourceMountId',src),('destinationMountId',dst)):
    if req.get(key) and req[key]!=parent_ident(fd)[2]:raise Guard('El disco fue desconectado o cambió antes de preparar la transferencia')

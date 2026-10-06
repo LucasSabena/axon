@@ -184,7 +184,8 @@ try:
   elif action=='send':
    p=req['path'];name=os.path.basename(p)
    if any(x in ('.ssh','.gnupg') for x in p.split('/')):raise Guard('Ruta de acceso protegida')
-   if len(p.split('/'))<4 or p==home or p.startswith(home+'/.local/share/Trash') or p.startswith(home+'/.local/share/axon-trash') or p.startswith(home+'/.local/share/axon/'):raise Guard('Ruta protegida')
+   private_root=home+'/.local/share/axon';recovery=private_root+'/format-backups'
+   if len(p.split('/'))<4 or p==home or p.startswith(home+'/.local/share/Trash') or p.startswith(home+'/.local/share/axon-trash') or ((p==private_root or p.startswith(private_root+'/')) and not (p==recovery or p.startswith(recovery+'/'))):raise Guard('Ruta protegida')
    src=anchor(os.path.dirname(p));handles.append(src);s=os.stat(name,dir_fd=src,follow_symlinks=False)
    if identity(s)!=req['identity']:raise Guard('El elemento cambió desde la revisión')
    origin,destpath,dest,info=trash_for(rs,p,s.st_dev);key=req['key']

@@ -1,0 +1,17 @@
+[
+  {
+    "name": "fixture-postgres",
+    "id": "1111111111111111111111111111111111111111111111111111111111111111",
+    "created": "2026-01-01",
+    "image": "postgres:16-alpine",
+    "imageId": "sha256:fixture",
+    "portBindings": [
+      {
+        "hostIp": "127.0.0.1",
+        "hostPort": 5432,
+        "containerPort": 5432
+      }
+    ],
+    "purpose": "Test database"
+  }
+]

@@ -349,6 +349,10 @@ app.use('/api/*', async (c,next)=>{if(/^\/api\/(storage|maintenance|home|compose
 // Machine tokens are accepted only by the versioned API, before cookie auth.
 // Its terminal wildcard prevents any request from falling through to legacy routes.
 app.route('/api/v1',machineApi(platformDependencies));
+app.get('/api/health', c => {
+  c.header('Cache-Control', 'no-store');
+  return c.json({ ok: true, version: process.env.AXON_VERSION || '1.1.0', revision: process.env.AXON_REVISION || 'development' });
+});
 app.use('/api/*', requireAuth);
 app.use('/api/*',async(c,next)=>{
   if(!['GET','HEAD'].includes(c.req.method)&&/^\/api\/(files|library|projects|compose|drop|agents)(?:\/|$)/.test(c.req.path))await hostVolumes.snapshot(true);

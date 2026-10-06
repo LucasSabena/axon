@@ -1,6 +1,6 @@
 {
   "name": "axon",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Panel de control web self-hosted para administrar un servidor completo: puertos, proyectos, Docker, dominios y más",
   "scripts": {
     "dev": "bun run --watch src/index.ts",
@@ -11,7 +11,8 @@
     "qa:serve": "bun --no-env-file run scripts/qa-server.ts",
     "qa:maintenance:read": "bun --no-env-file run scripts/maintenance-readonly.ts",
     "build:ui": "bun run scripts/build-ui.ts",
-    "qa:platform:database": "bun --no-env-file run scripts/platform-database-qa.ts"
+    "qa:platform:database": "bun --no-env-file run scripts/platform-database-qa.ts",
+    "test:installer": "python3 -m unittest discover -s deployment -p \"test_*.py\""
   },
   "dependencies": {
     "@awesome.me/webawesome": "3.14.0",

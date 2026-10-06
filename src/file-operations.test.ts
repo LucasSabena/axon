@@ -161,6 +161,18 @@ test('volume trash rejects symlink/private-permission attacks and lost mount ide
   f.operations.onVolumes(async()=>[{path:cross!,mountId:'not-the-mounted-volume'}]);await expect(f.operations.send(p,actor)).rejects.toThrow('desconectado');expect(await readFile(p,'utf8')).toBe('preserved');
  }finally{if(cross)await rm(cross,{recursive:true,force:true});await f.clean();}
 });
+test('format-backups can be trashed while the rest of the private state stays protected',async()=>{
+ const f=await fixture();try{
+  const state=f.home+'/.local/share/axon';const backup=state+'/format-backups/DISK-20261005/payload';
+  await mkdir(backup,{recursive:true});await mkdir(state+'/agent-accounts');await mkdir(state+'/operations');await mkdir(state+'/backups/repo',{recursive:true});await writeFile(backup+'/preserved','resguardo');
+  const sent=await f.operations.send(backup,actor);expect(sent.state).toBe('verified');expect((await f.operations.list()).items[0].orig).toBe(backup);
+  await f.operations.restore(sent.id,actor);expect(await readFile(backup+'/preserved','utf8')).toBe('resguardo');
+  await expect(f.operations.send(state+'/agent-accounts',actor)).rejects.toThrow('Ruta protegida');
+  await expect(f.operations.send(state+'/operations',actor)).rejects.toThrow('Ruta protegida');
+  await expect(f.operations.send(state+'/backups/repo',actor)).rejects.toThrow('Ruta protegida');
+  await expect(f.operations.send(state,actor)).rejects.toThrow('Ruta protegida');
+ }finally{await f.clean();}
+});
 test('volume trash uses sticky shared Trash and reconciles a lost receipt without repeating the rename',async()=>{
  const f=await fixture();let cross:string|undefined;try{
   cross=await mkdtemp('/dev/shm/axon-volume-trash-');await mkdir(cross+'/.Trash',{mode:0o1777});const {chmod}=await import('node:fs/promises');await chmod(cross+'/.Trash',0o1777);const p=cross+'/kept';await writeFile(p,'preserved');const script=await readFile(new URL('./storage/trash-host.py',import.meta.url),'utf8');let effects=0;
