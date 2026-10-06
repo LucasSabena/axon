@@ -41,6 +41,7 @@
         <div class="fm-device-tools"><strong>Discos</strong><button id="fm-volumes-refresh" class="icon-btn" aria-label="Actualizar discos" title="Actualizar discos">${icon('refresh-cw')}</button></div>
         <div id="fm-volumes" class="fm-volume-list"><span class="listener-note">Buscando discos…</span></div>
         <p id="fm-volumes-error" class="listener-note hidden" role="status"></p>
+        <button type="button" id="fm-trash" class="fm-volume fm-trash-entry" title="Elementos eliminados del disco actual o del escritorio">${icon('trash-2')}<span><strong>Papelera</strong><small>Restaurar o borrar definitivamente</small></span></button>
       </div>
       <div id="fm-clipboard" class="fm-clipboard hidden" aria-live="polite">
         <span id="fm-clipboard-label"></span>
@@ -311,6 +312,10 @@
     } finally {S.volumesBusy=false;el('fm-volumes-refresh').disabled=false;}
   }
   el('fm-volumes-refresh').addEventListener('click',refreshVolumes);
+  el('fm-trash').addEventListener('click',()=>{
+    const disk=volumeAt(S.cwd), local=(S.trashDirs||[]).find(p=>disk?.path&&disk.path!=='/'&&p.startsWith(disk.path+'/'));
+    navigate(local||S.trashDir||'~/.local/share/Trash/files');
+  });
   el('fm-volumes').addEventListener('click',async e=>{
     const button=e.target.closest('[data-volume]');if(!button)return;
     const v=S.volumes.find(v=>v.id===button.dataset.volume);if(!v)return;
@@ -1712,7 +1717,7 @@
   const apiRestore = (ids) => api('/api/files/trash/restore', { method: 'POST', body: { ids: ids.map(id => S.trashNames[id]?.id || id) } });
   const apiRename = async (from,to) => {try{return await window.AxonTransfers.run(from,to,'move');}catch(error){if(!error.cancelled){await window.AxonTransfers.showError(error,{mode:'move',from,to});error.presented=true;}throw error;}};
   const apiMkdir = (p) => api('/api/files/mkdir', { method: 'POST', body: { path: p } });
-  const apiDeleteHard = (p) => api('/api/files/delete', { method: 'POST', body: { path: p, confirm: true } });
+
 
   function journaled(op) {
     S.undo.push(op);
@@ -1748,8 +1753,8 @@
     navigate(S.cwd);
   }
 
-  // Delete = move to trash (reversible). Inside the trash dir, delete is
-  // permanent and asks for confirmation.
+  // Delete = move to trash (reversible). Inside the trash dir there is no
+  // direct delete: permanent removal runs as a reviewed plan in Almacenamiento.
   async function deleteTargets(names, dir) {
     if (!names.length) return;
     const srcDir = dir || S.cwd;
@@ -1758,16 +1763,10 @@
       const preview = names.slice(0, 6).join(', ') + (names.length > 6 ? ` y ${names.length - 6} más` : '');
       const ok = await confirmDialog(
         `Borrado definitivo — ${names.length} elemento${names.length === 1 ? '' : 's'}`,
-        `Esto no se puede deshacer: ${preview}`
+        `Es irreversible y requiere un plan revisado: ${preview}. Te llevo a Almacenamiento → Limpieza para hacerlo.`
       );
       if (!ok) return;
-      const failed = [];
-      for (const p of paths) {
-        try { await apiDeleteHard(p); } catch (err) { failed.push(`${p}: ${err.message}`); }
-      }
-      if (failed.length) toast('Errores al borrar', 'error', failed.join('\n'));
-      else toast(`${names.length} borrado${names.length === 1 ? '' : 's'} definitivamente`, 'ok', '', 3000);
-      navigate(srcDir === S.cwd ? S.cwd : srcDir);
+      await window.AxonNavigation.go('/almacenamiento?view=cleanup');
       return;
     }
     try {
@@ -2655,7 +2654,7 @@
       ['Ctrl+C / X / V', 'Copiar / cortar / pegar'],
       ['Ctrl+Z · Ctrl+Shift+Z · Ctrl+Y', 'Deshacer · rehacer'],
       ['F2', 'Renombrar'],
-      ['Supr', 'A la papelera (dentro de ella: definitivo)'],
+      ['Supr', 'A la papelera (dentro de ella: borrado con revisión)'],
       ['Ctrl+H', 'Mostrar/ocultar archivos ocultos'],
       ['Ctrl+F', 'Búsqueda recursiva'],
       ['Ctrl+Alt+N · Ctrl+Shift+N', 'Nuevo archivo · nueva carpeta'],
