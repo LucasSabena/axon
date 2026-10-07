@@ -50,6 +50,15 @@ Caladea y Liberation. Una instalación nativa necesita los mismos paquetes y
 espacios de nombres de Linux habilitados. Si falla el aislamiento, el visor
 rechaza la conversión; PDF y CSV/TSV siguen funcionando en el navegador.
 
+Ubuntu 24.04 puede bloquear las capacidades dentro de espacios de nombres
+no perfilados. Para una instalación **nativa**, el administrador puede cargar
+`deployment/document-preview.apparmor` con
+`sudo apparmor_parser -r deployment/document-preview.apparmor`. El permiso
+se aplica exclusivamente a `/usr/bin/bwrap`: no se desactivan las restricciones
+globales de AppArmor ni se habilita acceso del documento al host o a la red.
+La imagen y el despliegue Docker de AXON ya usan sus propios espacios aislados.
+Referencia: https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces
+
 `pnpm run test` incluye conversiones reales de DOC/DOCX, PPT/PPTX, XLS/XLSX,
 ODT/ODP/ODS y RTF, conservación del original, revisiones, concurrencia,
 entradas inválidas, CSV y aislamiento. Estas pruebas necesitan `poppler-utils`

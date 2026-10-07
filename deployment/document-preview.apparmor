@@ -1,0 +1,10 @@
+# Ubuntu 24.04 restricts capabilities inside unprofiled user namespaces.
+# Permit the namespace launcher specifically, as documented by Ubuntu.
+# AXON still binds only system runtime files and the private staged copy,
+# unshares network/PID/IPC, clears environment and drops all capabilities.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile axon-document-bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+}

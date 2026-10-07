@@ -28,6 +28,12 @@ jobs:
         run: python -m pip install websockets==15.0.1
       - name: Backup and media integration test dependencies
         run: sudo apt-get update && sudo apt-get install -y restic ffmpeg libreoffice-writer libreoffice-calc libreoffice-impress fonts-crosextra-carlito fonts-crosextra-caladea fonts-liberation bubblewrap poppler-utils
+      - name: Permit the document namespace launcher on Ubuntu
+        run: |
+          # Keep Ubuntu's global userns restrictions. This profile only grants
+          # Bubblewrap the namespaces needed to build its private sandbox.
+          sudo apparmor_parser -r deployment/document-preview.apparmor
+          bwrap --unshare-all --die-with-parent --cap-drop ALL --ro-bind / / true
       - name: Install locked packages
         run: pnpm install --frozen-lockfile
       - name: Typecheck and frontend syntax
