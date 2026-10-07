@@ -815,14 +815,17 @@ app.get('/api/jobs/:id', async (c) => {
 app.get('/api/icons/:name', async (c) => {
   const name = c.req.param('name');
   const file = await resolveIcon(name);
-  if (!file) return fail(c, 404, 'Icono no encontrado');
-  try {
+  if (file) try {
     const buf = await readFile(file);
     const ext = file.endsWith('.svg') ? 'image/svg+xml' : file.endsWith('.xpm') ? 'image/x-xpixmap' : 'image/png';
     return new Response(buf, { headers: { 'Content-Type': ext, 'Cache-Control': 'public, max-age=86400' } });
-  } catch {
-    return fail(c, 404, 'Icono no encontrado');
-  }
+  } catch { /* The native icon may disappear between discovery and reading. */ }
+  // Desktop icons are optional host resources. Use the same portable brand /
+  // initials chain as discovered agents when an icon is absent or removed.
+  // Filesystem paths and traversal inputs must never become brand lookups.
+  if (/^[a-z0-9][a-z0-9._-]{0,150}$/i.test(name) && !name.includes('..'))
+    return c.redirect('/api/brandicon/' + encodeURIComponent(name));
+  return fail(c, 404, 'Icono no encontrado');
 });
 
 // ---------- Brand icon resolver ----------
@@ -842,6 +845,8 @@ const ICON_CACHE_DIR = path.join(
 
 // key → extra slugs to try first (name differs from the brand slug)
 const BRAND_ALIASES: Record<string, string[]> = {
+  'ai.opencode.desktop': ['opencode'],
+  'devin-desktop': ['devin'],
   'claude-code': ['claudecode', 'claude'],
   'claude-desktop': ['claude'],
   codex: ['openai'],

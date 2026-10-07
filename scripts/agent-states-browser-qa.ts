@@ -15,7 +15,8 @@ const checks: unknown[] = [];
 const agents = [
   { id: 'codex', name: 'Codex', installed: false, counts: {} },
   { id: 'claude', name: 'Claude', installed: true, residual: true, counts: {} },
-  { id: 'opencode', name: 'OpenCode', installed: true, counts: { skills: 2 } },
+  { id: 'opencode', name: 'OpenCode', installed: true, brandIcon: '/api/icons/ai.opencode.desktop', counts: { skills: 2 } },
+  { id: 'devin', name: 'Devin', installed: false, brandIcon: '/api/icons/devin-desktop', counts: {} },
 ];
 try {
   if (!(await (await context.request.get(origin + '/api/health')).json()).qa) throw new Error('Not an owned QA fixture');
@@ -26,6 +27,12 @@ try {
   await page.locator('#password').fill('axon-local-qa');
   await page.locator('#login-form button[type=submit]').click();
   await page.locator('#main-screen:not(.hidden)').waitFor();
+  // The endpoint must also work for a host icon that certainly does not exist,
+  // and must preserve the protected-path contract while offering a fallback.
+  const absent = await context.request.get(origin + '/api/icons/axon-fixture-' + crypto.randomUUID());
+  if (!absent.ok() || !(await absent.text()).includes('<svg')) throw new Error('Missing host icon has no portable fallback');
+  const protectedPath = await context.request.get(origin + '/api/icons/' + encodeURIComponent('/etc/passwd'));
+  if (protectedPath.status() !== 404) throw new Error('Protected path became an icon lookup');
   await page.goto(origin + '/agentes');
   await page.waitForFunction(() => (window as any).AxonNavigation?.ready);
   const missing = page.locator('.agent-row.agent-off[data-id=codex]');
@@ -45,10 +52,11 @@ try {
         await document.fonts.ready;
         await Promise.all(document.getAnimations().filter(a => a.effect?.getComputedTiming().iterations !== Infinity).map(a => a.finished.catch(() => {})));
       });
+      await page.waitForFunction(() => [...document.querySelectorAll<HTMLImageElement>('#agents-rail img')].every(image => image.complete && image.naturalWidth > 0));
       const result = await new AxeBuilder({ page }).include('#agents-rail').withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']).analyze();
       if (result.violations.length) throw new Error(JSON.stringify({ theme, state, violations: result.violations }));
       await page.screenshot({ path: path.join(output, theme + '-' + state + '.png') });
-      checks.push({ theme, state, violations: 0, installed: true, missing: true, residual: true });
+      checks.push({ theme, state, violations: 0, installed: true, missing: true, residual: true, portableIconsLoaded: true });
       console.log('PASS agent installation states ' + theme + '/' + state);
     }
   }
