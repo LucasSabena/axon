@@ -14,6 +14,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     python3-venv \
     python-is-python3 \
+    libreoffice-writer \
+    libreoffice-calc \
+    libreoffice-impress \
+    fonts-crosextra-carlito \
+    fonts-crosextra-caladea \
+    fonts-liberation \
+    bubblewrap \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Docker CLI

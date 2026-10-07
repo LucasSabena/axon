@@ -23,6 +23,8 @@ export function registerQaBoundary(app:Hono,root:string|null){
    const fixtureTransfer=/^\/api\/(files\/(transfers(?:\/plans|\/[^/]+\/(?:execute|recover))?|copyjob(?:\/[^/]+)?)|storage\/plans\/[^/]+\/(execute|cancel|recover))$/.test(p);
    const fixtureTrash=/^\/api\/storage\/trash\/(restore|migration-plans(?:\/[^/]+\/(?:execute|recover))?)$/.test(p);
    const fixtureLibrary=/^\/api\/library\/(favorite|shares|collections|rescan|settings)$/.test(p);
+   // Conversion only stages root-validated fixture bytes in a private cache.
+   const fixtureDocuments=/^\/api\/(files\/document|library\/document\/[^/]+)$/.test(p);
    const fixtureProject=/^\/api\/projects$/.test(p);
    const fixtureAgentDoc=p==='/api/agent-docs/create';
    // Icon assignments and uploads only write the QA-owned AXON cache.
@@ -33,7 +35,7 @@ export function registerQaBoundary(app:Hono,root:string|null){
    const fixturePlatform=/^\/api\/(access\/tokens(?:\/[^/]+)?|project-hub\/[^/]+\/(diagnose|bindings)|backups\/(recovery-kit|policies(?:\/[^/]+(?:\/run)?)?|jobs\/[^/]+\/(restore|verify)))$/.test(p);
    // Onboarding and credential routes only write files inside the QA data dir.
    const fixtureOnboarding=/^\/api\/(onboarding\/(setup|complete|dismiss|check|reset)|auth\/(password|totp\/(setup|enable|disable)))$/.test(p);
-   if(!safe&&!fixtureTrash&&!fixtureTransfer&&!fixtureFile&&!fixtureLibrary&&!fixtureAccounts&&!fixturePlatform&&!fixtureProject&&!fixtureAgentDoc&&!fixtureSoftwareIcons&&!fixtureOnboarding)return c.json({ok:false,error:'QA: mutación de host bloqueada por el servidor; usá pruebas con fixtures inyectadas'},403);
+   if(!safe&&!fixtureTrash&&!fixtureTransfer&&!fixtureFile&&!fixtureLibrary&&!fixtureDocuments&&!fixtureAccounts&&!fixturePlatform&&!fixtureProject&&!fixtureAgentDoc&&!fixtureSoftwareIcons&&!fixtureOnboarding)return c.json({ok:false,error:'QA: mutación de host bloqueada por el servidor; usá pruebas con fixtures inyectadas'},403);
   }
   await next();
  });

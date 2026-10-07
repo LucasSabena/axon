@@ -1,3 +1,4 @@
+import { documentResponse } from './document-preview';
 import { resolveHostPath, hostVolumes } from './host-storage';
 import type {FileTransfers} from './file-transfers';
 import {reviewLibraryMove,movedReference,type TransferReview} from './library-transfer-review';
@@ -114,7 +115,7 @@ addKind('audio', 'mp3 wav flac ogg oga m4a aac opus aiff aif wma');
 addKind('pdf', 'pdf');
 addKind('vector', 'svg svgz eps ai');
 addKind('design', 'psd psb indd idml aep prproj fig sketch xd afdesign afphoto afpub cdr blend');
-addKind('doc', 'doc docx xls xlsx ppt pptx odt ods odp rtf txt md csv key pages numbers');
+addKind('doc', 'doc docx xls xlsx ppt pptx odt ods odp rtf txt md csv tsv docm dot dotx ott pptm pps ppsx pot potx otp xlsm xlt xltx ots key pages numbers');
 
 const KIND_FOLDER: Record<Kind, string> = {
   image: 'Imágenes', raw: 'RAW', video: 'Videos', audio: 'Audio', pdf: 'PDF',
@@ -1919,6 +1920,12 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers): void 
   const itemOr404 = (c: Context) => freshItem(c.req.param('id') || '');
   const previewCache = (c: Context, it: Item) => c.req.query('k') === it.tk
     ? 'private, max-age=31536000, immutable' : 'private, no-cache';
+
+  app.on(['GET', 'POST'], '/api/library/document/:id', async c => {
+    const it = await itemOr404(c);
+    if (!it) return fail(c, 404, 'Documento no encontrado');
+    return documentResponse(it.p, c.req.raw, '/api/library/document/' + encodeURIComponent(it.id));
+  });
 
   app.get('/api/library/thumb/:id', async (c) => {
     const it = await itemOr404(c);

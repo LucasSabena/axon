@@ -1076,6 +1076,7 @@
   let vItemId = null;
   let vItemVersion = null;
   let mediaGeneration = 0;
+  let documentViewer = null;
   let vInfo = localStorage.getItem('lib-vinfo') !== '0';
   let vPanel = 'info';
   let tcPoll = null;
@@ -1160,6 +1161,7 @@
 
   function stopViewerMedia() {
     mediaGeneration++;
+    documentViewer?.destroy(); documentViewer = null;
     clearTimeout(tcPoll);
     $('#lib-viewer')?.querySelectorAll('audio,video').forEach(media => {
       media.pause();
@@ -1243,7 +1245,8 @@
       return `<div class="lv-img-wrap" id="lv-zoom">${light && it.th >= 1 ? `<img class="lv-ph" src="${thumbUrl(it)}" alt="">` : ''}<img class="lv-img" src="${src}" alt="" draggable="false" onload="this.previousElementSibling?.classList?.contains('lv-ph')&&this.previousElementSibling.remove()"></div>`;
     }
     if (it.k === 'audio') return `<div class="lv-audio"><audio controls autoplay preload="metadata" aria-label="${esc(it.n)}" src="${f}"></audio><small class="lv-audio-status" role="status"></small></div>`;
-    if (it.k === 'pdf' || ['txt', 'md', 'csv'].includes(it.e)) return `<iframe class="lv-frame" src="${f}"></iframe>`;
+    if (window.AxonDocumentViewer?.supports(it.n)) return '<div class="lv-document"></div>';
+    if (['txt', 'md'].includes(it.e)) return `<iframe class="lv-frame" src="${f}"></iframe>`;
     return `<div class="lv-file">${icon(KIND[it.k]?.ic || 'file')}<b>${esc(it.e.toUpperCase())}</b><span>${esc(it.n)}</span><span>Este tipo de archivo no tiene vista previa</span>
       <a class="btn-primary" href="${f}&dl=1">${icon('download')} Descargar</a></div>`;
   }
@@ -1316,6 +1319,12 @@
     syncViewerNavigation();
     const st = $('#lv-stage');
     st.innerHTML = mediaHtml(it);
+    if (window.AxonDocumentViewer?.supports(it.n)) {
+      documentViewer = window.AxonDocumentViewer.mount(st.querySelector('.lv-document'), {
+        name: it.n, sourceUrl: mediaUrl(it), documentUrl: '/api/library/document/' + encodeURIComponent(it.id),
+        downloadUrl: '/api/library/file/' + encodeURIComponent(it.id) + '?dl=1',
+      });
+    }
     if (playback) {
       const media = st.querySelector('audio,video');
       if (media) {
@@ -1468,6 +1477,7 @@
         if(nodes.length&&(i<0 || (e.shiftKey?i===0:i===nodes.length-1))){e.preventDefault();nodes[e.shiftKey?nodes.length-1:0].focus();}return;
       }
       if (inField) return;
+      if (e.key !== 'Escape' && e.target.closest('.axon-doc')) return;
       if (e.key !== 'Escape' && (e.target.closest('audio,video') || ($('#lib-viewer').classList.contains('lv-compact') && !e.target.closest('#lib-viewer')))) {
         if ($('#lib-viewer').classList.contains('lv-compact') && !e.target.closest('#lib-viewer')) libraryKeyboard(e);
         return;

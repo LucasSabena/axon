@@ -24,7 +24,7 @@
   "scripts": {
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
-    "build": "bun run scripts/build-ui.ts && bun build src/index.ts --outdir dist --target bun && mkdir -p dist/storage && cp src/software-host.py dist/software-host.py && cp src/transcribe_worker.py dist/transcribe_worker.py && cp src/storage/scan-host.py dist/scan-host.py && cp src/storage/versions-host.py dist/versions-host.py && cp src/storage/file-task-host.py dist/file-task-host.py && cp src/storage/file-task-host.py dist/storage/file-task-host.py && cp src/storage/trash-host.py dist/storage/trash-host.py && cp src/storage/force-delete-host.py dist/storage/force-delete-host.py && cp src/storage/compose-release-host.py dist/storage/compose-release-host.py && cp src/storage/edit-host.py dist/storage/edit-host.py && cp src/storage/volumes-host.py dist/storage/volumes-host.py && cp src/storage/cloud-download-host.py dist/storage/cloud-download-host.py && cp src/platform/backup-host.py dist/backup-host.py && cp src/platform/desktop-host.py dist/desktop-host.py && cp src/mozjpeg-worker.ts dist/mozjpeg-worker.ts && bun run scripts/check-dist.ts",
+    "build": "bun run scripts/build-ui.ts && bun build src/index.ts --outdir dist --target bun && mkdir -p dist/storage && cp src/software-host.py dist/software-host.py && cp src/transcribe_worker.py dist/transcribe_worker.py && cp src/storage/scan-host.py dist/scan-host.py && cp src/storage/versions-host.py dist/versions-host.py && cp src/storage/file-task-host.py dist/file-task-host.py && cp src/storage/file-task-host.py dist/storage/file-task-host.py && cp src/storage/trash-host.py dist/storage/trash-host.py && cp src/storage/force-delete-host.py dist/storage/force-delete-host.py && cp src/storage/compose-release-host.py dist/storage/compose-release-host.py && cp src/storage/edit-host.py dist/storage/edit-host.py && cp src/storage/volumes-host.py dist/storage/volumes-host.py && cp src/storage/cloud-download-host.py dist/storage/cloud-download-host.py && cp src/platform/backup-host.py dist/backup-host.py && cp src/platform/desktop-host.py dist/desktop-host.py && cp src/mozjpeg-worker.ts dist/mozjpeg-worker.ts && cp src/document-convert.py dist/document-convert.py && bun run scripts/check-dist.ts",
     "test": "bun run scripts/test.ts",
     "test:agents": "for f in scripts/*-test.py; do echo \"== $f\"; python3 \"$f\" || exit 1; done",
     "check": "tsc --noEmit && bun run scripts/check-frontend.ts && bun run scripts/check-dist.ts",
@@ -43,7 +43,8 @@
     "@jsquash/jpeg": "^1.6.0",
     "hono": "^4.4.8",
     "js-yaml": "^4.1.0",
-    "lucide": "^1.48.0"
+    "lucide": "^1.48.0",
+    "pdfjs-dist": "^6.4.299"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",

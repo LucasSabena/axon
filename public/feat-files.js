@@ -225,7 +225,7 @@
     if (IMG_EXT.has(ext) || EXOTIC_EXT.has(ext)) return 'image';
     if (VID_EXT.has(ext)) return 'video';
     if (AUD_EXT.has(ext)) return 'audio';
-    if (ext === 'pdf') return 'pdf';
+    if (window.AxonDocumentViewer?.supports(name)) return 'document';
     if (CODE_EXT.has(ext) || TEXT_EXT.has(ext) || !name.includes('.') || /^\.env(?:\.|$)/i.test(name)) return 'text';
     return 'other';
   }
@@ -237,7 +237,9 @@
     if (VID_EXT.has(ext)) return 'film';
     if (AUD_EXT.has(ext)) return 'music';
     if (CODE_EXT.has(ext)) return 'file-code';
-    if (TEXT_EXT.has(ext) || ext === 'pdf') return 'file-text';
+    if (['csv', 'tsv', 'xls', 'xlsx', 'xlsm', 'ods'].includes(ext)) return 'table-2';
+    if (['ppt', 'pptx', 'pps', 'ppsx', 'odp'].includes(ext)) return 'presentation';
+    if (TEXT_EXT.has(ext) || window.AxonDocumentViewer?.supports(e.name)) return 'file-text';
     if (IMG_EXT.has(ext) || EXOTIC_EXT.has(ext)) return 'image';
     if (ARC_EXT.has(ext)) return 'archive';
     return 'file';
@@ -950,6 +952,8 @@
   window.addEventListener('focus', queueRefresh);
 
   // ---------- Preview pane ----------
+  let documentPreview = null;
+  let previewGeneration = 0;
   const previewUrl = (p) => `/api/files/preview?path=${encodeURIComponent(p)}`;
 
   // Minimal markdown → HTML for the preview pane. Everything passes through
@@ -1040,6 +1044,8 @@
     const entry = S.entries.find((e) => e.name === name);
     const p = join(S.cwd, name);
     const kind = kindFor(name);
+    documentPreview?.destroy(); documentPreview = null;
+    const generation = ++previewGeneration;
     S.preview = { path: p, name, kind };
     window.AxonRecent?.add({section:'files',name,path:p,url:window.AxonNavigation.url('files',{...fileParams(),item:name,edit:null})});
     el('fm-preview').classList.remove('hidden');
@@ -1054,7 +1060,7 @@
 
     const body = el('fm-prev-body');
     body.innerHTML = '<div class="fm-pv-loading">Cargando…</div>';
-    const stale = () => S.preview?.path !== p; // user already clicked another file
+    const stale = () => previewGeneration !== generation || S.preview?.path !== p; // user already clicked another file
 
     if (kind === 'image') {
       const img = new Image();
@@ -1092,13 +1098,11 @@
       body.querySelector('audio').addEventListener('error', () => {
         if (!stale()) renderPrevFallback('Este audio no se puede reproducir en el navegador');
       });
-    } else if (kind === 'pdf') {
-      const f = document.createElement('iframe');
-      f.className = 'fm-pv-frame';
-      f.src = previewUrl(p);
-      f.title = name;
-      body.innerHTML = '';
-      body.appendChild(f);
+    } else if (kind === 'document') {
+      documentPreview = window.AxonDocumentViewer.mount(body, {
+        name, sourceUrl: previewUrl(p), documentUrl: '/api/files/document?path=' + encodeURIComponent(p),
+        downloadUrl: '/api/files/download?path=' + encodeURIComponent(p),
+      });
     } else if (kind === 'text') {
       api(`/api/files/read?path=${encodeURIComponent(p)}`, { signal: AbortSignal.timeout(20_000) })
         .then((data) => {
@@ -1141,7 +1145,8 @@
       window.AxonNavigation.close({ ...fileParams(), item: null, edit: null }); return;
     }
     if (!S.preview) return;
-    S.preview = null;
+    S.preview = null; previewGeneration++;
+    documentPreview?.destroy(); documentPreview = null;
     // innerHTML reset also stops any playing audio/video.
     el('fm-prev-body').innerHTML = '';
     el('fm-preview').classList.add('hidden');
@@ -1154,7 +1159,7 @@
     if (S.preview) download(S.preview.path, S.preview.name);
   });
   el('fm-prev-ext').addEventListener('click', () => {
-    if (S.preview) window.open(previewUrl(S.preview.path), '_blank', 'noopener');
+    if (S.preview) window.open(S.preview.kind === 'document' ? window.AxonNavigation.url('files', { ...fileParams(), edit: null }) : previewUrl(S.preview.path), '_blank', 'noopener');
   });
   el('fm-prev-edit').addEventListener('click', () => {
     if (S.preview) openEditor(S.preview.path);
@@ -1194,7 +1199,7 @@
 
   // Arrow keys walk through previewable files while the pane is open.
   document.addEventListener('keydown', (e) => {
-    if (!S.preview || !sec.classList.contains('active') || S.editingPath) return;
+    if (!S.preview || !sec.classList.contains('active') || S.editingPath || e.target.closest('.axon-doc')) return;
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
     if (document.querySelector('.modal:not(.hidden)')) return;
     const tag = (e.target.tagName || '').toLowerCase();
@@ -1511,6 +1516,7 @@
 
   document.addEventListener('keydown', (e) => {
     if (sec.classList.contains('fm-cloud-mode')) return;
+    if (e.key !== 'Escape' && e.target.closest('.axon-doc')) return;
     if (e.key !== 'Escape') return;
     // Modals handle their own Escape (or block the editor close while open).
     if (document.querySelector('.fm-confirm-modal')) return;
@@ -2855,7 +2861,7 @@
   }
 
   document.addEventListener('keydown', (e) => {
-    if (!sec.classList.contains('active') || sec.classList.contains('fm-cloud-mode') || S.editingPath) return;
+    if (!sec.classList.contains('active') || sec.classList.contains('fm-cloud-mode') || S.editingPath || e.target.closest('.axon-doc')) return;
     if (document.querySelector('.modal:not(.hidden)')) return;
     const tag = (e.target.tagName || '').toLowerCase();
     if (['input', 'textarea', 'select'].includes(tag) || e.target.isContentEditable) return;

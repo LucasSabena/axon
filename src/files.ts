@@ -14,6 +14,7 @@ import {MaintenanceError} from './storage/types';
 import { volumeForPath } from './file-volumes';
 import { hostVolumes, initHostStorage, resolveHostPath } from './host-storage';
 import { fileTreeSize } from './file-sizes';
+import { documentResponse } from './document-preview';
 
 // ---------------------------------------------------------------------------
 // File manager routes — browse / read / edit / upload / download host files.
@@ -427,6 +428,13 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
     } finally {
       try { await fh?.close(); } catch { /* ignore */ }
     }
+  });
+
+  // Office previews share the existing Files root/disk authorization.
+  app.on(['GET', 'POST'], '/api/files/document', async c => {
+    const r = await resolveAllowed(c.req.query('path'));
+    if (!r.path) return c.json({ ok: false, error: r.error }, (r.status ?? 403) as 403);
+    return documentResponse(r.path, c.req.raw, '/api/files/document?path=' + encodeURIComponent(r.path));
   });
 
   // ---------- Preview (inline stream + Range + format conversion) ----------

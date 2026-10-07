@@ -7,6 +7,15 @@ if(!result.success){for(const log of result.logs)console.error(log);process.exit
 await mkdir('public/vendor/webawesome',{recursive:true});
 await cp('node_modules/@awesome.me/webawesome/dist/styles','public/vendor/webawesome/styles',{recursive:true});
 
+// Ship the locked PDF engine, worker and optional font/image data locally.
+// They are not requested until a document is opened.
+await cp('node_modules/pdfjs-dist/build/pdf.min.mjs', 'public/vendor/pdf.js');
+await cp('node_modules/pdfjs-dist/build/pdf.worker.min.mjs', 'public/vendor/pdf.worker.js');
+for (const folder of ['cmaps', 'standard_fonts', 'wasm', 'iccs']) {
+  await cp('node_modules/pdfjs-dist/' + folder, 'public/vendor/pdf/' + folder, { recursive: true });
+}
+await cp('node_modules/pdfjs-dist/LICENSE', 'public/vendor/pdf/LICENSE');
+
 // Browser/CDN caches can keep assets for hours — even past a deploy. Every
 // ?v= reference to a shipped file gets a content-derived URL on each build;
 // manual bumps proved lossy and a stale asset under a recycled version
