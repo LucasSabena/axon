@@ -46,6 +46,17 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium
       - name: Isolated navigation, accessibility and responsive QA
         run: pnpm run qa:full
+      - name: Preserve isolated QA diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: isolated-qa-reports
+          path: |
+            /tmp/axon-full-qa/**/report.json
+            /tmp/axon-full-qa/**/failure.json
+            /tmp/axon-full-qa/server.log
+          retention-days: 7
+          if-no-files-found: ignore
       - name: Validate bootstrap
         run: bash -n install.sh
       - name: Build distributed Docker image

@@ -82,5 +82,8 @@ try {
   await writeFile(path.join(output, 'report.json'), JSON.stringify({ origin, sections: Object.keys(SECTIONS).length, checks, errors, apiErrors, hostMutations: 0 }, null, 2));
   await context.close(); await browser.close();
 }
-if (checks.some(c => !c.passed) || errors.length || apiErrors.length) throw new Error('Audit failed; see ' + path.join(output, 'report.json'));
+if (checks.some(c => !c.passed) || errors.length || apiErrors.length) {
+  console.error(JSON.stringify({ failedChecks: checks.filter(c => !c.passed), errors, apiErrors }));
+  throw new Error('Audit failed; see ' + path.join(output, 'report.json'));
+}
 console.log(JSON.stringify({ passed: checks.length, sections: Object.keys(SECTIONS).length, errors: errors.length, apiErrors: apiErrors.length }));
