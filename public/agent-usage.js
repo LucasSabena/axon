@@ -2,7 +2,9 @@
 (() => {
   'use strict';
   const cache = new Map();
-  let generation = 0, timer;
+  let generation = 0, timer, signedIn = true;
+  // The file is imported under bun test (no DOM) — register only in a browser.
+  typeof document !== 'undefined' && document.addEventListener('axon:session-expired', () => { signedIn = false; clearTimeout(timer); });
   const planNames = { plus: 'Plus', pro: 'Pro', free: 'Free', max: 'Max', team: 'Team', business: 'Business', enterprise: 'Enterprise' };
   const format = n => new Intl.NumberFormat('es-AR', { maximumFractionDigits: 1 }).format(n);
   function until(reset, now = Date.now() / 1000) {
@@ -16,7 +18,11 @@
   function freshness(at) {
     if (!at) return 'Sin lectura de cuotas';
     const mins = Math.floor(Math.max(0, Date.now() / 1000 - at) / 60);
-    return mins < 1 ? 'Actualizado recién' : `Actualizado hace ${mins} min`;
+    if (mins < 1) return 'Actualizado recién';
+    if (mins < 60) return `Actualizado hace ${mins} min`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `Actualizado hace ${hours} h`;
+    return `Actualizado hace ${Math.floor(hours / 24)} d`;
   }
   function message(account) {
     if (account.id === 'devin-local') return 'El login del CLI no permite leer este panel de cuotas. Conectá una consulta de Devin o revisá Usage & limits en su web.';
@@ -38,25 +44,27 @@
     const stale = account.stale;
     const notices = message(account);
     const balances = (account.balances || []).map(b => `<span>${esc(b.label)}: <strong>${esc(format(b.remaining))} ${esc(b.unit)}</strong></span>`).join('');
+    const dashboard = /^https?:\/\//i.test(account.dashboardUrl || '') ? account.dashboardUrl : null;
     const plan = account.plan === 'max' && /max_(5|20)x/.test(account.rateLimitTier || '') ? `Max ${account.rateLimitTier.match(/max_(5|20)x/)[1]}×` : planNames[account.plan] || account.plan;
     return `<div class="ag-usage-meta"><span>${plan ? `Plan <strong>${esc(plan)}</strong>` : 'Plan no informado'}${account.authMethod ? ` · Login ${esc(account.authMethod)}` : ''}</span>${stale ? '<span class="ag-usage-stale">Lectura anterior</span>' : ''}</div>
       ${notices ? `<p class="ag-usage-notice" role="status">${esc(notices)}</p>` : ''}
       ${windows.length ? `<div class="ag-usage-windows">${windows.map(w => {
         const percent = Math.max(0, Math.min(100, w.remainingPercent));
         const level = percent <= 10 ? 'low' : percent <= 25 ? 'warn' : 'normal';
-        return `<div class="ag-usage-window ${stale ? 'is-stale' : ''}"><div class="ag-usage-window-title"><span>${esc(w.label)}</span><strong>${esc(format(w.remainingPercent))}% <small>restante</small></strong></div><progress class="ag-usage-meter ag-usage-${level}" value="${percent}" max="100" aria-label="${esc(w.label)}: ${esc(format(w.remainingPercent))}% restante${stale ? ', lectura anterior' : ''}"></progress><div class="ag-usage-window-caption"><span>${esc(format(w.usedPercent))}% usado</span><span data-usage-reset="${w.resetsAt ?? ''}" title="${w.resetsAt ? esc(new Date(w.resetsAt * 1000).toISOString()) : ''}">${esc(until(w.resetsAt))}</span></div></div>`;
+        return `<div class="ag-usage-window ${stale ? 'is-stale' : ''}"><div class="ag-usage-window-title"><span>${esc(w.label)}</span><strong>${esc(format(w.remainingPercent))}% <small>restante</small></strong></div><progress class="ag-usage-meter ag-usage-${level}" value="${percent}" max="100" aria-label="${esc(w.label)}: ${esc(format(w.remainingPercent))}% restante${stale ? ', lectura anterior' : ''}"></progress><div class="ag-usage-window-caption"><span>${esc(format(w.usedPercent))}% usado</span><span data-usage-reset="${w.resetsAt ?? ''}" title="${w.resetsAt ? esc(new Date(w.resetsAt * 1000).toLocaleString('es-AR')) : ''}">${esc(until(w.resetsAt))}</span></div></div>`;
       }).join('')}</div>` : ''}
       ${balances || account.extraUsageEnabled !== undefined || account.availableResets != null || account.notes?.length ? `<div class="ag-usage-balances">${balances}${account.extraUsageEnabled !== undefined ? `<span>Uso extra ${account.extraUsageEnabled ? 'habilitado' : 'deshabilitado'}</span>` : ''}${account.availableResets != null ? `<span>Reinicios disponibles: <strong>${esc(format(account.availableResets))}</strong></span>` : ''}${(account.notes || []).map(n => `<span>${esc(n)}</span>`).join('')}</div>` : ''}
-      <div class="ag-usage-source"><span data-usage-fetched="${account.fetchedAt || ''}">${esc(freshness(account.fetchedAt))}</span><span>${esc(account.source)} · ${esc(account.credentialSource)}</span>${account.dashboardUrl ? `<a href="${esc(account.dashboardUrl)}" target="_blank" rel="noopener noreferrer">Ver en el proveedor ${icon('external-link')}</a>` : ''}</div>`;
+      <div class="ag-usage-source"><span data-usage-fetched="${account.fetchedAt || ''}">${esc(freshness(account.fetchedAt))}</span><span>${esc(account.source)} · ${esc(account.credentialSource)}</span>${dashboard ? `<a href="${esc(dashboard)}" target="_blank" rel="noopener noreferrer">Ver en el proveedor ${icon('external-link')}</a>` : ''}</div>`;
   }
 
   globalThis.AxonAgentUsage = {
     until, contents,
     async mount(host, agent) {
       if (!host) return;
+      host.dataset.panelAgent = agent;
       clearTimeout(timer);
       const gen = ++generation, inline = !!host.querySelector('[data-account-usage]');
-      const alive = () => host.isConnected && gen === generation;
+      const alive = () => host.isConnected && gen === generation && signedIn;
       let data = cache.get(agent), loading = false, editing = false;
       const zones = () => inline ? [...host.querySelectorAll('[data-account-usage]')] : [host];
       function render() {
@@ -87,6 +95,8 @@
             } catch (err) { errToast(err); }
           };
           host.querySelectorAll('[data-usage-disconnect]').forEach(b => { b.onclick = async () => {
+            const account = data?.accounts.find(a => a.id === b.dataset.usageDisconnect);
+            if (!(await confirmDialog('Desconectar consulta', `Se elimina la consulta de cuotas${account?.label ? ` de "${account.label}"` : ''} y su token guardado en el servidor. El login del agente no se toca.`, 'Desconectar'))) return;
             try { data = await api('/api/agent-usage/devin/disconnect', { method: 'POST', body: { id: b.dataset.usageDisconnect }, busy: b }); cache.set(agent, data); render(); }
             catch (err) { errToast(err); }
           }; });

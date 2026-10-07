@@ -64,7 +64,9 @@
   const error = document.querySelector('#settings-error');
   layout.append(tabs, content); form.prepend(layout); form.append(error, footer);
   let saved = '';
-  const snapshot = () => JSON.stringify([...form.querySelectorAll('.settings-pane input:not([data-local]), .settings-pane textarea, #settings-notify-provider')].filter(n=>!['settings-motion'].includes(n.id)).map(n=>[n.id,n.value]));
+  // Visual-only controls (density, motion) persist via localStorage, not the
+  // form payload — exclude them or every visit reports fake unsaved changes.
+  const snapshot = () => JSON.stringify([...form.querySelectorAll('.settings-pane input:not([data-local]), .settings-pane textarea, .settings-pane select:not([data-local])')].filter(n=>!['settings-motion','settings-density'].includes(n.id)).map(n=>[n.id,n.value]));
   function dirty() { document.querySelector('#settings-save-state').textContent = snapshot() === saved ? 'Sin cambios pendientes' : 'Tenés cambios sin guardar'; }
   let selected='general';
   function select(key) {
@@ -101,7 +103,7 @@
   panes.appearance.addEventListener('click',e=>{const b=e.target.closest('[data-theme-choice]');if(b)setTheme(b.dataset.themeChoice);});
   document.querySelector('#theme-current').addEventListener('click',()=>{document.querySelector('#settings-btn').click();select('appearance');});
   document.addEventListener('axon:theme', syncThemes);
-  const density = document.querySelector('#settings-density'); density.value = localStorage.getItem('axon:density') || 'theme';
+  const density = document.querySelector('#settings-density'); density.dataset.local = 'true'; density.value = localStorage.getItem('axon:density') || 'theme';
   const motion = document.querySelector('#settings-motion'); motion.checked = localStorage.getItem('axon:reduce-motion') === 'true';
   function appearance() { document.documentElement.dataset.density = density.value; document.documentElement.dataset.reduceMotion = String(motion.checked); localStorage.setItem('axon:density',density.value); localStorage.setItem('axon:reduce-motion',String(motion.checked)); }
   density.addEventListener('change',appearance); motion.addEventListener('change',appearance); appearance();
@@ -117,20 +119,41 @@
     promptPower(word) {
       return new Promise(resolve=>{
         const modal=document.createElement('div'); modal.className='modal';
-        modal.innerHTML=`<div class="modal-content"><h3>${word==='REINICIAR'?'Reiniciar':'Apagar'} el servidor</h3><p>El dashboard y los servicios se van a desconectar. Escribí ${word} para confirmar.</p><input aria-label="Confirmación" autocomplete="off"><div class="modal-actions"><button type="button" class="btn-secondary">Cancelar</button><button type="button" class="btn-danger" disabled>Confirmar</button></div></div>`;
+        modal.setAttribute('role','dialog'); modal.setAttribute('aria-modal','true');
+        modal.innerHTML=`<div class="modal-content"><h3 id="power-prompt-title">${word==='REINICIAR'?'Reiniciar':'Apagar'} el servidor</h3><p>El dashboard y los servicios se van a desconectar. Escribí ${word} para confirmar.</p><input aria-label="Confirmación" autocomplete="off"><div class="modal-actions"><button type="button" class="btn-secondary">Cancelar</button><button type="button" class="btn-danger" disabled>Confirmar</button></div></div>`;
+        modal.setAttribute('aria-labelledby','power-prompt-title');
         const input=modal.querySelector('input'), buttons=modal.querySelectorAll('button');
-        const done=value=>{modal.remove();resolve(value);};
+        const done=value=>{modal.remove();document.removeEventListener('keydown',onKey,true);resolve(value);};
+        const onKey=e=>{if(e.key==='Escape'){e.stopPropagation();done(null);}};
         input.addEventListener('input',()=>buttons[1].disabled=input.value.trim().toUpperCase()!==word);
-        buttons[0].addEventListener('click',()=>done(null)); buttons[1].addEventListener('click',()=>done(input.value));document.body.append(modal);
+        input.addEventListener('keydown',e=>{if(e.key==='Enter'&&!buttons[1].disabled)done(input.value);});
+        buttons[0].addEventListener('click',()=>done(null)); buttons[1].addEventListener('click',()=>done(input.value));
+        modal.addEventListener('click',e=>{if(e.target===modal)done(null);});
+        document.addEventListener('keydown',onKey,true);document.body.append(modal);input.focus();
       });
     },
   };
+  // navigation.js ya registra un beforeunload global que consulta
+  // AxonPages.<sección>.dirty — exponerlo acá evita un segundo listener.
+  window.AxonPages.settings.dirty = () => window.AxonSettings.dirty();
+  // Los errores de guardado quedan al final del formulario: llevarlos a vista.
+  if(error)new MutationObserver(()=>{ if(error.textContent.trim()) error.scrollIntoView({block:'nearest'}); })
+    .observe(error,{childList:true,characterData:true,subtree:true});
+  // Busy state del modal 2FA: el submit vive en app.js — acá solo se refleja
+  // para bloquear doble click y avisar a lectores de pantalla.
+  const totpConfirm=document.querySelector('#totp-confirm'),totpModal=document.querySelector('#totp-modal'),totpError=document.querySelector('#totp-error');
+  if(totpConfirm&&totpModal){
+    const clearBusy=()=>{totpConfirm.disabled=false;totpConfirm.classList.remove('is-busy');totpConfirm.removeAttribute('aria-busy');};
+    totpConfirm.addEventListener('click',()=>{totpConfirm.disabled=true;totpConfirm.classList.add('is-busy');totpConfirm.setAttribute('aria-busy','true');});
+    const settle=()=>{if(totpModal.classList.contains('hidden')||totpError?.textContent.trim())clearBusy();};
+    new MutationObserver(settle).observe(totpModal,{attributes:true,attributeFilter:['class']});
+    if(totpError)new MutationObserver(settle).observe(totpError,{childList:true,characterData:true,subtree:true});
+  }
   window.AxonPages.settings.canLeave=async()=>{
     if(!window.AxonSettings.dirty())return true;
     if(!await confirmDialog('Cambios sin guardar','Si salís se pierden los cambios de configuración.','Salir sin guardar'))return false;
     saved=snapshot();dirty();return true;
   };
-  window.addEventListener('beforeunload',e=>{if(window.AxonSettings.dirty()){e.preventDefault();e.returnValue='';}});
   const restoreSettings=window.AxonPages.settings.restore;
   window.AxonPages.settings.restore=async(params={})=>{await restoreSettings();select(params.section||sessionStorage.getItem('axon:settings-tab')||'general');if(selected==='connections'&&params.connection)await window.AxonConnections?.refresh(params);};
   window.AxonPages.settings.params=()=>({section:selected});

@@ -73,7 +73,7 @@ test('Shared links remain private, owner-scoped, and cannot become arbitrary net
   v.folders.set('/Compartida',[]);await v.connect();const s=await v.dbx.addShared(by.actorId,'https://www.dropbox.com/scl/fo/token/folder?rlkey=fixture-secret&dl=0');
   expect(JSON.stringify(v.dbx.status(by.actorId))).not.toContain('fixture-secret');expect(JSON.stringify(v.store.list('dropbox-shared'))).not.toContain('fixture-secret');expect(()=>v.dbx.source('other',s.id)).toThrow();
   for(const u of ['http://www.dropbox.com/s/id/file','https://dropbox.com.evil.test/s/id/file','https://user:pass@www.dropbox.com/s/id/file','https://127.0.0.1/s/id/file'])expect(()=>sharedUrl(u)).toThrow();
-  for(const p of ['../a','/a/../b','/a\\b','/a\0','/a/'])expect(()=>cloudPath(p)).toThrow();
+  for(const p of ['../a','/a/../b','/a//b','/a\\b','/a\0','/a/'])expect(()=>cloudPath(p)).toThrow();
   expect(headerJson({path:'/Música/ñ.mp3'})).not.toMatch(/[^\x00-\x7e]/);
 }));
 

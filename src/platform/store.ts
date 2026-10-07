@@ -15,6 +15,7 @@ export interface AuditEntry {
   projectId?: string; status: 'running' | 'ok' | 'failed' | 'interrupted'; httpStatus?: number;
   durationMs?: number; recovery?: { label: string; url: string }; detail?: string; operationId?:string;
 }
+export interface AuditFilters { status?: string; actor?: string; action?: string; q?: string }
 export class PlatformError extends Error { constructor(message: string, readonly status = 400) { super(message); } }
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const text = (input: unknown, max = 200): string => {
@@ -72,13 +73,16 @@ export class PlatformStore {
   authenticate(token: string): ApiIdentity | null {
     if (typeof token !== 'string' || token.length > 200 || !/^axon_([a-f0-9-]{36})_[A-Za-z0-9_-]{43}$/.test(token)) return null;
     const id = token.slice(5, 41);
-    const row = this.db.query('SELECT hash,payload,revoked FROM tokens WHERE id=?').get(id) as {hash:string;payload:string;revoked:number} | null;
+    const row = this.db.query('SELECT hash,payload,revoked,last_used FROM tokens WHERE id=?').get(id) as {hash:string;payload:string;revoked:number;last_used:number|null} | null;
     if (!row || row.revoked) return null;
     const a = Buffer.from(digest(token)), b = Buffer.from(row.hash);
     if (a.length !== b.length || !timingSafeEqual(a,b)) return null;
     const identity = JSON.parse(row.payload) as ApiIdentity;
-    if (identity.expiresAt <= Date.now()) return null;
-    this.db.query('UPDATE tokens SET last_used=? WHERE id=?').run(Date.now(),id);
+    const now = Date.now();
+    if (identity.expiresAt <= now) return null;
+    // A WAL write with synchronous=FULL fsyncs; coalesce last_used to one
+    // write per minute instead of one per authenticated request.
+    if (!row.last_used || now - row.last_used > 60000) this.db.query('UPDATE tokens SET last_used=? WHERE id=?').run(now,id);
     return identity;
   }
   permits(identity: ApiIdentity, projectId: string, scope: Scope) { return identity.grants.some(g => g.projectId === projectId && g.scopes.includes(scope)); }
@@ -90,23 +94,57 @@ export class PlatformStore {
     return (this.db.query('SELECT payload,revoked,last_used FROM tokens ORDER BY rowid DESC').all() as any[]).map(r => ({...JSON.parse(r.payload),revoked:!!r.revoked,lastUsed:r.last_used}));
   }
   revoke(id: string, actor: string) {
-    const changed = this.db.query('UPDATE tokens SET revoked=1 WHERE id=? AND revoked=0').run(id);
-    if (!changed.changes && !this.db.query('SELECT id FROM tokens WHERE id=?').get(id)) throw new PlatformError('Token no encontrado',404);
+    // Only the owner may revoke; other people's tokens answer like missing ones.
+    const changed = this.db.query("UPDATE tokens SET revoked=1 WHERE id=? AND revoked=0 AND json_extract(payload,'$.owner')=?").run(id,actor);
+    if (!changed.changes && !this.db.query("SELECT id FROM tokens WHERE id=? AND json_extract(payload,'$.owner')=?").get(id,actor)) throw new PlatformError('Token no encontrado',404);
     this.append({actor,action:'token.revoke',resource:id,status:'ok'});
   }
+  private appended = 0;
   append(entry: Omit<AuditEntry,'id'|'at'>): AuditEntry {
     const value: AuditEntry = { ...entry,id:crypto.randomUUID(),at:Date.now() };
     this.db.query('INSERT INTO audit VALUES(?,?,?,?)').run(value.id,value.at,value.projectId || null,JSON.stringify(value));
+    // The table used to grow without bound — prune periodically (amortized,
+    // not every append, because each prune is a WAL write with FULL sync).
+    if (++this.appended % 64 === 0) this.pruneAudit();
     return value;
   }
-  audit(projectId?: string, before?: number, limit = 50) {
+  // Retention: 90 days or 20.000 entries, whichever ends first. The newest
+  // rows always survive — pruning never removes evidence of recent activity.
+  private pruneAudit() {
+    try {
+      const keep = (this.db.query('SELECT rowid FROM audit ORDER BY rowid DESC LIMIT 1 OFFSET 19999').get() as {rowid:number}|null)?.rowid || 0;
+      this.db.query('DELETE FROM audit WHERE at<? OR rowid<?').run(Date.now()-90*86_400_000,keep);
+    } catch { /* pruning must never break the append path */ }
+  }
+  audit(projectId?: string, before?: number, limit = 50, filters?: AuditFilters) {
     const values: (string|number)[] = [], where: string[] = [];
+    const like = (v: string) => `%${v.replace(/[%_\\]/g, (m) => '\\' + m)}%`;
     if (projectId) { where.push('project_id=?'); values.push(projectId); }
     if (before) { where.push('rowid<?'); values.push(before); }
+    if (filters?.status) { where.push(`json_extract(payload,'$.status')=?`); values.push(filters.status); }
+    if (filters?.actor) { where.push(`json_extract(payload,'$.actor') LIKE ? ESCAPE '\\'`); values.push(like(filters.actor)); }
+    if (filters?.action) { where.push(`json_extract(payload,'$.action') LIKE ? ESCAPE '\\'`); values.push(like(filters.action)); }
+    if (filters?.q) {
+      where.push(`(json_extract(payload,'$.action') LIKE ? ESCAPE '\\' OR json_extract(payload,'$.resource') LIKE ? ESCAPE '\\' OR json_extract(payload,'$.actor') LIKE ? ESCAPE '\\' OR json_extract(payload,'$.detail') LIKE ? ESCAPE '\\')`);
+      values.push(like(filters.q),like(filters.q),like(filters.q),like(filters.q));
+    }
     values.push(Math.min(100,Math.max(1,limit)));
     const rows = this.db.query(`SELECT rowid AS cursor,payload FROM audit ${where.length ? 'WHERE '+where.join(' AND ') : ''} ORDER BY rowid DESC LIMIT ?`).all(...values) as {cursor:number;payload:string}[];
-    return {entries:rows.map(r => ({...JSON.parse(r.payload),cursor:r.cursor})),next:rows.length ? rows.at(-1)!.cursor : null};
+    return {entries:this.groupEntries(rows.map(r => ({...JSON.parse(r.payload),cursor:r.cursor}))),next:rows.length ? rows.at(-1)!.cursor : null};
   }
+  // auditMutations appends one 'running' row and one result row per request
+  // sharing an operationId — the history shows a single row per operation.
+  private groupEntries(entries: (AuditEntry & {cursor:number})[]) {
+    const terminal = new Set(entries.filter(e => e.operationId && e.status !== 'running').map(e => e.operationId!));
+    const staleRunning = Date.now() - 2 * 3600_000;
+    return entries.filter(e => !(e.operationId && e.status === 'running' && terminal.has(e.operationId)))
+      .map(e => e.status === 'running' && e.at < staleRunning
+        // An orphaned 'En curso' (its result was never recorded, e.g. a
+        // restart mid-request) reads as interrupted instead of stuck forever.
+        ? {...e, status: 'interrupted' as const}
+        : e);
+  }
+  remove(kind: string,id: string) { this.db.query('DELETE FROM records WHERE kind=? AND id=?').run(kind,id); }
   get<T>(kind: string,id: string): T | undefined { const row = this.db.query('SELECT payload FROM records WHERE kind=? AND id=?').get(kind,id) as {payload:string} | null; return row ? JSON.parse(row.payload) : undefined; }
   put(kind: string,id: string,payload: unknown) { this.db.query('INSERT INTO records VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET payload=excluded.payload').run(kind,id,JSON.stringify(payload)); }
   list<T>(kind: string): T[] { return (this.db.query('SELECT payload FROM records WHERE kind=? ORDER BY rowid DESC').all(kind) as {payload:string}[]).map(r => JSON.parse(r.payload)); }

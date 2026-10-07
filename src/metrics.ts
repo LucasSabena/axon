@@ -1,6 +1,7 @@
 import type { FileVolume } from './file-volumes';
 import { readFile, writeFile, mkdir, readdir } from 'fs/promises';
 import { readFileSync } from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import type { Hono } from 'hono';
 import { getServerStats } from './stats';
@@ -112,7 +113,12 @@ function readNetTotals(): { rx: number; tx: number } | null {
   }
 }
 
+// A stalled stats read must never stack samples up — skip while one runs.
+let sampling = false;
+
 async function sample(): Promise<void> {
+  if (sampling) return;
+  sampling = true;
   try {
     const stats = await getServerStats();
     const t = Date.now();
@@ -134,6 +140,7 @@ async function sample(): Promise<void> {
     if (net) lastNet = { rx: net.rx, tx: net.tx, t };
     saveSoon();
   } catch { /* sampling is best-effort */ }
+  sampling = false;
 }
 
 export function startMetricsLoop(): void {
@@ -207,6 +214,9 @@ async function snapshotProcs(): Promise<ProcSnap[]> {
 }
 
 const PROCS_SAMPLE_MS = 200;
+// Raw jiffies can exceed 100% on multi-threaded processes; divide by core
+// count so the UI shows 0-100% of total capacity.
+const CPU_COUNT = Math.max(1, os.cpus().length);
 
 // ---------- Routes ----------
 
@@ -233,22 +243,20 @@ export function registerMetricsRoutes(app: Hono): void {
   app.get('/api/metrics/procs', async (c) => {
     const n = Math.max(1, Math.min(parseInt(c.req.query('n') || '10', 10) || 10, 50));
     const tck = await getClkTck();
+    // Two jiffies reads 200ms apart over the whole table → ranking by live
+    // cpu%, not RSS (a cpu-burner with small RSS must not be invisible).
     const first = await snapshotProcs();
-    // Two jiffies reads 200ms apart for the top-15 by RSS → live cpu%.
-    const top = first.sort((a, b) => b.rssMB - a.rssMB).slice(0, 15);
-    const base = new Map(top.map((p) => [p.pid, p.jiffies]));
+    const base = new Map(first.map((p) => [p.pid, p.jiffies]));
     await new Promise((r) => setTimeout(r, PROCS_SAMPLE_MS));
     const second = await snapshotProcs();
-    const byPid = new Map(second.map((p) => [p.pid, p]));
-    const procs = top
+    const procs = second
       .map((p) => {
-        const s2 = byPid.get(p.pid);
-        const dj = s2 ? Math.max(0, s2.jiffies - (base.get(p.pid) ?? s2.jiffies)) : 0;
-        const cpu = Math.round((dj / tck / (PROCS_SAMPLE_MS / 1000)) * 1000) / 10;
-        return { pid: p.pid, name: s2?.name || p.name, cpu, rssMB: s2?.rssMB ?? p.rssMB };
+        const dj = Math.max(0, p.jiffies - (base.get(p.pid) ?? p.jiffies));
+        const cpu = Math.round(Math.min(100, (dj / tck / (PROCS_SAMPLE_MS / 1000)) * 100 / CPU_COUNT) * 10) / 10;
+        return { pid: p.pid, name: p.name, cpu, rssMB: p.rssMB };
       })
       .sort((a, b) => b.cpu - a.cpu || b.rssMB - a.rssMB)
       .slice(0, n);
-    return c.json({ ok: true, procs });
+    return c.json({ ok: true, procs, cpuCount: CPU_COUNT });
   });
 }

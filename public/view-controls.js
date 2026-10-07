@@ -26,7 +26,12 @@
     if(target)new MutationObserver(filter).observe(target,{childList:true,subtree:false});
     if(['projects','docker','domains'].includes(section)){
       const refresh=document.createElement('button'); refresh.className='btn-secondary'; refresh.title='Actualizar'; refresh.setAttribute('aria-label',`Actualizar ${section}`); refresh.innerHTML=icon('refresh-cw');
-      refresh.addEventListener('click',()=>AxonUI.busy(refresh,()=>loaders[section]()));bar.append(refresh);
+      refresh.addEventListener('click',()=>AxonUI.busy(refresh,async()=>{
+        // Domain statuses are cached server-side (30s TTL) — bust the cache
+        // first so the reload below reflects a real probe, not stale data.
+        if(section==='domains')await api('/api/domains/status?fresh=1').catch(()=>{});
+        return loaders[section]();
+      }));bar.append(refresh);
     }
   }
   const toolbar=document.createElement('div');toolbar.className='term-toolbar';

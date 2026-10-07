@@ -1,20 +1,25 @@
 /* Native software inventory. Catalog recommendations never define inventory. */
 (() => {
 'use strict';
-let snapshot=null, flight=null, timer=null, mode='updates', query='', manager='', scope='', page=0;
+let snapshot=null, flight=null, timer=null, mode='updates', query='', manager='', scope='', state='', page=0, signedIn=false;
 const selected=new Set(), size=75;
+document.addEventListener('axon:authenticated',()=>{signedIn=true;});
+document.addEventListener('axon:session-expired',()=>{signedIn=false;});
 const el=id=>document.getElementById(id);
 const states={unchecked:'Pendiente',available:'Actualización disponible',current:'Sin actualizaciones detectadas',held:'Retenido',unsupported:'Sólo lectura',unmanaged:'Origen no comprobado',error:'No se pudo comprobar'};
-const params=()=>({view:mode==='updates'?'':mode,q:query,manager,scope,page:page?String(page+1):''});
+const params=()=>({view:mode==='updates'?'':mode,q:query,manager,scope,state,page:page?String(page+1):''});
 const sync=()=>window.AxonNavigation?.update('programs',params());
+let navTimer=null;const deferredSync=()=>{clearTimeout(navTimer);navTimer=setTimeout(sync,400);};
 const sourceLabel=p=>p.manager+' · '+(p.scope==='system'?'Sistema':p.user);
 function selectionLabel(){
  el('update-all-btn').textContent=selected.size?`Revisar ${selected.size} seleccionadas`:'Revisar actualizaciones';
  el('programs-grid').querySelectorAll('[data-select]').forEach(input=>input.checked=selected.has(input.dataset.select));
+ const ids=matching().slice(page*size,(page+1)*size).filter(p=>p.canUpdate).map(p=>p.id);
+ el('software-select-page').textContent=ids.length&&ids.every(id=>selected.has(id))?'Deseleccionar página':'Seleccionar página';
 }
 function matching(){
  const q=query.toLocaleLowerCase('es');
- return (snapshot?.installations||[]).filter(p=>(mode!=='updates'||p.canUpdate)&&(!manager||p.manager===manager)&&(!scope||p.scope===scope)&&(!q||[p.name,p.packageName,p.user,p.root,p.description].join(' ').toLocaleLowerCase('es').includes(q))).sort((a,b)=>Number(b.canUpdate)-Number(a.canUpdate)||a.name.localeCompare(b.name,'es'));
+ return (snapshot?.installations||[]).filter(p=>(mode!=='updates'||p.canUpdate)&&(!manager||p.manager===manager)&&(!scope||p.scope===scope)&&(!state||p.updateState===state)&&(!q||[p.name,p.packageName,p.user,p.root,p.description].join(' ').toLocaleLowerCase('es').includes(q))).sort((a,b)=>(mode==='updates'?Number(b.canUpdate)-Number(a.canUpdate)||0:0)||a.name.localeCompare(b.name,'es'));
 }
 function render(){
  if(!snapshot)return;
@@ -34,12 +39,13 @@ function render(){
   el('programs-grid').innerHTML=snapshot.sources.filter(s=>s.manager!=='metadata').map(s=>`<article class="software-source"><div><strong>${esc(sourceLabel(s))}</strong><p>${s.available?s.complete?'Inventario leído':'Inventario incompleto':'No disponible en este host'}</p><small>${esc(s.root||'')}</small></div><div><span>${esc(s.available?(s.updateState==='ok'?'Comprobado':states[s.updateState]||'Sólo lectura'):'No instalado')}</span>${s.metadataAt?`<p>Índices: ${esc(new Date(s.metadataAt).toLocaleString())}</p>`:''}${s.note?`<p>${esc(s.note)}</p>`:''}${s.manager==='apt'&&s.available&&snapshot.canAdministerSystem?'<button class="btn-secondary" data-indices>Actualizar índices</button>':''}</div></article>`).join('');
  }else{
   const visible=rows.slice(page*size,(page+1)*size);
-  el('programs-grid').innerHTML=visible.length?`<div class="software-columns" aria-hidden="true"><span>Programa / paquete</span><span>Instalación</span><span>Versión</span><span>Estado</span></div>`+visible.map(p=>`<article class="software-row"><div class="software-name"><input type="checkbox" data-select="${esc(p.id)}" aria-label="Seleccionar ${esc(p.name)} · ${esc(sourceLabel(p))}"${selected.has(p.id)?' checked':''}${!p.canUpdate?' disabled':''}><img src="${esc(p.iconUrl)}" alt="" width="32" height="32" loading="lazy"><div><button type="button" class="software-detail" data-detail="${esc(p.id)}">${esc(p.name)}</button><small>${esc(p.packageName)}</small></div></div><span class="software-origin">${esc(sourceLabel(p))}</span><span class="software-version">${esc(p.version||'Versión no registrada')}${p.canUpdate?`<small>→ ${esc(p.targetVersion||p.targetRevision||p.targetCommit?.slice(0,12)||'nuevo commit')}</small>`:''}</span><div class="software-status">${p.canUpdate?`<button type="button" class="btn-secondary" data-update="${esc(p.id)}"${snapshot.checking?' disabled':''}>${icon('arrow-up-circle')} Revisar</button>`:`<span>${esc(states[p.updateState]||'No comprobado')}</span>`}</div></article>`).join(''):`<div class="empty-state">${mode==='updates'?(snapshot.checking?'Buscando actualizaciones…':'No hay actualizaciones gestionadas disponibles. Consultá Instalados y Fuentes para ver la cobertura.'):'No hay instalaciones que coincidan con los filtros.'}</div>`;
+  el('programs-grid').innerHTML=visible.length?`<div class="software-columns" role="row" aria-hidden="true"><span role="columnheader">Programa / paquete</span><span role="columnheader">Instalación</span><span role="columnheader">Versión</span><span role="columnheader">Estado</span></div>`+visible.map(p=>`<article class="software-row" role="row"><div class="software-name" role="cell"><input type="checkbox" data-select="${esc(p.id)}" aria-label="Seleccionar ${esc(p.name)} · ${esc(sourceLabel(p))}"${selected.has(p.id)?' checked':''}${!p.canUpdate?' disabled':''}><img src="${esc(p.iconUrl)}" alt="" width="32" height="32" loading="lazy" onerror="this.style.visibility='hidden'"><div><button type="button" class="software-detail" data-detail="${esc(p.id)}">${esc(p.name)}</button><small>${esc(p.packageName)}</small></div></div><span class="software-origin" role="cell">${esc(sourceLabel(p))}</span><span class="software-version" role="cell">${esc(p.version||'Versión no registrada')}${p.canUpdate?`<small>→ ${esc(p.targetVersion||p.targetRevision||p.targetCommit?.slice(0,12)||'nuevo commit')}</small>`:''}</span><div class="software-status" role="cell">${p.canUpdate?`<button type="button" class="btn-secondary" data-update="${esc(p.id)}"${snapshot.checking?' disabled':''}>${icon('arrow-up-circle')} Revisar</button>`:`<span class="software-state s-${esc(p.updateState)}">${esc(states[p.updateState]||'No comprobado')}</span>`}</div></article>`).join(''):`<div class="empty-state">${mode==='updates'?(snapshot.checking?'Buscando actualizaciones…':'No hay actualizaciones gestionadas disponibles. Consultá Instalados y Fuentes para ver la cobertura.'):'No hay instalaciones que coincidan con los filtros.'}</div>`;
  }
  el('software-pagination').classList.toggle('hidden',mode==='sources');
  el('software-page').textContent=`${rows.length} resultados · página ${page+1} de ${pages}`;
  el('software-prev').disabled=page===0;el('software-next').disabled=page>=pages-1;
  el('software-select-page').disabled=!rows.slice(page*size,(page+1)*size).some(p=>p.canUpdate);
+ selectionLabel();
  refreshIcons();
 }
 async function load(fresh=false){
@@ -47,7 +53,7 @@ async function load(fresh=false){
  flight=(async()=>{try{
   snapshot=await api('/api/software'+(fresh?'?fresh=1':''));
   for(const id of selected)if(!snapshot.installations.some(p=>p.id===id&&p.canUpdate))selected.delete(id);
-  render();clearTimeout(timer);if(snapshot.checking&&!document.hidden&&activeTabName==='programs')timer=setTimeout(()=>load(),4000);
+  render();clearTimeout(timer);if(snapshot.checking&&!document.hidden&&activeTabName==='programs'&&signedIn)timer=setTimeout(()=>load(),4000);
   return snapshot;
  }catch(e){el('software-notice').innerHTML='<p class="software-warning">No se pudo leer el inventario. <button class="btn-secondary" data-retry>Reintentar</button></p>';errToast(e);return snapshot;}})().finally(()=>flight=null);
  return flight;
@@ -60,8 +66,11 @@ function dialog(title,html){
 function detail(id){
  const p=snapshot?.installations.find(p=>p.id===id);if(!p)return;
  const info=p.iconInfo;
- const d=dialog(p.name,`<dl class="software-facts"><dt>Paquete</dt><dd>${esc(p.packageName)}</dd><dt>Gestor</dt><dd>${esc(p.manager)}</dd><dt>Ámbito</dt><dd>${esc(p.scope==='system'?'Sistema':p.user+' (UID '+p.uid+')')}</dd><dt>Ubicación</dt><dd>${esc(p.root)}</dd><dt>Versión registrada</dt><dd>${esc(p.version||'No registrada')}</dd><dt>Estado</dt><dd>${esc(states[p.updateState]||p.updateState)}</dd>${p.origin?`<dt>Origen</dt><dd>${esc(p.origin)}</dd>`:''}${info?`<dt>Icono</dt><dd>${esc(info.label)}${info.attribution?`<small class="settings-help">${esc(info.attribution)} · ${esc(info.license||'')}</small>`:''}</dd>`:p.iconSource?`<dt>Icono</dt><dd>${esc(p.iconSource)}</dd>`:''}</dl>${info?.sourceUrl?`<p><a href="${esc(info.sourceUrl)}" target="_blank" rel="noopener noreferrer">Ver fuente del icono</a>${info.licenseUrl?` · <a href="${esc(info.licenseUrl)}" target="_blank" rel="noopener noreferrer">Licencia</a>`:''}</p>`:''}<p>${esc(p.description||'')}</p><p class="settings-help">${esc(p.reason||'La actualización se revisa con el gestor de esta instalación.')}</p>${p.integrationId?`<p><a href="/agentes?id=${p.integrationId==='claude-code'?'claude':encodeURIComponent(p.integrationId)}">Ver integración y cuentas</a></p>`:''}`);
+ const d=dialog(p.name,`<dl class="software-facts"><dt>Paquete</dt><dd>${esc(p.packageName)}</dd><dt>Gestor</dt><dd>${esc(p.manager)}</dd><dt>Ámbito</dt><dd>${esc(p.scope==='system'?'Sistema':p.user+' (UID '+p.uid+')')}</dd><dt>Ubicación</dt><dd>${esc(p.root)}</dd><dt>Versión registrada</dt><dd>${esc(p.version||'No registrada')}</dd>${p.canUpdate?`<dt>Actualización</dt><dd>${esc(p.targetVersion||p.targetRevision||p.targetCommit?.slice(0,12)||'nuevo commit')}</dd>`:''}<dt>Estado</dt><dd><span class="software-state s-${esc(p.updateState)}">${esc(states[p.updateState]||p.updateState)}</span></dd>${p.origin?`<dt>Origen</dt><dd>${esc(p.origin)}</dd>`:''}${p.homepage?`<dt>Sitio</dt><dd><a href="${esc(p.homepage)}" target="_blank" rel="noopener noreferrer">${esc(p.homepage)}</a></dd>`:''}${p.executables?.length?`<dt>Ejecutables</dt><dd>${p.executables.map(x=>`<code>${esc(x)}</code>`).join(' ')}</dd>`:''}${info?`<dt>Icono</dt><dd>${esc(info.label)}${info.attribution?`<small class="settings-help">${esc(info.attribution)} · ${esc(info.license||'')}</small>`:''}</dd>`:p.iconSource?`<dt>Icono</dt><dd>${esc(p.iconSource)}</dd>`:''}</dl>${info?.sourceUrl?`<p><a href="${esc(info.sourceUrl)}" target="_blank" rel="noopener noreferrer">Ver fuente del icono</a>${info.licenseUrl?` · <a href="${esc(info.licenseUrl)}" target="_blank" rel="noopener noreferrer">Licencia</a>`:''}</p>`:''}<p>${esc(p.description||'')}</p><p class="settings-help">${esc(p.reason||'La actualización se revisa con el gestor de esta instalación.')}</p>${p.integrationId?`<p><a href="/agentes?id=${p.integrationId==='claude-code'?'claude':encodeURIComponent(p.integrationId)}">Ver integración y cuentas</a></p>`:''}`);
  const b=document.createElement('button');b.type='button';b.className='btn-secondary';b.textContent='Elegir icono';d.querySelector('.modal-actions').prepend(b);b.onclick=()=>{d.close();iconPicker(p);};
+ const ig=document.createElement('button');ig.type='button';ig.className='btn-secondary';ig.textContent=p.ignored?'Dejar de ignorar':'Ignorar actualizaciones';ig.title=p.ignored?'Vuelve a comprobar esta instalación en los planes':'No se ofrece en actualizaciones; queda retenida en la configuración de AXON';
+ d.querySelector('.modal-actions').prepend(ig);
+ ig.onclick=async()=>{try{await AxonUI.busy(ig,async()=>{await api('/api/software/'+encodeURIComponent(p.id)+'/ignore',{method:'PUT',body:{ignored:!p.ignored}});d.close();await load(true);toast(p.ignored===undefined||!p.ignored?'Actualizaciones ignoradas':'Se vuelve a comprobar esta instalación','success');});}catch(e){errToast(e);}};
 }
 function iconPicker(p){
  const d=dialog('Icono de '+p.name,`<p class="settings-help">Buscá el programa o su proyecto. La selección se conserva en este servidor.</p><label for="software-icon-query">Buscar en el catálogo</label><input class="software-icon-query" id="software-icon-query" type="search" autocomplete="off"><div class="software-icon-results" aria-live="polite">Cargando catálogo…</div>`);
@@ -77,7 +86,7 @@ function iconPicker(p){
 }
 async function confirmPlan(plan){
  const count=plan.transactions.reduce((n,tx)=>n+tx.items.length,0);
- const d=dialog(`Revisar ${count} actualizaciones`,plan.transactions.map(tx=>`<section class="software-plan"><h4>${esc(sourceLabel(tx))}</h4><ul>${tx.items.map(p=>`<li><strong>${esc(p.name)}</strong> · ${esc(p.version||'?')} → ${esc(p.targetVersion||p.targetRevision||p.targetCommit?.slice(0,12)||'nuevo commit')}</li>`).join('')}</ul><p>${esc(tx.effects)}</p>${tx.simulation.complete?`<details><summary>${tx.simulation.changes.length} cambios en paquetes y dependencias</summary><ul>${tx.simulation.changes.map(c=>`<li>${esc(c.packageName)} → ${esc(c.targetVersion||'?')}</li>`).join('')}</ul></details>`:'<p class="settings-help">El gestor puede modificar dependencias. No ofrece una simulación completa en este adaptador.</p>'}</section>`).join('')+'<p class="settings-help">El plan vence en 10 minutos. Antes de ejecutar se vuelve a comprobar la instalación y el candidato. El resultado se verifica en el registro del gestor.</p>');
+ const d=dialog(`Revisar ${count} actualizaciones`,plan.transactions.map(tx=>`<section class="software-plan"><h4>${esc(sourceLabel(tx))}</h4>${tx.argv?.length?`<p class="software-cmd"><code>${esc(tx.argv.join(' '))}</code></p>`:''}<ul>${tx.items.map(p=>`<li><strong>${esc(p.name)}</strong> · ${esc(p.version||'?')} → ${esc(p.targetVersion||p.targetRevision||p.targetCommit?.slice(0,12)||'nuevo commit')}</li>`).join('')}</ul><p>${esc(tx.effects)}</p>${tx.simulation.complete?`<details><summary>${tx.simulation.changes.length} cambios en paquetes y dependencias</summary><ul>${tx.simulation.changes.map(c=>`<li>${esc(c.packageName)} → ${esc(c.targetVersion||'?')}</li>`).join('')}</ul></details>`:'<p class="settings-help">El gestor puede modificar dependencias. No ofrece una simulación completa en este adaptador.</p>'}</section>`).join('')+'<p class="settings-help">El plan vence en 10 minutos. Antes de ejecutar se vuelve a comprobar la instalación y el candidato. El resultado se verifica en el registro del gestor.'+(count>3?' La ejecución puede tardar varios minutos; el progreso queda en el trabajo registrado y podés seguir usando AXON.':'')+'</p>');
  const button=document.createElement('button');button.className='btn-primary';button.type='button';button.textContent='Actualizar';d.querySelector('.modal-actions').append(button);
  button.onclick=async()=>{try{await AxonUI.busy(button,async()=>{const {job}=await api('/api/software/execute',{method:'POST',body:{planId:plan.id}});d.close();openJobModal(job);await load(true);});}catch(e){errToast(e);}};
  refreshIcons();
@@ -89,9 +98,15 @@ function chooseInstallation(name,installations){
 async function review(ids,button){
  try{await AxonUI.busy(button,async()=>{const {plan}=await api('/api/software/plan',{method:'POST',body:{ids}});await confirmPlan(plan);});}catch(e){errToast(e);}
 }
-el('software-query').oninput=e=>{query=e.target.value;page=0;render();sync();};
+el('software-query').oninput=e=>{query=e.target.value;page=0;render();deferredSync();};
 el('software-manager').onchange=e=>{manager=e.target.value;page=0;render();sync();};
 el('software-scope').onchange=e=>{scope=e.target.value;page=0;render();sync();};
+// Filtro por estado: el select se agrega desde acá para no depender del markup.
+const stateSelect=document.createElement('select');stateSelect.id='software-state';stateSelect.setAttribute('aria-label','Filtrar por estado');
+stateSelect.innerHTML='<option value="">Todos los estados</option>'+Object.entries(states).map(([v,l])=>`<option value="${esc(v)}"${v===state?' selected':''}>${esc(l)}</option>`).join('');
+el('software-toolbar').append(stateSelect);
+stateSelect.onchange=e=>{state=e.target.value;page=0;render();sync();};
+el('programs-grid').setAttribute('role','table');
 el('software-modes').onclick=e=>{const b=e.target.closest('[data-mode]');if(b){mode=b.dataset.mode;page=0;render();sync();}};
 el('software-prev').onclick=()=>{page--;render();sync();};el('software-next').onclick=()=>{page++;render();sync();};
 el('software-select-page').onclick=()=>{const ids=matching().slice(page*size,(page+1)*size).filter(p=>p.canUpdate).map(p=>p.id);const remove=ids.every(id=>selected.has(id));ids.forEach(id=>remove?selected.delete(id):selected.size<200&&selected.add(id));selectionLabel();};
@@ -100,8 +115,19 @@ el('programs-grid').onclick=e=>{const b=e.target.closest('button');if(!b)return;
 el('software-notice').onclick=e=>{if(e.target.closest('[data-retry]'))load(true);};
 el('programs-refresh').onclick=e=>AxonUI.busy(e.currentTarget,()=>load(true));
 el('update-all-btn').onclick=e=>{const ids=selected.size?[...selected]:snapshot.installations.filter(p=>p.canUpdate).map(p=>p.id);if(ids.length>200){mode='updates';render();toast('Seleccioná hasta 200 instalaciones para revisar el plan','info');return;}review(ids,e.currentTarget);};
-async function refreshIndices(button){if(!await confirmDialog('Actualizar índices APT','Se consultan los repositorios del sistema. No se instalan ni actualizan paquetes.','Consultar'))return;try{await AxonUI.busy(button,async()=>{const {job}=await api('/api/software/refresh-indices',{method:'POST'});openJobModal(job);});}catch(e){errToast(e);}}
-document.addEventListener('axon:job-complete',()=>{selected.clear();if(activeTabName==='programs')load(true);});
-window.AxonPages ||= {};window.AxonPages.programs={params,capture:params,restore:async p=>{mode=['installed','sources'].includes(p.view)?p.view:'updates';query=p.q||'';manager=p.manager||'';scope=['system','user'].includes(p.scope)?p.scope:'';page=Math.max(0,(Number(p.page)||1)-1);el('software-query').value=query;el('software-scope').value=scope;await load();render();}};
+// El diálogo genérico de index.html fija variant="danger"; acá se ajusta por
+// acción y se restaura, sin tocar el archivo compartido.
+async function confirmVariant(title,body,okLabel,variant='brand'){
+ const ok=document.querySelector('#confirm-ok'),prev=ok?.getAttribute('variant');
+ if(ok)ok.setAttribute('variant',variant);
+ try{return await confirmDialog(title,body,okLabel);}
+ finally{if(ok){if(prev==null)ok.removeAttribute('variant');else ok.setAttribute('variant',prev);}}
+}
+async function refreshIndices(button){if(!await confirmVariant('Actualizar índices APT','Se consultan los repositorios del sistema. No se instalan ni actualizan paquetes.','Consultar','brand'))return;try{await AxonUI.busy(button,async()=>{const {job}=await api('/api/software/refresh-indices',{method:'POST'});openJobModal(job);});}catch(e){errToast(e);}}
+// Reload re-validates the selection against canUpdate, so only ids the job
+// actually touched drop out. Sólo los jobs de software recargan: un backup o
+// una transferencia ya no pisan la selección en curso.
+document.addEventListener('axon:job-complete',e=>{const job=e.detail;if(activeTabName==='programs'&&job?.steps?.some(s=>s.group?.startsWith('software:')))load(true);});
+window.AxonPages ||= {};window.AxonPages.programs={params,capture:params,restore:async p=>{mode=['installed','sources'].includes(p.view)?p.view:'updates';query=p.q||'';manager=p.manager||'';scope=['system','user'].includes(p.scope)?p.scope:'';state=states[p.state]?p.state:'';page=Math.max(0,(Number(p.page)||1)-1);el('software-query').value=query;el('software-scope').value=scope;stateSelect.value=state;await load();render();}};
 window.AxonSoftware={load,review,confirmPlan,chooseInstallation,installed:()=>{mode='installed';page=0;render();sync();},snapshot:()=>snapshot};
 })();

@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, rename } from 'fs/promises';
+import { readFile, writeFile, mkdir, rename, chmod } from 'fs/promises';
 import * as path from 'path';
 import { hashPassword } from './auth';
 import type { AppConfig } from './types';
@@ -22,6 +22,9 @@ export async function loadConfig(): Promise<AppConfig> {
   try {
     const content = await readFile(CONFIG_PATH, 'utf-8');
     config = JSON.parse(content);
+    // Holds passwordHash/totpSecret — fix the mode if an older release or a
+    // manual edit left it group/world-readable.
+    await chmod(CONFIG_PATH, 0o600).catch(() => {});
   } catch {
     const initialPassword = crypto.randomUUID() + crypto.randomUUID();
     config = {
@@ -53,9 +56,11 @@ let saveQueue: Promise<void> = Promise.resolve();
 export function saveConfig(config: AppConfig): Promise<void> {
   const text = JSON.stringify(config, null, 2);
   const operation = saveQueue.catch(() => {}).then(async () => {
-    await mkdir(path.dirname(CONFIG_PATH), { recursive: true });
+    await mkdir(path.dirname(CONFIG_PATH), { recursive: true, mode: 0o700 });
     const temp = `${CONFIG_PATH}.${process.pid}.tmp`;
-    await writeFile(temp, text, 'utf-8');
+    // mode travels with the temp file across rename — config.json contains
+    // the password hash and TOTP secret, it must stay owner-only.
+    await writeFile(temp, text, { encoding: 'utf-8', mode: 0o600 });
     await rename(temp, CONFIG_PATH);
   });
   saveQueue = operation;

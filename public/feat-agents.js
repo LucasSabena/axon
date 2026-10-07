@@ -19,6 +19,7 @@
   let settingsCache = {}; // agentId → settings payload (per page load)
   let railQuery = ''; // rail search filter (agent names)
   let searchTimer = null; // debounce for the global item search
+  let lastSearchQ = null; // last query actually fetched — dedups repeat keystrokes
   let pendingHighlight = null; // {kind,key} — flash item after detail load
   let healthState = {}; // `${agent}:${key}` → 'ok'|'bad'|'loading'
   let provHealth = {}; // `${agent}:${key}` → ProviderCheck result {state,msg,code,ms}
@@ -60,7 +61,7 @@
       btn.dataset.tab = 'agents';
       btn.innerHTML = `
         <i data-lucide="bot" class="lucide-icon"></i>
-        <span class="nav-label">Agents</span>
+        <span class="nav-label">Agentes</span>
         <span class="nav-count nav-alert hidden" id="nav-count-agents"></span>`;
       nav.insertBefore(btn, anchor);
       btn.addEventListener('click', activateTab);
@@ -145,6 +146,13 @@
 
     } catch (err) {
       errToast(err);
+      const rail = $('#agents-rail');
+      if (rail && !agentsList.length) {
+        rail.innerHTML = `<p class="agd-note" role="alert">${esc(err.message)}</p><button class="btn-secondary" id="agents-rail-retry">Reintentar</button>`;
+        rail.querySelector('#agents-rail-retry')?.addEventListener('click', () => loadAgents());
+      } else {
+        $('#agents-updated').textContent = 'No se pudo actualizar';
+      }
     }
   }
 
@@ -164,6 +172,9 @@
         const { docs, missing } = await api('/api/agent-docs');
         if(stale())return;
         docsCount = (docs || []).length;
+        // refresh the rail row so the count doesn't wait for a full reload
+        const docsSub = $('#agents-rail .agent-docs-row .agent-sub');
+        if (docsSub) docsSub.textContent = `${docsCount} archivos`;
         renderDocs(docs || [], missing || []);
       } else if (id === '__matrix') {
         const m = await api('/api/agents-matrix');
@@ -178,6 +189,15 @@
       }
     } catch (err) {
       errToast(err);
+      if (stale()) return;
+      if (silent && selectedDetail) {
+        // keep the last good render — surface the failed refresh inline
+        $('#agents-updated').textContent = 'No se pudo actualizar';
+      } else {
+        $('#agents-detail').innerHTML = `<div class="agents-placeholder" role="alert">${icon('alert-triangle')}<p>${esc(err.message)}</p><button class="btn-secondary" id="agd-retry">Reintentar</button></div>`;
+        $('#agd-retry')?.addEventListener('click', () => loadDetail(id));
+        refreshIcons();
+      }
     } finally {
       loadingDetail = false;
     }
@@ -250,11 +270,15 @@
     renderRail();
     const box = $('#agents-matches');
     clearTimeout(searchTimer);
-    if (railQuery.length < 2) { box.classList.add('hidden'); return; }
+    if (railQuery.length < 2) { lastSearchQ = null; box.classList.add('hidden'); return; }
     searchTimer = setTimeout(async () => {
       try {
         const query=railQuery;
+        // same keystroke sequence → reuse the last box instead of rescanning
+        if (query === lastSearchQ) { box.classList.remove('hidden'); return; }
         const { matches } = await api(`/api/agents-search?q=${encodeURIComponent(query)}`);
+        if(query!==railQuery)return;
+        lastSearchQ = query;
         if(query!==railQuery)return;
         if (!matches.length) { box.innerHTML = '<p class="ag-match-empty listener-note">Sin coincidencias</p>'; }
         else {
@@ -506,26 +530,31 @@
                 <td class="ag-mx-name"><span>${esc(r.name)}</span>${r.detail ? `<code title="${esc(r.detail)}">${esc(r.detail.slice(0, 42))}</code>` : ''}</td>
                 ${agents.map((a) => {
                   const s = r.cells[a.id];
-                  return `<td class="ag-mx-cell ${s ? `ag-mx-${s} ag-mx-tog` : 'ag-mx-na'}" ${s ? `data-agent="${a.id}" data-key="${esc(r.name)}" data-enabled="${s === 'on'}"` : ''} title="${s === 'on' ? 'Activo — click para desactivar' : s === 'off' ? 'Inactivo — click para activar' : 'No configurado'}">${s === 'on' ? icon('check') : s === 'off' ? icon('minus') : '·'}</td>`;
+                  return `<td class="ag-mx-cell ${s ? `ag-mx-${s} ag-mx-tog` : 'ag-mx-na'}" ${s ? `data-agent="${a.id}" data-key="${esc(r.name)}" data-enabled="${s === 'on'}" tabindex="0" role="button" aria-pressed="${s === 'on'}" aria-label="${esc(r.name)} en ${esc(a.name)}: ${s === 'on' ? 'activo' : 'inactivo'}"` : ''} title="${s === 'on' ? 'Activo — click para desactivar' : s === 'off' ? 'Inactivo — click para activar' : 'No configurado'}">${s === 'on' ? icon('check') : s === 'off' ? icon('minus') : '·'}</td>`;
                 }).join('')}
               </tr>`).join('')}
           </tbody>
         </table>
       </div>`;
-    box.querySelectorAll('.ag-mx-tog').forEach((c) => c.addEventListener('click', async () => {
-      const agent = c.dataset.agent, key = c.dataset.key, next = c.dataset.enabled !== 'true';
-      c.classList.add('ag-mx-busy');
-      try {
-        await api(`/api/agents/${agent}/toggle`, { method: 'POST', body: { kind: 'mcp', key, enabled: next } });
-        c.dataset.enabled = String(next);
-        c.className = `ag-mx-cell ag-mx-tog ag-mx-${next ? 'on' : 'off'}`;
-        c.innerHTML = next ? icon('check') : icon('minus');
-        refreshIcons();
-      } catch (err) {
-        c.classList.remove('ag-mx-busy');
-        errToast(err);
-      }
-    }));
+    box.querySelectorAll('.ag-mx-tog').forEach((c) => {
+      const flip = async () => {
+        const agent = c.dataset.agent, key = c.dataset.key, next = c.dataset.enabled !== 'true';
+        c.classList.add('ag-mx-busy');
+        try {
+          await api(`/api/agents/${agent}/toggle`, { method: 'POST', body: { kind: 'mcp', key, enabled: next } });
+          c.dataset.enabled = String(next);
+          c.className = `ag-mx-cell ag-mx-tog ag-mx-${next ? 'on' : 'off'}`;
+          c.setAttribute('aria-pressed', String(next));
+          c.innerHTML = next ? icon('check') : icon('minus');
+          refreshIcons();
+        } catch (err) {
+          c.classList.remove('ag-mx-busy');
+          errToast(err);
+        }
+      };
+      c.addEventListener('click', flip);
+      c.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void flip(); } });
+    });
     refreshIcons();
   }
 
@@ -654,6 +683,29 @@
     const a = selectedDetail;
     const box = $('#agents-detail');
     if (!a) return;
+    // A full innerHTML swap would reset open forms, scroll position, focus and
+    // the live sub-panels (accounts/usage/consumption keep their own polls and
+    // editing state). Same-agent re-renders move those nodes over and restore
+    // the transient UI state instead of remounting everything.
+    // only when the current content really is this agent's detail — docs /
+    // matrix / archive views share the same container without the marker.
+    const sameAgent = box.dataset.rendered === a.id && !!box.querySelector('.agd-tabs');
+    const keep = {};
+    if (sameAgent) {
+      for (const sel of ['[data-account-panel]', '[data-agent-usage-panel]', '[data-agent-consumption-panel]']) {
+        const n = box.querySelector(sel);
+        if (n?.dataset.panelAgent === a.id) keep[sel] = n;
+      }
+    }
+    const ui = sameAgent ? {
+      scroll: box.scrollTop,
+      forms: [...box.querySelectorAll('.agd-form:not(.hidden)')].map((f) => ({
+        kind: f.dataset.kind,
+        values: [...f.querySelectorAll('input,select')].map((i) => (i.type === 'checkbox' ? i.checked : i.value)),
+      })),
+      open: new Set([...box.querySelectorAll('details.ag-collapse')].map((d, i) => (d.open ? i : -1)).filter((i) => i >= 0)),
+      focus: document.activeElement && box.contains(document.activeElement) && document.activeElement.id ? document.activeElement.id : null,
+    } : null;
     const auth = a.auth;
     const multiAccount = ['codex', 'claude'].includes(a.id) && a.installed;
     const usagePanel = ['opencode', 'openchamber', 'devin'].includes(a.id) && a.installed;
@@ -783,15 +835,15 @@
     const visible = TAB_ORDER.filter((k) => secMap[k]);
     const active = visible.includes(agSubTab) ? agSubTab : 'skill';
     const tabsHtml = `
-      <div class="agd-tabs">
+      <div class="agd-tabs" role="tablist" aria-label="Secciones del agente">
         ${visible.map((k) => `
-          <button class="agd-tab ${k === active ? 'active' : ''}" data-agtab="${k}">
+          <button class="agd-tab ${k === active ? 'active' : ''}" data-agtab="${k}" role="tab" id="agtab-${k}" aria-controls="agpane-${k}" aria-selected="${k === active}" tabindex="${k === active ? '0' : '-1'}">
             ${icon(k === 'consumption' ? 'chart-no-axes-combined' : KIND_META[k].icon)} ${TAB_LABEL[k]}
-            <span class="agd-tab-count">${groups[k]?.length || ''}</span>
+            <span class="agd-tab-count" aria-hidden="true">${groups[k]?.length || ''}</span>
           </button>`).join('')}
       </div>`;
     const panesHtml = visible.map((k) =>
-      `<div class="agd-pane ${k === active ? 'active' : ''}" data-agtab="${k}">${secMap[k]}</div>`).join('');
+      `<div class="agd-pane ${k === active ? 'active' : ''}" data-agtab="${k}" role="tabpanel" id="agpane-${k}" aria-labelledby="agtab-${k}" tabindex="0">${secMap[k]}</div>`).join('');
 
     box.innerHTML = `
       <div class="agd-head">
@@ -808,16 +860,39 @@
       ${notes}
       ${tabsHtml}
       ${panesHtml}`;
+    box.dataset.rendered = a.id;
+    // bring the preserved sub-panels back before wiring — they keep their
+    // internal polls/editing state, so no remount is needed for them
+    for (const [sel, node] of Object.entries(keep)) box.querySelector(sel)?.replaceWith(node);
     wireDetail(box);
+    if (ui) {
+      box.scrollTop = ui.scroll;
+      for (const f of ui.forms) {
+        const el = box.querySelector(`.agd-form[data-kind="${f.kind}"]`);
+        if (!el) continue;
+        el.classList.remove('hidden');
+        [...el.querySelectorAll('input,select')].forEach((i, n) => {
+          if (f.values[n] === undefined) return;
+          if (i.type === 'checkbox') i.checked = f.values[n]; else i.value = f.values[n];
+        });
+      }
+      box.querySelectorAll('details.ag-collapse').forEach((d, i) => { if (ui.open.has(i)) d.open = true; });
+      if (ui.focus) box.querySelector(`#${CSS.escape(ui.focus)}`)?.focus();
+    }
     if (active === 'consumption') mountConsumption(box);
-    if (multiAccount) window.AxonAgentAccounts.mount(box.querySelector('[data-account-panel]'), a.id);
-    else if (usagePanel) void window.AxonAgentUsage.mount(box.querySelector('[data-agent-usage-panel]'), a.id);
+    if (multiAccount) {
+      const panel = box.querySelector('[data-account-panel]');
+      if (panel && panel.dataset.panelAgent !== a.id) { panel.dataset.panelAgent = a.id; window.AxonAgentAccounts.mount(panel, a.id); }
+    } else if (usagePanel) {
+      const panel = box.querySelector('[data-agent-usage-panel]');
+      if (panel && panel.dataset.panelAgent !== a.id) { panel.dataset.panelAgent = a.id; void window.AxonAgentUsage.mount(panel, a.id); }
+    }
     refreshIcons();
   }
 
   function itemRow(it, kind) {
     const toggle = it.toggleable
-      ? `<button class="ag-toggle ${it.enabled ? 'on' : ''}" data-key="${esc(it.key)}" data-kind="${kind}" data-enabled="${it.enabled}" title="${it.enabled ? 'Desactivar' : 'Activar'}"><span></span></button>`
+      ? `<button class="ag-toggle ${it.enabled ? 'on' : ''}" data-key="${esc(it.key)}" data-kind="${kind}" data-enabled="${it.enabled}" title="${it.enabled ? 'Desactivar' : 'Activar'}" aria-pressed="${it.enabled}" aria-label="${it.enabled ? 'Desactivar' : 'Activar'} ${esc(it.name)}"><span></span></button>`
       : '<span class="ag-toggle-none"></span>';
     const view = it.file
       ? `<button class="icon-btn ag-view" data-path="${esc(it.file)}" title="Ver / editar archivo">${icon('eye')}</button>` : '';
@@ -853,17 +928,35 @@
 
   function mountConsumption(box) {
     const host = box.querySelector('[data-agent-consumption-panel]');
-    if (host && !host.dataset.mounted) { host.dataset.mounted = 'true'; void window.AxonAgentConsumption.mount(host, selectedId); }
+    if (host && !host.dataset.mounted) { host.dataset.mounted = 'true'; host.dataset.panelAgent = selectedId; void window.AxonAgentConsumption.mount(host, selectedId); }
   }
 
   function wireDetail(box) {
-    box.querySelectorAll('.agd-tab').forEach((t) => t.addEventListener('click', () => {
+    const activateAgTab = (t, focus = false) => {
       agSubTab = t.dataset.agtab;
-      box.querySelectorAll('.agd-tab').forEach((x) => x.classList.toggle('active', x.dataset.agtab === agSubTab));
+      box.querySelectorAll('.agd-tab').forEach((x) => {
+        const on = x.dataset.agtab === agSubTab;
+        x.classList.toggle('active', on);
+        x.setAttribute('aria-selected', String(on));
+        x.tabIndex = on ? 0 : -1;
+      });
       box.querySelectorAll('.agd-pane').forEach((x) => x.classList.toggle('active', x.dataset.agtab === agSubTab));
+      if (focus) t.focus();
       if (agSubTab === 'config') { loadSettings(box); loadBackups(box); }
       if (agSubTab === 'consumption') mountConsumption(box);
-    }));
+    };
+    box.querySelectorAll('.agd-tab').forEach((t) => t.addEventListener('click', () => activateAgTab(t)));
+    // arrow-key tablist navigation (ARIA tabs pattern)
+    box.querySelector('.agd-tabs')?.addEventListener('keydown', (e) => {
+      const tabs = [...box.querySelectorAll('.agd-tab')];
+      const i = tabs.indexOf(e.target.closest?.('.agd-tab') || e.target);
+      if (i < 0) return;
+      const next = e.key === 'ArrowRight' ? tabs[(i + 1) % tabs.length]
+        : e.key === 'ArrowLeft' ? tabs[(i - 1 + tabs.length) % tabs.length]
+        : e.key === 'Home' ? tabs[0]
+        : e.key === 'End' ? tabs[tabs.length - 1] : null;
+      if (next) { e.preventDefault(); activateAgTab(next, true); }
+    });
 
     // if the agent opened straight into the config tab (persisted choice)
     if (box.querySelector('.agd-tab.active')?.dataset.agtab === 'config') { loadSettings(box); loadBackups(box); }
@@ -962,7 +1055,10 @@
     }));
 
     // "Verificar" — probe every copyable provider in this agent at once
-    box.querySelector('.agd-check-provs')?.addEventListener('click', async () => {
+    box.querySelector('.agd-check-provs')?.addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      if (btn.disabled) return;
+      btn.disabled = true;
       const provs = (selectedDetail?.items || []).filter((i) => i.kind === 'provider' && i.copyable);
       await Promise.all(provs.map(async (it) => {
         const dot = box.querySelector(`.ag-prov-health[data-key="${CSS.escape(it.key)}"]`);
@@ -976,6 +1072,7 @@
       const bad = provs.filter((it) => provHealth[`${selectedId}:${it.key}`]?.state === 'bad').length;
       const okn = provs.filter((it) => provHealth[`${selectedId}:${it.key}`]?.state === 'ok').length;
       toast(`Providers: ${okn} ok${bad ? `, ${bad} con error` : ''}`, bad ? 'error' : 'ok');
+      btn.disabled = false;
     });
 
     // preload cached health results so dots show the last known state
@@ -990,9 +1087,11 @@
       }).catch(() => {});
     }
 
-    box.querySelector('.agd-remove')?.addEventListener('click', async () => {
+    box.querySelector('.agd-remove')?.addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
       const ok = await confirmDialog('Quitar agente', `Se quita "${selectedDetail?.name}" del panel. Sus archivos en disco no se tocan.`, 'Quitar');
       if (!ok) return;
+      btn.disabled = true;
       try {
         await api('/api/agents-discovered/remove', { method: 'POST', body: { id: selectedId } });
         toast('Agente quitado', 'ok');
@@ -1002,6 +1101,7 @@
         $('#agents-detail').innerHTML = `<div class="agents-placeholder">${icon('bot')}<p>Elegí un agente, Chats o Memorias para ver su contenido.</p></div>`;
         refreshIcons();
       } catch (err) { errToast(err); }
+      finally { if (btn.isConnected) btn.disabled = false; }
     });
     box.querySelector('.agd-update')?.addEventListener('click', async (e) => {
       const pid = e.currentTarget.dataset.pid;
@@ -1021,12 +1121,14 @@
     box.querySelectorAll('.ag-toggle').forEach((t) => t.addEventListener('click', async () => {
       const key = t.dataset.key, kind = t.dataset.kind, next = t.dataset.enabled !== 'true';
       t.classList.toggle('on', next);
+      t.setAttribute('aria-pressed', String(next));
       t.closest('.ag-item')?.classList.toggle('ag-off', !next);
       try {
         await api(`/api/agents/${selectedId}/toggle`, { method: 'POST', body: { kind, key, enabled: next } });
         t.dataset.enabled = String(next);
       } catch (err) {
         t.classList.toggle('on', !next);
+        t.setAttribute('aria-pressed', String(!next));
         t.closest('.ag-item')?.classList.toggle('ag-off', next);
         errToast(err);
       }
@@ -1256,7 +1358,7 @@
       const plainBool = !e.options || e.options.every((o) => o === 'true' || o === 'false');
       if (e.type === 'bool' && plainBool) {
         return `<div class="ag-set-row">${keyCell}
-          <button class="ag-toggle ${e.value ? 'on' : ''} ag-set-bool" data-key="${esc(e.key)}" data-val="${e.value}"><span></span></button></div>`;
+          <button class="ag-toggle ${e.value ? 'on' : ''} ag-set-bool" data-key="${esc(e.key)}" data-val="${e.value}" aria-pressed="${!!e.value}" aria-label="${esc(label)}"><span></span></button></div>`;
       }
       if (e.options?.length) {
         const opts = [...new Set([cur, ...e.options])];
@@ -1267,7 +1369,7 @@
       }
       if (e.type === 'bool') {
         return `<div class="ag-set-row">${keyCell}
-          <button class="ag-toggle ${e.value ? 'on' : ''} ag-set-bool" data-key="${esc(e.key)}" data-val="${e.value}"><span></span></button></div>`;
+          <button class="ag-toggle ${e.value ? 'on' : ''} ag-set-bool" data-key="${esc(e.key)}" data-val="${e.value}" aria-pressed="${!!e.value}" aria-label="${esc(label)}"><span></span></button></div>`;
       }
       return `<div class="ag-set-row">${keyCell}
         <span class="ag-set-ctl">
@@ -1310,11 +1412,13 @@
     list.querySelectorAll('.ag-set-bool').forEach((t) => t.addEventListener('click', async () => {
       const next = t.dataset.val !== 'true';
       t.classList.toggle('on', next);
+      t.setAttribute('aria-pressed', String(next));
       try {
         await saveKey(t.dataset.key, next);
         t.dataset.val = String(next);
       } catch (err) {
         t.classList.toggle('on', !next);
+        t.setAttribute('aria-pressed', String(!next));
         errToast(err);
       }
     }));
@@ -1379,6 +1483,12 @@
   }};
   document.addEventListener('click',e=>{
     if(!e.target.closest('#tab-agents'))return;
-    queueMicrotask(()=>{if(window.AxonNavigation?.ready && !window.AxonNavigation.applying && window.AxonNavigation.current.section==='agents')window.AxonNavigation.update('agents',{id:selectedId,tab:agSubTab,...window.AgentContext.params()});});
+    queueMicrotask(()=>{
+      if(!(window.AxonNavigation?.ready && !window.AxonNavigation.applying && window.AxonNavigation.current.section==='agents'))return;
+      // skip replaceState spam when nothing actually changed
+      const next={id:selectedId,tab:agSubTab,...window.AgentContext.params()};
+      const norm=o=>JSON.stringify(Object.keys(o||{}).sort().map(k=>[k,o[k]??null]));
+      if(norm(window.AxonNavigation.current.params)!==norm(next))window.AxonNavigation.update('agents',next);
+    });
   });
 })();

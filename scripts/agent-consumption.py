@@ -21,10 +21,20 @@ def number(v):
 
 def stamp(v):
     try:
-        if isinstance(v, (int, float)): return float(v) / (1000 if v > 10**11 else 1)
+        if isinstance(v, bool): return 0
+        if isinstance(v, (int, float)):
+            n = float(v)
+            # Epoch magnitude varies by source: s ~1e9, ms ~1e12, µs ~1e15,
+            # ns ~1e18. Normalize whatever lands here instead of trusting the
+            # field, then bound it to a plausible epoch range.
+            for limit, div in ((10**17, 10**9), (10**14, 10**6), (10**11, 10**3)):
+                if n >= limit:
+                    n /= div
+                    break
+            return n if math.isfinite(n) and 0 <= n <= 10**11 else 0
         parsed = datetime.fromisoformat(str(v).replace('Z', '+00:00'))
         return (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).timestamp()
-    except (ValueError, TypeError): return 0
+    except (ValueError, TypeError, OverflowError, OSError): return 0
 
 def digest(v): return hashlib.sha256(v.encode()).hexdigest()
 def text(v): return str(v or '')[:240]
@@ -278,19 +288,28 @@ class Index:
         path = self.folder / 'index.sqlite'
         if path.is_symlink(): raise ValueError('Índice no válido')
         self.db = sqlite3.connect(path, timeout=5); self.db.row_factory = sqlite3.Row; os.chmod(path, 0o600)
-        self.db.execute('pragma journal_mode=wal')
-        self.db.execute('create table if not exists files(path text primary key, signature text, offset integer, state text)')
-        self.db.execute('create table if not exists events(id text primary key, agent text, session text, at real, model text, provider text, account text, accountBasis text, input integer, output integer, cacheRead integer, cacheWrite integer, reasoning integer, cacheWrite1h integer)')
-        self.db.execute('create index if not exists usage_time on events(agent,at)')
-        self.db.execute('create table if not exists meta(key text primary key,value text)'); self.db.commit()
-        if 'project' not in {r[1] for r in self.db.execute('pragma table_info(events)')}:
-            self.db.execute("alter table events add column project text not null default ''"); self.db.commit()
-        if not self.busy and not self.db.execute("select 1 from meta where key='project-attribution-v1'").fetchone():
-            # Re-read bounded native metadata. Existing counts remain visible;
-            # reinsertions enrich their project without adding duplicate usage.
-            self.db.execute('delete from files')
-            self.db.execute("delete from meta where key like 'oc:%'")
-            self.db.execute("insert into meta values('project-attribution-v1','1')"); self.db.commit()
+        # When another worker holds the lock, skip every write — schema DDL
+        # and migrations would block/fail under contention, and this instance
+        # only reads whatever schema the owning writer already created.
+        if not self.busy:
+            try:
+                self.db.execute('pragma journal_mode=wal')
+                self.db.execute('create table if not exists files(path text primary key, signature text, offset integer, state text)')
+                self.db.execute('create table if not exists events(id text primary key, agent text, session text, at real, model text, provider text, account text, accountBasis text, input integer, output integer, cacheRead integer, cacheWrite integer, reasoning integer, cacheWrite1h integer)')
+                self.db.execute('create index if not exists usage_time on events(agent,at)')
+                self.db.execute('create table if not exists meta(key text primary key,value text)'); self.db.commit()
+                if 'project' not in {r[1] for r in self.db.execute('pragma table_info(events)')}:
+                    self.db.execute("alter table events add column project text not null default ''"); self.db.commit()
+                if not self.db.execute("select 1 from meta where key='project-attribution-v1'").fetchone():
+                    # Re-read bounded native metadata. Existing counts remain visible;
+                    # reinsertions enrich their project without adding duplicate usage.
+                    self.db.execute('delete from files')
+                    self.db.execute("delete from meta where key like 'oc:%'")
+                    self.db.execute("insert into meta values('project-attribution-v1','1')"); self.db.commit()
+            except sqlite3.Error:
+                # Contention with a just-started worker or a read-only dir must
+                # degrade to a stale report, not kill the endpoint.
+                self.busy = True
         self.deadline = time.monotonic() + budget; self.warnings = []; self.pending = 0; self.scanned = 0
 
     def close(self): self.db.close(); os.close(self.lock)
@@ -326,7 +345,9 @@ class Index:
                 for name in names:
                     p = Path(directory, name)
                     if p.suffix not in ('.jsonl', '.json') or p.is_symlink() or (agent == 'gemini' and not name.startswith('session-')): continue
-                    s = p.stat(); inode = (s.st_dev, s.st_ino)
+                    try: s = p.stat()
+                    except OSError: continue  # vanished or unreadable between walk and stat
+                    inode = (s.st_dev, s.st_ino)
                     if inode in seen: continue
                     seen.add(inode); paths.append((agent, p, account, s))
         return sorted(paths, key=lambda x: x[3].st_mtime, reverse=True)
@@ -386,7 +407,10 @@ class Index:
                 latest = since; count = 0
                 for r in db.execute(query, (since,)):
                     if time.monotonic() > self.deadline: self.pending += 1; break
-                    d = json.loads(r['data']); model = obj(d.get('model')); usage = d.get('tokens')
+                    # A malformed row must not abort the rest of the import.
+                    try: d = json.loads(r['data'])
+                    except ValueError: continue
+                    model = obj(d.get('model')); usage = d.get('tokens')
                     directory = d.get('cwd') or d.get('directory') or ''
                     for session_table in ('session_v2', 'session'):
                         if directory or session_table not in tables: continue
@@ -428,9 +452,14 @@ class Index:
         def empty(): return dict(**{k: 0 for k in FIELDS}, total=0, requests=0, usd=0, pricedRequests=0, unpricedRequests=0, components={}, partialRequests=0)
         summary = empty(); groups = {}; days = {}; sessions = set(); unknown = set()
         for raw in rows:
-            row = dict(raw); price = catalog.price(row); key = (row['agent'], row['provider'], row['model'], row['account'], price.get('model'), json.dumps(price.get('rates'), sort_keys=True))
+            row = dict(raw)
+            if not isinstance(row.get('at'), (int, float)) or not math.isfinite(row['at']):
+                self.warnings.append('Se descartó un registro con fecha inválida.'); continue
+            price = catalog.price(row); key = (row['agent'], row['provider'], row['model'], row['account'], price.get('model'), json.dumps(price.get('rates'), sort_keys=True))
             group = groups.setdefault(key, dict(agent=row['agent'], provider=row['provider'], model=row['model'], account=row['account'], accountBasis=row['accountBasis'], priceModel=price.get('model'), priceBasis=price.get('basis'), rates=price.get('rates'), **empty()))
-            day = datetime.fromtimestamp(row['at'], tz).date().isoformat(); daily = days.setdefault(day, dict(day=day, **empty()))
+            try: day = datetime.fromtimestamp(row['at'], tz).date().isoformat()
+            except (OverflowError, OSError, ValueError): self.warnings.append('Se descartó un registro con fecha fuera de rango.'); continue
+            daily = days.setdefault(day, dict(day=day, providers={}, **empty()))
             for target in (summary, group, daily):
                 for k in FIELDS: target[k] += row[k]
                 target['total'] += total(row); target['requests'] += 1
@@ -439,6 +468,9 @@ class Index:
                     target['usd'] += price['usd']; target['pricedRequests'] += 1
                     if price['status'] == 'partial': target['partialRequests'] += 1
                     for k, v in price['components'].items(): target['components'][k] = target['components'].get(k, 0) + v
+            prov = daily['providers'].setdefault(row['provider'], dict(total=0, usd=0, requests=0, pricedRequests=0))
+            prov['total'] += total(row); prov['requests'] += 1
+            if price['status'] != 'missing': prov['usd'] += price['usd']; prov['pricedRequests'] += 1
             sessions.add(row['agent'] + ':' + row['session'])
             if price['status'] != 'priced': unknown.add(row['provider'] + '/' + row['model'])
         # Facets stay stable while model/provider/account filters narrow results.

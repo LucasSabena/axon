@@ -48,28 +48,51 @@
     try{
       const inventory=await api('/api/project-hub-inventory');
       panel.innerHTML=`<h3>Vincular recursos</h3><form class="platform-form"><fieldset><legend>Contenedores</legend>${inventory.containers.map(c=>`<label><input type="checkbox" name="container" value="${esc(c.id)}" ${data.bindings.containers.includes(c.id)?'checked':''}>${esc(c.name)}</label>`).join('')}</fieldset><fieldset><legend>Dominios</legend>${inventory.domains.map(d=>`<label><input type="checkbox" name="domain" value="${esc(d.id)}" ${data.bindings.domains.includes(d.id)?'checked':''}>${esc(d.fullDomain)}</label>`).join('')}</fieldset><div class="platform-toolbar"><button type="submit" class="btn-primary">Guardar vínculos</button><button type="button" class="btn-secondary" data-cancel>Cancelar</button></div></form>`;
-      panel.querySelector('[data-cancel]').onclick=()=>panel.remove();panel.querySelector('form').onsubmit=e=>{e.preventDefault();AxonUI.busy(panel.querySelector('[type=submit]'),async()=>{try{await api(`/api/project-hub/${encodeURIComponent(id)}/bindings`,{method:'PUT',body:{containers:[...panel.querySelectorAll('[name=container]:checked')].map(n=>n.value),domains:[...panel.querySelectorAll('[name=domain]:checked')].map(n=>n.value)}});await showHub(id);}catch(err){error(panel,err,()=>bindResources(id,data));}});};
+      const form=panel.querySelector('form');
+      // Any interaction marks the form in-use so the section poll leaves the
+      // hub alone until the user saves or cancels.
+      ['input','change','focusin'].forEach(t=>form.addEventListener(t,()=>form.dataset.dirty='1'));
+      panel.querySelector('[data-cancel]').onclick=()=>panel.remove();form.onsubmit=e=>{e.preventDefault();AxonUI.busy(panel.querySelector('[type=submit]'),async()=>{try{await api(`/api/project-hub/${encodeURIComponent(id)}/bindings`,{method:'PUT',body:{containers:[...panel.querySelectorAll('[name=container]:checked')].map(n=>n.value),domains:[...panel.querySelectorAll('[name=domain]:checked')].map(n=>n.value)}});await showHub(id);}catch(err){error(panel,err,()=>bindResources(id,data));}});};
     }catch(err){error(panel,err,()=>bindResources(id,data));}
   }
   window.AxonPages.projects={restore:params=>showHub(params.id),params:()=>projectId?{id:projectId}:{}};
-  const originalProjectLoader=loaders.projects;loaders.projects=()=>projectId?showHub(projectId):originalProjectLoader();
+  const originalProjectLoader=loaders.projects;
+  // The 5s section poll calls this loader; a full hub re-render would destroy
+  // the bind form (and any in-progress checkbox selection). Skip the refresh
+  // whenever an open/dirty/focused form lives inside the hub — the manual
+  // "Actualizar" button calls showHub() directly and is unaffected.
+  loaders.projects=()=>{
+    if(!projectId)return originalProjectLoader();
+    // Cualquier form abierto (dirty o no) se pierde si el poll re-renderiza el
+    // hub — no basta con esperar a que el usuario lo toque.
+    if(hub.querySelector('form'))return;
+    return showHub(projectId);
+  };
   // Reuse existing tmux tabs; a stable session name groups the project's terminal.
   document.addEventListener('axon:route',async e=>{
     if(e.detail.section==='terminal'&&e.detail.params.project){try{const data=await api('/api/project-hub/'+encodeURIComponent(e.detail.params.project)+'/resources');const name=/^[a-zA-Z0-9_-]{1,32}$/.test(e.detail.params.session||'')?e.detail.params.session:'project-'+data.project.id.replace(/[^a-zA-Z0-9_-]/g,'').slice(0,23);await openTermTab(name,data.project.cwd,{label:data.project.name});}catch(err){errToast(err);}}
   });
-  const auditNode=document.getElementById('audit-content');let auditProject='',auditNext=null;
+  const auditNode=document.getElementById('audit-content');let auditProject='',auditNext=null,auditFilters={status:'',q:''};
+  const auditQuery=(includeBefore)=>{const q=new URLSearchParams();if(auditProject)q.set('project',auditProject);if(auditFilters.status)q.set('status',auditFilters.status);if(auditFilters.q)q.set('q',auditFilters.q);if(includeBefore&&auditNext)q.set('before',auditNext);return q;};
   async function loadAudit(params={},append=false){
     auditProject=params.project||auditProject||'';busy(auditNode);
     try{
-      const query=new URLSearchParams();if(auditProject)query.set('project',auditProject);if(append&&auditNext)query.set('before',auditNext);
-      const data=await api('/api/audit?'+query);auditNext=data.next;
-      const rows=list(data.entries,a=>`${badge(a.status)} <strong>${esc(a.action)}</strong><small>${esc(a.actor)}${a.credentialId?' · token '+esc(a.credentialId.slice(0,8)):''} · ${date(a.at)}${a.httpStatus?' · HTTP '+a.httpStatus:''}</small><small>${esc(a.resource)}</small>${a.detail?`<small>${esc(a.detail)}</small>`:''}${a.recovery?link(a.recovery.url,a.recovery.label):''}`,'Todavía no hay operaciones registradas.');
-      if(append){auditNode.querySelector('[data-audit-rows]').insertAdjacentHTML('beforeend',rows);}
-      else{auditNode.innerHTML=`<p>Registro durable de acciones desde AXON. Los secretos y el contenido de las solicitudes no se guardan. El inicio de una acción y su resultado aparecen por separado.</p><div class="platform-toolbar"><button class="btn-secondary" data-audit-refresh>Actualizar</button>${auditProject?link('/historial','Todos los proyectos'):''}</div><section class="platform-panel" data-audit-rows>${rows}</section><button class="btn-secondary" data-audit-more>Cargar anteriores</button>`;auditNode.querySelector('[data-audit-refresh]').onclick=()=>loadAudit({project:auditProject});auditNode.querySelector('[data-audit-more]').onclick=e=>AxonUI.busy(e.currentTarget,()=>loadAudit({project:auditProject},true));}
-      auditNode.querySelector('[data-audit-more]').hidden=data.entries.length<50;
+      const data=await api('/api/audit?'+auditQuery(append));auditNext=data.next;
+      const item=a=>`${badge(a.status)} <strong>${esc(a.action)}</strong><small>${esc(a.actor)}${a.credentialId?' · token '+esc(a.credentialId.slice(0,8)):''} · ${date(a.at)}${a.httpStatus?' · HTTP '+a.httpStatus:''}</small><small>${esc(a.resource)}</small>${a.detail?`<small>${esc(a.detail)}</small>`:''}${a.recovery?link(a.recovery.url,a.recovery.label):''}`;
+      const rows=list(data.entries,item,'No hay operaciones que coincidan con los filtros.');
+      const exportBase='/api/audit/export?'+auditQuery(false);
+      if(append){auditNode.querySelector('[data-audit-rows] .platform-list')?.insertAdjacentHTML('beforeend',data.entries.map(a=>`<li>${item(a)}</li>`).join(''));}
+      else{auditNode.innerHTML=`<p>Registro durable de acciones desde AXON. Los secretos y el contenido de las solicitudes no se guardan. El inicio de una acción y su resultado aparecen por separado.</p><div class="platform-toolbar"><button class="btn-secondary" data-audit-refresh>Actualizar</button><select data-audit-status><option value="">Todos los estados</option>${['ok','failed','running','interrupted'].map(s=>`<option value="${s}"${auditFilters.status===s?' selected':''}>${{ok:'Exitosas',failed:'Fallidas',running:'En curso',interrupted:'Interrumpidas'}[s]}</option>`).join('')}</select><input type="search" data-audit-q placeholder="Buscar en acciones y recursos" value="${esc(auditFilters.q)}"><a class="btn-secondary" href="${exportBase}&format=csv" download>CSV</a><a class="btn-secondary" href="${exportBase}&format=json" download>JSON</a>${auditProject?link('/historial','Todos los proyectos'):''}</div><section class="platform-panel" data-audit-rows>${rows}</section><button class="btn-secondary" data-audit-more>Cargar anteriores</button>`;
+        auditNode.querySelector('[data-audit-refresh]').onclick=()=>loadAudit({project:auditProject});
+        auditNode.querySelector('[data-audit-status]').onchange=e=>{auditFilters.status=e.target.value;loadAudit({project:auditProject});};
+        let qTimer;auditNode.querySelector('[data-audit-q]').oninput=e=>{clearTimeout(qTimer);qTimer=setTimeout(()=>{auditFilters.q=e.target.value.trim().slice(0,120);loadAudit({project:auditProject});},350);};
+        auditNode.querySelector('[data-audit-more]').onclick=e=>AxonUI.busy(e.currentTarget,()=>loadAudit({project:auditProject},true));}
+      // El backend fusiona pares inicio+resultado por operationId — una página
+      // cruda de 50 puede mostrar ~25 entradas. La paginación depende de `next`.
+      auditNode.querySelector('[data-audit-more]').hidden=!data.next;
     }catch(err){error(auditNode,err,()=>loadAudit(params));}finally{done(auditNode);}
   }
-  window.AxonPages.audit={restore:params=>{auditProject=params.project||'';return loadAudit(params);},params:()=>auditProject?{project:auditProject}:{}};loaders.audit=()=>loadAudit({project:auditProject});
+  window.AxonPages.audit={restore:params=>{auditProject=params.project||'';auditFilters={status:params.status||'',q:params.q||''};return loadAudit(params);},params:()=>({...(auditProject?{project:auditProject}:{}),...(auditFilters.status?{status:auditFilters.status}:{}),...(auditFilters.q?{q:auditFilters.q}:{})})};loaders.audit=()=>loadAudit({project:auditProject});
   const access=document.getElementById('access-content');
   const scopeNames={'projects:read':'Ver recursos','diagnostics:run':'Ejecutar diagnóstico','logs:read':'Leer logs','backups:read':'Ver respaldos','backups:run':'Ejecutar política de backup','audit:read':'Leer historial','cloud:read':'Leer archivos','cloud:upload':'Subir archivos'};
   async function loadAccess(){busy(access);try{

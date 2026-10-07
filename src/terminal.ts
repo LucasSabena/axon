@@ -5,6 +5,9 @@ const quote = (s: string) => `'${s.replace(/'/g, `'"'"'`)}'`;
  * socket is used only by isolated PTY regression tests. */
 export function hostTerminalCommand(opts: { session: string; cols: number; rows: number; exec?: string; socket?: string }) {
   if (!/^[a-zA-Z0-9_-]{1,80}$/.test(opts.session) || (opts.socket && !/^[a-zA-Z0-9_-]{1,80}$/.test(opts.socket))) throw new Error('Invalid terminal session');
+  // exec lands inside a `docker exec` command line — enforce the container
+  // id/name grammar here too, not only at the WS entrypoint.
+  if (opts.exec && !/^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$/.test(opts.exec)) throw new Error('Invalid exec target');
   const cols = Number.isFinite(opts.cols) ? Math.max(2, Math.min(500, Math.floor(opts.cols))) : 120;
   const rows = Number.isFinite(opts.rows) ? Math.max(2, Math.min(200, Math.floor(opts.rows))) : 40;
   const script = 'SHELL=/bin/sh script --quiet --flush --echo never --command';

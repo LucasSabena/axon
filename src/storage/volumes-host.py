@@ -40,6 +40,13 @@ def inventory():
             target = unescape(fields[4])
             mounts.setdefault(major, []).append({'path': target, 'mountId': fields[0],
                 'readOnly': 'ro' in fields[5].split(',') or 'ro' in extra[2].split(',')})
+    # Whole-root bind mounts list the same device several times. Keep one entry
+    # per maj:min, preferring the axon-managed path, then the newest mount.
+    for major, aliases in mounts.items():
+        if len(aliases) > 1:
+            mounts[major] = [sorted(aliases, key=lambda m: (
+                not m['path'].startswith('/mnt/axon-disks/'),
+                -int(m['mountId']) if m['mountId'].isdigit() else 0))[0]]
     volumes = []
     for major, node in blocks.items():
         mounted = mounts.get(major) or [None]

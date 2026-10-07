@@ -11,6 +11,7 @@ Engines:
   parakeet  NVIDIA Parakeet TDT 0.6B v3 via onnx-asr (CPU, 25 languages)
 """
 import argparse
+import hmac
 import json
 import os
 import queue
@@ -31,6 +32,12 @@ ap.add_argument("--port", type=int, required=True)
 ap.add_argument("--idle", type=int, default=600)
 ap.add_argument("--models", default=os.path.expanduser("~/.cache/axon-library/models"))
 args = ap.parse_args()
+
+# Axon threads this token through the spawn environment; every endpoint
+# requires it as a header (127.0.0.1 is reachable by any local process).
+TOKEN = os.environ.get("AXON_ASR_TOKEN", "")
+MAX_BODY = 128 * 1024
+FFMPEG_TIMEOUT = 30 * 60  # decoding a very long source to wav
 
 PARAKEET_REPO = "istupakov/parakeet-tdt-0.6b-v3-onnx"
 PARAKEET_NAME = "nemo-parakeet-tdt-0.6b-v3"
@@ -108,20 +115,47 @@ def load(name, job):
 
 # ---------- Audio ----------
 
-def to_wav(src):
+def to_wav(src, job=None):
     fd, out = tempfile.mkstemp(prefix="axon-asr-", suffix=".wav")
     os.close(fd)
-    r = subprocess.run(
+    # stderr goes to a temp file, not a pipe: polling without draining a pipe
+    # would deadlock ffmpeg once the buffer fills.
+    errf = tempfile.TemporaryFile(mode="w+t")
+    proc = subprocess.Popen(
         ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", src, "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", out],
-        capture_output=True, text=True,
+        stdout=subprocess.DEVNULL, stderr=errf, text=True,
     )
-    if r.returncode != 0:
-        os.unlink(out)
-        msg = (r.stderr or "").strip().splitlines()
-        raise RuntimeError("ffmpeg: " + (msg[-1] if msg else "no se pudo leer el audio"))
-    with wave.open(out) as w:
-        dur = w.getnframes() / float(w.getframerate() or 16000)
-    return out, dur
+    try:
+        deadline = time.monotonic() + FFMPEG_TIMEOUT
+        while proc.poll() is None:
+            if job is not None and job.get("cancel"):
+                proc.kill()
+                raise Cancelled()
+            if time.monotonic() > deadline:
+                proc.kill()
+                raise RuntimeError("ffmpeg: la conversión de audio agotó el tiempo")
+            time.sleep(0.3)
+        if proc.returncode != 0:
+            errf.seek(0)
+            msg = errf.read().strip().splitlines()
+            raise RuntimeError("ffmpeg: " + (msg[-1] if msg else "no se pudo leer el audio"))
+        with wave.open(out) as w:
+            dur = w.getnframes() / float(w.getframerate() or 16000)
+        return out, dur
+    except Exception:
+        try:
+            os.unlink(out)
+        except OSError:
+            pass
+        raise
+    finally:
+        errf.close()
+        if proc.poll() is None:
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
 
 
 # ---------- Engines ----------
@@ -200,7 +234,7 @@ def worker():
         try:
             job["state"] = "running"
             job["stage"] = "audio"
-            wav, dur = to_wav(job["path"])
+            wav, dur = to_wav(job["path"], job)
             job["duration"] = round(dur, 2)
             if job.get("cancel"):
                 raise Cancelled()
@@ -266,9 +300,24 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
+    def authed(self):
+        # Fail closed: an empty TOKEN means the launcher never provisioned one,
+        # so nothing may authenticate rather than everything.
+        if not TOKEN:
+            return False
+        return hmac.compare_digest((self.headers.get("X-Axon-Token") or "").encode(), TOKEN.encode())
+
     def body(self):
-        n = int(self.headers.get("Content-Length") or 0)
-        return json.loads(self.rfile.read(n) or b"{}") if n else {}
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            return None
+        if n < 0 or n > MAX_BODY:
+            return None
+        try:
+            return json.loads(self.rfile.read(n) or b"{}") if n else {}
+        except ValueError:
+            return None
 
     def health(self):
         return {
@@ -286,6 +335,8 @@ class H(BaseHTTPRequestHandler):
         }
 
     def do_GET(self):
+        if not self.authed():
+            return self.send(401, {"ok": False, "error": "unauthorized"})
         if self.path == "/health":
             return self.send(200, self.health())
         if self.path.startswith("/jobs/"):
@@ -296,10 +347,14 @@ class H(BaseHTTPRequestHandler):
         self.send(404, {"ok": False})
 
     def do_POST(self):
+        if not self.authed():
+            return self.send(401, {"ok": False, "error": "unauthorized"})
         if self.path == "/jobs":
             b = self.body()
+            if not isinstance(b, dict):
+                return self.send(400, {"ok": False, "error": "cuerpo inválido"})
             p = b.get("path")
-            if not p or not os.path.isfile(p):
+            if not isinstance(p, str) or not os.path.isfile(p):
                 return self.send(400, {"ok": False, "error": "archivo no encontrado"})
             jid = uuid.uuid4().hex[:12]
             with lock:
@@ -320,6 +375,8 @@ class H(BaseHTTPRequestHandler):
         self.send(404, {"ok": False})
 
     def do_DELETE(self):
+        if not self.authed():
+            return self.send(401, {"ok": False, "error": "unauthorized"})
         if self.path.startswith("/jobs/"):
             j = jobs.get(self.path[6:])
             if j:

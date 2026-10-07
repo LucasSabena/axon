@@ -65,7 +65,9 @@ def meta(origin,fd,name,info=None):
   if not isinstance(data,list) or any(not isinstance(e,dict) for e in data):raise Guard('Manifiesto inválido')
   entries=[e for e in data if isinstance(e,dict) and e.get('id')==name]
   if len(entries)!=1:raise Guard('No hay un origen inequívoco')
-  p=entries[0]['orig'];date=time.strftime('%Y-%m-%dT%H:%M:%S',time.localtime(entries[0]['ts']/1000))
+  p=entries[0]['orig'];ts=entries[0]['ts']
+  if not isinstance(ts,(int,float)) or isinstance(ts,bool):raise Guard('Manifiesto inválido')
+  date=time.strftime('%Y-%m-%dT%H:%M:%S',time.localtime(ts/1000))
  if not isinstance(p,str) or not p.startswith('/') or '\0' in p or any(x in ('.','..') for x in p.split('/')):raise Guard('Origen inválido')
  return p,date
 def roots(create=False,source=None):
@@ -127,6 +129,27 @@ def roots(create=False,source=None):
   finally:
    if vfd is not None:os.close(vfd)
  return result
+def rewrite_manifest(fd,remove_id):
+ # Capture the manifest name before rewriting: a concurrent writer either keeps
+ # its own update (renameat2 refuses the replacement) or is detected on re-read.
+ raw=read(fd,'.manifest.json');manifest=json.loads(raw)
+ remaining=[e for e in manifest if isinstance(e,dict) and e.get('id')!=remove_id]
+ temp='.manifest-'+uuid.uuid4().hex;write(fd,temp,json.dumps(remaining))
+ capture='.manifest-'+uuid.uuid4().hex;rename(fd,'.manifest.json',fd,capture)
+ try:captured=read(fd,capture)
+ except FileNotFoundError:captured=None
+ if captured!=raw:
+  try:rename(fd,capture,fd,'.manifest.json')
+  except:pass
+  try:os.unlink(temp,dir_fd=fd)
+  except OSError:pass
+  raise Guard('El manifiesto cambió; se conservó')
+ try:rename(fd,temp,fd,'.manifest.json')
+ except:
+  try:rename(fd,capture,fd,'.manifest.json')
+  except:pass
+  raise
+ os.unlink(capture,dir_fd=fd);os.fsync(fd)
 def trash_for(rs,path,device):
  matches=[r for r in rs if xdg(r[0]) and str(os.fstat(r[2]).st_dev)==str(device) and (r[0]=='xdg' or path.startswith(tops[r[0]]+'/'))]
  if not matches:raise Guard('Otro filesystem sin papelera privada disponible: se conserva el original')
@@ -221,7 +244,7 @@ try:
    manifest=json.loads(read(src,'.manifest.json'))
    entries=[e for e in manifest if isinstance(e,dict) and e.get('id')==old]
    if len(entries)!=1 or entries[0].get('orig')!=original:raise Guard('El manifiesto cambió durante el movimiento; revisar antes de continuar')
-   remaining=[e for e in manifest if e.get('id')!=old];temp='.manifest-'+uuid.uuid4().hex;write(src,temp,json.dumps(remaining));os.rename(temp,'.manifest.json',src_dir_fd=src,dst_dir_fd=src);os.fsync(src)
+   rewrite_manifest(src,old)
    out=dict(ok=True,state='verified',id='xdg:'+key,fromPath=srcpath+'/'+old,toPath=destpath+'/'+key,retiredBytes='0',message='Migrado a papelera del escritorio. Conserva origen y fecha; no libera espacio.')
   elif action=='restore':
    selection=req['item'];origin,key=selection['id'].split(':',1)
@@ -235,11 +258,10 @@ try:
    matched=identity(os.stat(os.path.basename(original),dir_fd=dest,follow_symlinks=False))==selection['identity']
    if not matched:raise Guard('El elemento cambió durante la restauración; revisar recibo antes de reintentar')
    if xdg(origin):os.unlink(key+'.trashinfo',dir_fd=info);os.fsync(info)
-   else:
-    manifest=json.loads(read(src,'.manifest.json'));manifest=[e for e in manifest if e.get('id')!=key];temp='.manifest-'+uuid.uuid4().hex;write(src,temp,json.dumps(manifest));os.rename(temp,'.manifest.json',src_dir_fd=src,dst_dir_fd=src);os.fsync(src)
+   else:rewrite_manifest(src,key)
    out=dict(ok=True,state='restored',fromPath=p+'/'+key,toPath=original,id=selection['id'],retiredBytes='0',message='Original restaurado sin sobrescribir archivos.')
   else:raise Guard('Operación no admitida')
-except (Guard,OSError,ValueError,KeyError,StopIteration) as e:
+except (Guard,OSError,ValueError,KeyError,StopIteration,TypeError,OverflowError) as e:
  out={'ok':False,'state':'interrupted' if changed else 'failed','error':str(e) if isinstance(e,Guard) else reason(e)}
 finally:
  for fd in handles:

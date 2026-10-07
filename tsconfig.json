@@ -5,12 +5,26 @@
     "moduleResolution": "Bundler",
     "types": ["bun"],
     "skipLibCheck": true,
+    // Full "strict": true produces ~100 errors across src/ (mostly implicit
+    // any + strictNullChecks debt). The strict-family flags below were
+    // verified to produce ZERO errors on the current tree — they stay on to
+    // prevent regressions while the remaining flags (noImplicitAny,
+    // strictNullChecks, strictFunctionTypes) are adopted incrementally.
     "strict": false,
+    "strictBindCallApply": true,
+    "noImplicitThis": true,
+    "useUnknownInCatchVariables": true,
+    "alwaysStrict": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
     "noEmit": true,
     "allowJs": true,
     "resolveJsonModule": true,
     "checkJs": false
   },
+  // src/**/*.test.ts is excluded from `tsc --noEmit` because the suites carry
+  // pre-existing type errors (fetch stubs, BodyInit narrowing) unrelated to
+  // the shipping code; `bun test` still runs them. Re-include once cleaned.
   "include": ["src/**/*.ts", "scripts/**/*.ts"],
   "exclude": ["src/**/*.test.ts"]
 }

@@ -13,7 +13,8 @@ export class MaintenanceRepository {
   readonly owner = incarnation();
   constructor(dir: string) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    if (lstatSync(dir).isSymbolicLink() || (lstatSync(dir).mode & 0o077)) throw new Error('El ledger requiere un directorio privado');
+    if (lstatSync(dir).isSymbolicLink()) throw new Error('El ledger requiere un directorio propio, no un enlace simbólico: '+dir);
+    if (lstatSync(dir).mode & 0o077) { try { chmodSync(dir, 0o700); } catch {} if (lstatSync(dir).mode & 0o077) throw new Error('El directorio del ledger ('+dir+') es accesible por otros usuarios y no se pudo corregir a modo 700'); }
     const file = path.join(dir, 'maintenance.sqlite');
     try { if (lstatSync(file).isSymbolicLink()) throw new Error('Ledger enlazado no permitido'); } catch (e: any) { if (e.code !== 'ENOENT') throw e; }
     this.db = new Database(file, { create: true, strict: true }); chmodSync(file, 0o600);
@@ -27,6 +28,8 @@ export class MaintenanceRepository {
     }).immediate();
     const versions=this.db.query('SELECT version FROM migrations ORDER BY version').all() as {version:number}[];
     if(versions.length!==1||versions[0].version!==1){this.db.close();throw new Error('Versión de ledger no compatible; mantenimiento bloqueado');}
+    // WAL/SHM/journal sidecars inherit the process umask, not the file chmod above.
+    for(const sidecar of [file+'-wal',file+'-shm',file+'-journal'])try{chmodSync(sidecar,0o600);}catch(e:any){if(e?.code!=='ENOENT')throw e;}
   }
   put(kind: string, id: string, value: unknown, state: OperationState = 'planned') {
     this.db.query('INSERT INTO records VALUES(?,?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET state=excluded.state,payload=excluded.payload,updated=excluded.updated').run(kind,id,state,JSON.stringify(value),new Date().toISOString());
@@ -35,11 +38,13 @@ export class MaintenanceRepository {
   list<T>(kind: string, limit=50, offset=0): T[] { return (this.db.query('SELECT payload FROM records WHERE kind=? ORDER BY updated DESC LIMIT ? OFFSET ?').all(kind,limit,offset) as {payload:string}[]).map(r=>JSON.parse(r.payload) as T); }
   lockedOperations(kind:string):string[]{return (this.db.query('SELECT DISTINCT locks.operation FROM locks JOIN records ON records.id=locks.operation WHERE records.kind=?').all(kind) as {operation:string}[]).map(r=>r.operation);}
   private pendingOperation(id:string,actorId?:string):PendingOperation|undefined {
-    for(const kind of ['transfer','file-operation','plan'] as const){
+    for(const kind of ['transfer','file-operation','plan','scan'] as const){
       const op=this.get<Record<string,any>>(kind,id);
-      if(!op||!actorId||op.actorId!==actorId)continue;
+      if(!op)continue;
+      // Scans have no actor field; other kinds only surface to their owner.
+      if(kind!=='scan'&&(!actorId||op.actorId!==actorId))continue;
       const status=op.status||op.receipt||{},plan=op.plan||op;
-      return {id,kind,state:op.state,action:plan.mode||op.action,from:plan.from||op.path||op.item?.orig,to:plan.to,message:status.message,logicalBytes:status.logicalBytes||plan.logicalBytes,copiedBytes:status.copiedBytes};
+      return {id,kind,state:op.state,action:kind==='scan'?'scan':plan.mode||op.action,from:kind==='scan'?undefined:plan.from||op.path||op.item?.orig,to:plan.to,message:status.message||op.error,logicalBytes:status.logicalBytes||plan.logicalBytes,copiedBytes:status.copiedBytes};
     }
   }
   exclusive<T>(operation: string, resources: string[], start: () => T, actorId?:string): T {

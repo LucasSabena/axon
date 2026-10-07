@@ -25,7 +25,8 @@
     toggle.addEventListener('click',()=>{const open=content.hidden;setOpen(open);collapsed[label]=!open;try{localStorage.setItem('axon:nav-groups:v1',JSON.stringify(collapsed));}catch{}});
     for (const section of sections) {
       const node = nodes.get(section);
-      if (!node) throw new Error(`Falta la sección ${section} en la navegación`);
+      // A missing nav entry must not abort the rest of the shell wiring.
+      if (!node) { console.warn(`Falta la sección ${section} en la navegación`); continue; }
       node.title=node.querySelector('.nav-label')?.textContent.trim() || section;
       content.append(node);
     }

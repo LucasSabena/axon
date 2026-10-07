@@ -101,7 +101,7 @@
         </div>
       </div>
       <textarea id="fm-editor-text" class="mono" aria-label="Contenido del archivo" spellcheck="false" wrap="off"></textarea>
-      <p class="listener-note">Ctrl/Cmd+S guarda · Esc vuelve a la lista</p>
+      <p class="listener-note">Ctrl/Cmd+S guarda · Tab indenta (Shift+Tab quita) · Esc vuelve a la lista</p>
     </div>
     <input type="file" id="fm-file-input" class="hidden" multiple>
     <input type="file" id="fm-dir-input" class="hidden" webkitdirectory>
@@ -127,6 +127,7 @@
   refreshIcons();
 
   // ---------- State ----------
+  const RENDER_PAGE = 500; // first paint budget; a 10k dir never writes 10k rows
   const S = {
     cwd: '',
     home: '',
@@ -171,6 +172,7 @@
     searchResults: null, // [{type,path,name,dir}] while searching
     dragging: null,   // {dir, names:[...]} internal drag payload
     jobs: new Map(),  // jobId -> {label, pct, cancel} copy jobs in flight
+    renderLimit: RENDER_PAGE, // rows currently painted — grows via "Mostrar más"
   };
 
   const el = (id) => sec.querySelector('#' + id);
@@ -271,6 +273,19 @@
     refreshIcons();
     renderVolumes();
     renderClipboard();
+    applyReadOnly();
+  }
+
+  // Read-only volumes gray out every create/upload entry point (paste is
+  // handled in renderClipboard; drag & drop and transfers check on their own).
+  function applyReadOnly() {
+    const ro = Boolean(volumeAt(S.cwd)?.readOnly);
+    for (const id of ['fm-upload-btn', 'fm-upload-dir-btn', 'fm-new-file-btn', 'fm-mkdir-btn']) {
+      const b = el(id);
+      if (b.dataset.ot === undefined) b.dataset.ot = b.title || '';
+      b.disabled = ro;
+      b.title = ro ? 'Solo lectura — este volumen no admite cambios' : b.dataset.ot;
+    }
   }
 
   function volumeAt(p) {
@@ -305,7 +320,7 @@
         S.entries=[];S.sel.clear();render();
         setState('El disco fue desconectado o cambió su montaje. Elegí un disco disponible.');
       }
-      renderVolumes();renderClipboard();
+      renderVolumes();renderClipboard();applyReadOnly();
     } catch(err) {
       el('fm-volumes-error').textContent='No se pudieron actualizar los discos. La lista puede estar desactualizada. Usá Actualizar discos para reintentar.';
       el('fm-volumes-error').classList.remove('hidden');
@@ -372,20 +387,33 @@
   function rowHtml(e, isUp) {
     const ic = isUp ? icon('arrow-up') : icon(iconFor(e));
     const linkBadge = e.type === 'link' ? ' <span class="badge badge-other">link</span>' : '';
-    const acts = isUp
-      ? ''
-      : `<div class="fm-acts">
-          ${e.type !== 'dir' ? `<button class="fm-act" data-act="download" title="Descargar">${icon('download')}</button>` : ''}
+    // Trash rows get restore/permanent-delete only — renaming a trashed entry
+    // would desync it from its .trashinfo manifest, and structural rows
+    // (files/, info/, ids sin metadatos) get no row actions at all.
+    let acts = '';
+    if (!isUp) {
+      if (inTrash(S.cwd)) {
+        if (S.trashNames[e.name]?.id) {
+          acts = `<div class="fm-acts">
+            <button class="fm-act" data-act="restore" title="Restaurar a su ubicación original">${icon('undo-2')}</button>
+            <button class="fm-act fm-act-danger" data-act="delete" title="Borrar definitivamente">${icon('trash-2')}</button>
+          </div>`;
+        }
+      } else {
+        acts = `<div class="fm-acts">
+          ${e.type !== 'dir' ? `<button class="fm-act" data-act="download" title="Descargar">${icon('download')}</button>` : `<button class="fm-act" data-act="zipdl" title="Descargar como .zip">${icon('archive')}</button>`}
           <button class="fm-act" data-act="rename" title="Renombrar">${icon('pencil')}</button>
           <button class="fm-act fm-act-danger" data-act="delete" title="Eliminar">${icon('trash-2')}</button>
         </div>`;
+      }
+    }
     const selected = !isUp && S.sel.has(e.name);
     const hidden = !isUp && e.name.startsWith('.');
     const cut = !isUp && isCutName(e.name);
     return `<tr class="fm-row${isUp ? ' fm-up' : ''}${selected ? ' fm-selected' : ''}${hidden ? ' fm-hidden' : ''}${cut ? ' fm-cut' : ''}" data-name="${esc(e.name)}" data-type="${esc(e.type)}"${isUp ? '' : ' draggable="true"'}>
       <td class="fm-selcell">${isUp ? '' : `<input type="checkbox" class="fm-check" aria-label="Seleccionar ${esc(e.name)}" ${selected ? 'checked' : ''} tabindex="-1">`}</td>
       <td class="icon-cell">${ic}</td>
-      <td class="fm-name">${esc(dispName(e))}${linkBadge}</td>
+      <td class="fm-name"${e.trashOrig ? ` title="${esc(`Ubicación original: ${e.trashOrig}${S.trashNames[e.name]?.ts ? ` · Eliminado: ${fmtDate(Date.parse(S.trashNames[e.name].ts))}` : ''}`)}"` : ''}>${esc(dispName(e))}${linkBadge}</td>
       <td class="num"${!isUp && e.type === 'dir' ? ` data-dirsize="${esc(join(S.cwd, e.name))}"` : ''}>${isUp ? '—' : e.type === 'dir' ? dirSizeLabel(join(S.cwd, e.name)) : fmtSize(e.size)}</td>
       <td class="fm-mtime">${isUp ? '' : fmtDate(e.mtime)}</td>
       <td class="mono fm-mode">${esc(e.mode || '')}</td>
@@ -406,8 +434,20 @@
 
   function fillDirSizes() {
     const nav = S.navId;
+    // Prune the du cache — it grows unboundedly while browsing otherwise.
+    if (S.dirSizes.size > 600) {
+      const now = Date.now();
+      for (const [k, v] of S.dirSizes) if (now - v.ts > DIRSIZE_TTL) S.dirSizes.delete(k);
+      if (S.dirSizes.size > 600) {
+        for (const k of [...S.dirSizes.keys()].slice(0, S.dirSizes.size - 400)) S.dirSizes.delete(k);
+      }
+    }
     const cells = [...sec.querySelectorAll('[data-dirsize]')];
-    if (cells.length > 120) return; // don't du-storm giant folders
+    if (cells.length > 120) {
+      // No du-storm on giant folders — explain the '—' instead of hiding it.
+      for (const c of cells) c.title = 'Tamaño no calculado: esta carpeta tiene demasiadas subcarpetas';
+      return;
+    }
     const wanted = cells
       .map((c) => c.dataset.dirsize)
       .filter((p) => {
@@ -518,7 +558,11 @@
           <td class="fm-selcell"></td>
           <td class="icon-cell">${icon(iconFor(r))}</td>
           <td class="fm-name">${esc(r.name)} <span class="fm-search-dir">${esc(rel)}</span></td>
-          <td class="num"></td><td class="fm-mtime"></td><td></td><td></td>
+          <td class="num"></td><td class="fm-mtime"></td><td></td>
+          <td class="fm-actcell"><div class="fm-acts">
+            ${r.type !== 'dir' ? `<button class="fm-act" data-act="download" title="Descargar">${icon('download')}</button>` : ''}
+            <button class="fm-act" data-act="goto" title="Ir a la carpeta">${icon('folder-open')}</button>
+          </div></td>
         </tr>`;
       })
       .join('');
@@ -560,6 +604,12 @@
     }
   }
 
+  // Huge folders paint in pages — innerHTML of 10k rows froze the tab.
+  const moreHtml = (hidden) =>
+    `<tr class="fm-more"><td colspan="7"><button type="button" class="btn-secondary fm-more-btn">Mostrar ${Math.min(RENDER_PAGE, hidden)} más — quedan ${hidden}</button></td></tr>`;
+  const moreCard = (hidden) =>
+    `<div class="fm-card fm-more"><button type="button" class="btn-secondary fm-more-btn">Mostrar ${Math.min(RENDER_PAGE, hidden)} más — quedan ${hidden}</button></div>`;
+
   function renderList() {
     const rows = visibleEntries();
     let html = '';
@@ -567,7 +617,8 @@
     if (parentOf(S.cwd) !== '/') {
       html += rowHtml({ name: '..', type: 'dir', size: null, mtime: 0, mode: '' }, true);
     }
-    html += rows.map((e) => rowHtml(e, false)).join('');
+    html += rows.slice(0, S.renderLimit).map((e) => rowHtml(e, false)).join('');
+    if (rows.length > S.renderLimit) html += moreHtml(rows.length - S.renderLimit);
     el('fm-tbody').innerHTML = html;
     setState(rows.length || html ? '' : 'Carpeta vacía');
     markSortHeader();
@@ -592,8 +643,10 @@
     const ext = extOf(e.name);
     let inner;
     if (isUp) inner = icon('arrow-up');
-    else if (e.type === 'file' && IMG_EXT.has(ext)) {
-      inner = `<img class="fm-thumb" loading="lazy" draggable="false" alt="" src="/api/files/preview?path=${encodeURIComponent(join(S.cwd, e.name))}"><span class="fm-thumb-fb">${icon(iconFor(e))}</span>`;
+    else if (e.type === 'file' && (IMG_EXT.has(ext) || EXOTIC_EXT.has(ext))) {
+      // ?w=160 — the server returns a magick thumbnail instead of the
+      // original file; grid cells are 56px so the full image was pure waste.
+      inner = `<img class="fm-thumb" loading="lazy" draggable="false" alt="" src="/api/files/preview?path=${encodeURIComponent(join(S.cwd, e.name))}&w=160"><span class="fm-thumb-fb">${icon(iconFor(e))}</span>`;
     } else inner = `<span class="fm-card-ic-big">${icon(iconFor(e))}</span>`;
     const meta = isUp ? '' : e.type === 'dir' ? 'Carpeta' : fmtSize(e.size);
     return `<div class="fm-card${sel ? ' fm-selected' : ''}${hidden ? ' fm-hidden' : ''}${cut ? ' fm-cut' : ''}${isUp ? ' fm-up' : ''}" data-name="${esc(e.name)}" data-type="${esc(e.type)}" title="${esc(e.trashOrig || e.name)}"${isUp ? '' : ' draggable="true"'}>
@@ -609,7 +662,8 @@
     if (parentOf(S.cwd) !== '/') {
       html += gridCard({ name: '..', type: 'dir' }, true);
     }
-    html += rows.map((e) => gridCard(e, false)).join('');
+    html += rows.slice(0, S.renderLimit).map((e) => gridCard(e, false)).join('');
+    if (rows.length > S.renderLimit) html += moreCard(rows.length - S.renderLimit);
     el('fm-grid').innerHTML = html;
     setState(rows.length || html ? '' : 'Carpeta vacía');
     markCursor();
@@ -758,6 +812,8 @@
     const hid = hiddenCount();
     let txt = `${total} elemento${total === 1 ? '' : 's'}`;
     if (dirs) txt += ` · ${dirs} carpeta${dirs === 1 ? '' : 's'}`;
+    if (dirs > 120) txt += ' · tamaños de carpetas sin calcular (demasiadas subcarpetas)';
+    if (total > S.renderLimit) txt += ` · mostrando ${S.renderLimit}`;
     if (hid) txt += ` · ${hid} oculto${hid === 1 ? '' : 's'}${S.showHidden ? '' : ' (Ctrl+H para ver)'}`;
     if (S.sel.size) {
       const bytes = S.entries
@@ -805,6 +861,7 @@
       if (request !== S.navId) return;
       S.cwd = data.path;
       S.volume=data.volume;
+      S.renderLimit = RENDER_PAGE;
       if (!S.home && data.home) S.home = data.home;
       if (inTrash(data.path)) await loadTrashNames(data.path);
       S.entries = trashify(data.entries || [], data.path);
@@ -832,14 +889,36 @@
   const entriesSig = (es) =>
     (es || []).map((e) => `${e.name}|${e.type}|${e.size}|${e.mtime}|${e.mode}`).join('\n');
 
+  let signedIn = false;
+  document.addEventListener('axon:authenticated', () => { signedIn = true; });
+  document.addEventListener('axon:session-expired', () => { signedIn = false; });
+
+  let lastVolSync = 0;
   async function silentRefresh() {
-    if (!sec.classList.contains('active') || document.hidden || S.editingPath || !S.cwd) return;
-    void refreshVolumes();
+    if (!signedIn || !sec.classList.contains('active') || document.hidden || S.editingPath || !S.cwd) return;
+    // The volume snapshot spawns a full disk inventory on the host — once a
+    // minute is plenty for a passive poll (navigation refreshes on its own).
+    if (Date.now() - lastVolSync > 60_000) { lastVolSync = Date.now(); void refreshVolumes(); }
     try {
       const data = await api(`/api/files?path=${encodeURIComponent(S.cwd)}`, {
         signal: AbortSignal.timeout(20_000),
       });
       const list = data.entries || [];
+      // Column view keeps ancestor listings on screen; refresh them too or
+      // external changes stay invisible until the next drill.
+      if (S.view === 'cols') {
+        for (const c of S.cols) {
+          if (c.path === S.cwd) continue;
+          api(`/api/files?path=${encodeURIComponent(c.path)}`, { signal: AbortSignal.timeout(20_000) })
+            .then((d) => {
+              const next = trashify(d.entries || [], c.path);
+              if (entriesSig(next) === entriesSig(c.entries)) return;
+              c.entries = next;
+              renderCols();
+            })
+            .catch(() => {});
+        }
+      }
       if (entriesSig(list) === entriesSig(S.entries)) return;
       if (inTrash(S.cwd)) await loadTrashNames(S.cwd);
       const names = new Set(list.map((e) => e.name));
@@ -867,6 +946,64 @@
 
   // ---------- Preview pane ----------
   const previewUrl = (p) => `/api/files/preview?path=${encodeURIComponent(p)}`;
+
+  // Minimal markdown → HTML for the preview pane. Everything passes through
+  // esc() first; links only render for safe schemes, so no script can slip in.
+  function mdToHtml(src) {
+    const inline = (s) =>
+      esc(s)
+        .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+        .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (m, t, u) =>
+          /^(https?:|mailto:|#|\.?\/)/i.test(u)
+            ? `<a href="${u}" target="_blank" rel="noopener noreferrer">${t}</a>`
+            : t
+        )
+        .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+    const lines = String(src).split('\n');
+    const out = [];
+    let i = 0;
+    const isList = (l) => /^\s*([-*+]|\d+\.)\s+/.test(l);
+    const isBlock = (l) =>
+      /^(#{1,6}\s|```|>\s?)/.test(l) || isList(l) || /^\s*(-{3,}|\*{3,})\s*$/.test(l);
+    while (i < lines.length) {
+      const l = lines[i];
+      if (/^```/.test(l)) {
+        const buf = [];
+        i++;
+        while (i < lines.length && !/^```/.test(lines[i])) buf.push(lines[i++]);
+        i++;
+        out.push(`<pre class="fm-md-pre"><code>${esc(buf.join('\n'))}</code></pre>`);
+      } else if (!l.trim()) {
+        i++;
+      } else if (/^(#{1,6})\s+/.test(l)) {
+        const m = /^(#{1,6})\s+(.*)$/.exec(l);
+        out.push(`<h${m[1].length}>${inline(m[2])}</h${m[1].length}>`);
+        i++;
+      } else if (isList(l)) {
+        const tag = /^\s*\d+\./.test(l) ? 'ol' : 'ul';
+        const items = [];
+        while (i < lines.length && isList(lines[i])) {
+          items.push(`<li>${inline(lines[i].replace(/^\s*([-*+]|\d+\.)\s+/, ''))}</li>`);
+          i++;
+        }
+        out.push(`<${tag}>${items.join('')}</${tag}>`);
+      } else if (/^>\s?/.test(l)) {
+        const buf = [];
+        while (i < lines.length && /^>\s?/.test(lines[i])) buf.push(lines[i++].replace(/^>\s?/, ''));
+        out.push(`<blockquote>${buf.map(inline).join('<br>')}</blockquote>`);
+      } else if (/^\s*(-{3,}|\*{3,})\s*$/.test(l)) {
+        out.push('<hr>');
+        i++;
+      } else {
+        const buf = [l];
+        i++;
+        while (i < lines.length && lines[i].trim() && !isBlock(lines[i])) buf.push(lines[i++]);
+        out.push(`<p>${buf.map(inline).join('<br>')}</p>`);
+      }
+    }
+    return out.join('\n');
+  }
 
   function renderPrevFallback(msg) {
     const body = el('fm-prev-body');
@@ -965,11 +1102,19 @@
             renderPrevFallback('Archivo binario — sin vista de texto');
             return;
           }
-          const pre = document.createElement('pre');
-          pre.className = 'fm-pv-text mono';
-          pre.textContent = data.content || '';
-          body.innerHTML = '';
-          body.appendChild(pre);
+          if (['md', 'markdown'].includes(extOf(name))) {
+            const div = document.createElement('div');
+            div.className = 'fm-pv-md';
+            div.innerHTML = mdToHtml(data.content || '');
+            body.innerHTML = '';
+            body.appendChild(div);
+          } else {
+            const pre = document.createElement('pre');
+            pre.className = 'fm-pv-text mono';
+            pre.textContent = data.content || '';
+            body.innerHTML = '';
+            body.appendChild(pre);
+          }
           if (data.truncated) {
             const note = document.createElement('div');
             note.className = 'fm-pv-note';
@@ -1331,6 +1476,31 @@
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
       e.preventDefault();
       el('fm-save-btn').click();
+      return;
+    }
+    // Tab indents instead of leaving the field (editor semantics); Shift+Tab
+    // outdents. With a multi-line selection every covered line moves.
+    if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      const ta = e.target;
+      if (ta.readOnly) return;
+      const v = ta.value;
+      const s = ta.selectionStart;
+      const en = ta.selectionEnd;
+      if (s === en && !e.shiftKey) {
+        ta.setRangeText('\t', s, en, 'end');
+        updateDirty();
+        return;
+      }
+      const ls = v.lastIndexOf('\n', s - 1) + 1;
+      // A selection ending on a newline boundary shouldn't tag the next line.
+      const le = en > s && v[en - 1] === '\n' ? en - 1 : en;
+      const block = v.slice(ls, le);
+      const next = !e.shiftKey
+        ? block.split('\n').map((l) => '\t' + l).join('\n')
+        : block.split('\n').map((l) => (l.startsWith('\t') ? l.slice(1) : l.replace(/^ {1,2}/, ''))).join('\n');
+      ta.setRangeText(next, ls, le, 'select');
+      updateDirty();
     }
   });
 
@@ -1387,18 +1557,37 @@
     a.remove();
   }
 
-  async function doAction(act, name, type) {
-    const p = join(S.cwd, name);
+  // Folder or multi-name selection → server streams a zip built on the fly.
+  function downloadZip(dirOrPath, names) {
+    const href = names?.length
+      ? `/api/files/download-zip?dir=${encodeURIComponent(dirOrPath)}&items=${encodeURIComponent(JSON.stringify(names))}`
+      : `/api/files/download-zip?path=${encodeURIComponent(dirOrPath)}`;
+    if (href.length > 7000) {
+      toast('Demasiados elementos para el enlace — usá Comprimir para generar el .zip', 'warn');
+      return;
+    }
+    const a = document.createElement('a');
+    a.href = href;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  async function doAction(act, name, type, dir) {
+    const base = dir || S.cwd;
+    const p = join(base, name);
     if (act === 'download') {
       download(p, name);
+    } else if (act === 'zipdl') {
+      downloadZip(p);
     } else if (act === 'rename') {
-      const nn = await fmPrompt('Renombrar', `Nuevo nombre para «${name}»`, name);
+      const nn = await fmPrompt('Renombrar', `Nuevo nombre para «${name}»`, name, true);
       if (!nn || nn === name) return;
       if (nn.includes('/') || nn === '.' || nn === '..') {
         toast('Nombre inválido — sin "/", "." ni ".."', 'error');
         return;
       }
-      const to = join(S.cwd, nn);
+      const to = join(base, nn);
       try {
         await apiRename(p, to);
         journaled({
@@ -1407,12 +1596,12 @@
           redo: async () => { await apiRename(p, to); },
         });
         toast('Renombrado — Ctrl+Z deshace', 'ok', '', 2500);
-        navigate(S.cwd);
+        navigate(base);
       } catch (err) {
         errToast(err);
       }
     } else if (act === 'delete') {
-      await deleteTargets([name]);
+      await deleteTargets([name], base);
     } else if (act === 'restore') {
       await restoreTrashed([name]); // `name` is the manifest id in trash rows
     }
@@ -1424,6 +1613,7 @@
     const n = S.sel.size;
     bar.classList.toggle('hidden', n === 0);
     el('fm-sel-count').textContent = `${n} seleccionado${n === 1 ? '' : 's'}`;
+    el('fm-sel-del').title = inTrash(S.cwd) ? 'Borrado definitivo — no se puede deshacer' : 'Enviar a la papelera';
     const checkAll = el('fm-check-all');
     if (checkAll) {
       const total = visibleEntries().length;
@@ -1505,10 +1695,26 @@
   }
 
   el('fm-table').addEventListener('click', (e) => {
+    if (e.target.closest('.fm-more-btn')) {
+      S.renderLimit += RENDER_PAGE;
+      render();
+      return;
+    }
     const tr = e.target.closest('tr.fm-row');
     const actBtn = e.target.closest('.fm-act');
     if (actBtn && tr) {
       e.stopPropagation();
+      // Search hits live in another directory — act on tr.dataset.dir.
+      if (tr.classList.contains('fm-search-hit')) {
+        const dir = tr.dataset.dir;
+        if (actBtn.dataset.act === 'download') download(join(dir, tr.dataset.name), tr.dataset.name);
+        else if (actBtn.dataset.act === 'goto') {
+          const name = tr.dataset.name;
+          exitSearch();
+          navigate(dir).then((ok) => { if (ok !== false) selectName(name); });
+        }
+        return;
+      }
       doAction(actBtn.dataset.act, tr.dataset.name, tr.dataset.type);
       return;
     }
@@ -1525,7 +1731,7 @@
     if (tr.classList.contains('fm-search-hit')) {
       const dir = tr.dataset.dir;
       exitSearch();
-      navigate(dir).then(() => selectName(name));
+      navigate(dir).then((ok) => { if (ok !== false) selectName(name); });
       return;
     }
     if (name === '..') return navigate(parentOf(S.cwd));
@@ -1556,6 +1762,11 @@
   }
 
   el('fm-grid').addEventListener('click', (e) => {
+    if (e.target.closest('.fm-more-btn')) {
+      S.renderLimit += RENDER_PAGE;
+      render();
+      return;
+    }
     const card = e.target.closest('.fm-card');
     if (!card) return;
     const { name, type } = card.dataset;
@@ -1628,6 +1839,10 @@
     try {
     const { mode, dir, names } = S.clip;
     const destDir = intoDir || S.cwd;
+    if (volumeAt(destDir)?.readOnly) {
+      toast('Este volumen es de solo lectura', 'warn', 'Elegí un destino escribible.');
+      return;
+    }
     const r = await transferItems(names, dir, destDir, mode, S.clip.volume);
     journalTransfer(r, mode, dir, destDir);
     if(mode==='cut'){
@@ -1929,12 +2144,21 @@
       toast('La papelera no admite transferencias', 'warn', 'Usá Restaurar para recuperar elementos o Borrar definitivamente para eliminarlos.');
       return { moved: [], copied: [], skipped: 0, failed: [] };
     }
+    if (volumeAt(destDir)?.readOnly) {
+      toast('Este volumen es de solo lectura', 'warn', 'Elegí un destino escribible.');
+      return { moved: [], copied: [], skipped: 0, failed: [] };
+    }
     const toVolume=volumeToken(destDir);
     const taken = new Set(await dirNames(destDir));
     const out = { moved: [], copied: [], skipped: 0, failed: [] };
     for (const name of names) {
       const from = join(srcDir, name);
       if (mode === 'cut' && srcDir === destDir) { out.skipped++; continue; }
+      // A folder can never move inside itself (also reachable via paste).
+      if (mode === 'cut' && (destDir === from || destDir.startsWith(from + '/'))) {
+        out.failed.push(`${name}: no se puede mover dentro de sí misma`);
+        continue;
+      }
       const target = freeName(name, taken);
       const to = join(destDir, target);
       try {
@@ -1978,7 +2202,7 @@
     // resolves the shared promise kept on the job record.
     const rec = S.jobs.get(jobId);
     await rec.done;
-    if (rec.error) throw new Error(rec.error);
+    if (rec.error) throw Object.assign(new Error(rec.error), rec.cancelled ? { cancelled: true } : {});
   }
 
   async function restoreTransfers(){
@@ -2015,6 +2239,7 @@
       }
     })();
     rec.cancel = async () => {
+      rec.cancelled = true;
       rec.error = 'Cancelado';
       S.jobs.delete(jobId);
       renderJobs();
@@ -2173,19 +2398,49 @@
     m.querySelector('.fp-size').textContent = `${fmtSize(st.size)} (${st.size.toLocaleString('es')} B)`;
     m.querySelector('.fp-mtime').textContent = fmtDate(st.mtime);
     m.querySelector('.fp-owner').textContent = `${st.user}:${st.group}`;
-    // chmod input inline in the permisos cell
+    // Permisos: checkboxes rwx por grupo, sincronizados con el octal.
     const permCell = m.querySelector('.fm-props-perms');
-    permCell.innerHTML = `<span class="mono">${esc(st.modeStr)}</span>
-      <input type="text" class="fm-chmod-input mono" value="${esc(st.mode)}" maxlength="4" size="4" title="Octal — ej: 755">`;
+    const oct = String(st.mode || '').trim();
+    const digits = (oct.length === 4 ? oct.slice(1) : oct).padStart(3, '0').slice(-3);
+    permCell.innerHTML = `<span class="mono fm-perm-str">${esc(st.modeStr)}</span>
+      <span class="fm-chmod">${['Dueño', 'Grupo', 'Otros'].map((who, gi) => `
+        <fieldset class="fm-chmod-col"><legend>${who}</legend>${['R', 'W', 'X'].map((b, bi) =>
+          `<label><input type="checkbox" data-g="${gi}" data-bit="${4 >> bi}"${(parseInt(digits[gi], 8) & (4 >> bi)) ? ' checked' : ''}> ${b}</label>`
+        ).join('')}</fieldset>`).join('')}
+      </span>
+      <input type="text" class="fm-chmod-input mono" value="${esc(oct)}" maxlength="4" size="4" title="Octal — ej: 755">
+      ${st.ftype === 'directory' ? '<label class="fm-chmod-rec"><input type="checkbox" class="fm-chmod-recur"> Aplicar también al contenido (recursivo)</label>' : ''}`;
+    const octInput = permCell.querySelector('.fm-chmod-input');
+    permCell.querySelectorAll('.fm-chmod input[data-g]').forEach((cb) =>
+      cb.addEventListener('change', () => {
+        let v = '';
+        for (let g = 0; g < 3; g++) {
+          let d = 0;
+          permCell.querySelectorAll(`input[data-g="${g}"]`).forEach((b) => { if (b.checked) d += Number(b.dataset.bit); });
+          v += d;
+        }
+        const cur = octInput.value.trim();
+        octInput.value = (/^[0-7]{4}$/.test(cur) ? cur[0] : '') + v; // keep the special bit
+      })
+    );
+    octInput.addEventListener('input', () => {
+      const v = octInput.value.trim();
+      if (!/^[0-7]{3,4}$/.test(v)) return;
+      const ds = (v.length === 4 ? v.slice(1) : v).padStart(3, '0').slice(-3);
+      permCell.querySelectorAll('.fm-chmod input[data-g]').forEach((b) => {
+        b.checked = Boolean(parseInt(ds[b.dataset.g], 8) & Number(b.dataset.bit));
+      });
+    });
     const done = () => { m.remove(); document.removeEventListener('keydown', onKey, true); };
     const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); done(); } };
     document.addEventListener('keydown', onKey, true);
     m.querySelector('.fm-p-cancel').addEventListener('click', done);
     m.addEventListener('click', (e) => { if (e.target === m) done(); });
     m.querySelector('.fm-p-chmod').addEventListener('click', async () => {
-      const mode = permCell.querySelector('.fm-chmod-input').value.trim();
+      const mode = octInput.value.trim();
+      const recursive = Boolean(permCell.querySelector('.fm-chmod-recur')?.checked);
       try {
-        await api('/api/files/chmod', { method: 'POST', body: { path: p, mode } });
+        await api('/api/files/chmod', { method: 'POST', body: { path: p, mode, recursive } });
         const old = st.mode;
         journaled({
           label: `chmod ${mode} ${name}`,
@@ -2281,7 +2536,10 @@
     if (type === 'dir' && typeof openTermCmd === 'function') {
       items.push({ icon: 'terminal', label: 'Terminal en esta carpeta', run: () => openTermCmd(`cd '${p.replace(/'/g, `'\\''`)}'`) });
     }
-    if (type === 'dir') items.push({ icon: 'file-plus', label: 'Nuevo archivo en esta carpeta', run: () => createFile(p) });
+    if (type === 'dir') items.push(
+      { icon: 'file-plus', label: 'Nuevo archivo en esta carpeta', run: () => createFile(p) },
+      { icon: 'archive', label: 'Descargar como .zip', run: () => downloadZip(p) }
+    );
     if (type !== 'dir') {
       items.push(
         { icon: 'eye', label: 'Vista previa', run: () => { S.cwd = basePath; if (colI !== null && S.cols[colI]) S.entries = S.cols[colI].entries; openPreview(name); } },
@@ -2295,7 +2553,8 @@
     }
     items.push(
       { icon: 'scissors', label: 'Cortar', run: () => setClip({ mode: 'cut', dir: basePath, names: clipTargets(name) }) },
-      { icon: 'copy', label: 'Copiar', run: () => setClip({ mode: 'copy', dir: basePath, names: clipTargets(name) }) }
+      { icon: 'copy', label: 'Copiar', run: () => setClip({ mode: 'copy', dir: basePath, names: clipTargets(name) }) },
+      { icon: 'copy-plus', label: 'Duplicar', run: async () => { setClip({ mode: 'copy', dir: basePath, names: [name] }); await paste(basePath); } }
     );
     if (S.clip) {
       // "Paste here" on a folder drops inside it; on a file, into its dir.
@@ -2347,8 +2606,15 @@
     applySelToDom();
   });
   el('fm-sel-dl').addEventListener('click', () => {
+    const names = [...S.sel];
+    // Any folder in the mix → one streamed .zip of the whole selection.
+    if (names.some((n) => S.entries.find((e) => e.name === n)?.type === 'dir')) {
+      downloadZip(S.cwd, names);
+      toast('Preparando el .zip de la selección…', 'ok', '', 2500);
+      return;
+    }
     let i = 0;
-    for (const name of S.sel) {
+    for (const name of names) {
       const entry = S.entries.find((e) => e.name === name);
       if (!entry || entry.type === 'dir') continue;
       // Stagger so the browser doesn't drop queued downloads.
@@ -2761,6 +3027,7 @@
       ['Ctrl+H', 'Mostrar/ocultar archivos ocultos'],
       ['Ctrl+F', 'Búsqueda recursiva'],
       ['Ctrl+Alt+N · Ctrl+Shift+N', 'Nuevo archivo · nueva carpeta'],
+      ['Ctrl+Shift+L', 'Enfocar la barra de ubicación'],
       ['/', 'Enfocar filtro'],
       ['Espacio', 'Vista previa rápida'],
       ['←/→ con preview', 'Archivo anterior/siguiente'],
@@ -2782,7 +3049,7 @@
   }
 
   // ---------- Custom prompt modal (mkdir / rename) ----------
-  function fmPrompt(title, label, value = '') {
+  function fmPrompt(title, label, value = '', stem = false) {
     return new Promise((resolve) => {
       const m = document.createElement('div');
       m.className = 'modal fm-prompt-modal';
@@ -2816,7 +3083,11 @@
       m.addEventListener('click', (e) => { if (e.target === m) done(null); });
       document.body.appendChild(m);
       input.focus();
-      input.select();
+      // With stem=true (rename) only the base name is pre-selected so typing
+      // never nukes the extension by accident.
+      const dot = stem ? value.lastIndexOf('.') : -1;
+      if (stem && dot > 0) input.setSelectionRange(0, dot);
+      else input.select();
     });
   }
 
@@ -2900,7 +3171,14 @@
 
   // ---------- Toolbar ----------
   el('fm-new-file-btn').addEventListener('click', () => createFile());
-  el('fm-refresh-btn').addEventListener('click', async () => { const snap=captureFiles(); if(window.AxonNavigation?.current?.params)await restoreFiles(window.AxonNavigation.current.params,snap);else navigate(S.cwd); window.AxonNavigation?.checkpoint(); });
+  el('fm-refresh-btn').addEventListener('click', async () => {
+    // Restoring reloads the editor from disk — confirm first when it holds
+    // unsaved changes (same guard as any other navigation).
+    if (window.AxonPages?.files?.canLeave && !(await window.AxonPages.files.canLeave({ section: 'files', params: {} }))) return;
+    const snap=captureFiles();
+    if(window.AxonNavigation?.current?.params)await restoreFiles(window.AxonNavigation.current.params,snap);else navigate(S.cwd);
+    window.AxonNavigation?.checkpoint();
+  });
 
   el('fm-filter').addEventListener('input', (e) => {
     if (S.searchMode) {
@@ -2909,6 +3187,7 @@
       return;
     }
     S.filter = e.target.value;
+    S.renderLimit = RENDER_PAGE;
     render();
   });
   el('fm-search-btn').addEventListener('click', () => toggleSearch());
@@ -2987,6 +3266,14 @@
   // ---------- Upload (shared by file pickers and drag & drop) ----------
   let uploadAbort = null;
   el('fm-up-cancel').addEventListener('click', () => uploadAbort && uploadAbort.abort());
+
+  // Leaving mid-upload/mid-copy/dirty-editor kills work — warn once.
+  window.addEventListener('beforeunload', (e) => {
+    if (uploadAbort || S.jobs.size || isDirty()) {
+      e.preventDefault();
+      e.returnValue = '';
+    }
+  });
 
   function setUploadBar(done, total, label) {
     const wrap = el('fm-upload-progress');
@@ -3099,6 +3386,7 @@
     if (uploadAbort) return toast('Ya hay una subida en curso', 'warn', '', 2500);
     destDir = destDir || S.cwd;
     if (inTrash(destDir)) return toast('La papelera no admite subidas', 'warn', 'Subí los archivos a una carpeta normal.');
+    if (volumeAt(destDir)?.readOnly) return toast('Este volumen es de solo lectura', 'warn', 'No se pueden subir archivos aquí.');
     const list = Array.from(files || []).filter(Boolean);
     if (!list.length) return;
     // 1. Plan every file: relative path → target dir + final name.
@@ -3149,26 +3437,47 @@
     if (uploadAbort) return toast('Ya hay una subida en curso', 'warn', '', 2500);
     uploadAbort = new AbortController();
     el('fm-up-cancel').disabled = false;
-    setUploadBar(0, total, `Subiendo 0/${total}…`);
+    // Progress is tracked in bytes so the bar can show speed + ETA.
+    const totalBytes = todo.reduce((a, p) => a + p.f.size, 0) || 0;
+    let bytesSent = 0;
+    const t0 = Date.now();
+    const fmtEta = (s) => (!Number.isFinite(s) || s < 0 ? '' : s < 90 ? `~${Math.ceil(s)}s` : `~${Math.round(s / 60)}m`);
     const failed = [];
     const created = [];
     let okCount = 0;
-    for (const p of todo) {
-      if (uploadAbort.signal.aborted) break;
-      try {
-        const done = await uploadFileParts(p, uploadAbort.signal, (fraction) => {
-          setUploadBar(okCount + failed.length + fraction, total,
-            `Subiendo ${okCount + failed.length + 1}/${total}: ${p.finalName} · ${Math.round(fraction * 100)}%`);
-        });
-        okCount++;
-        if (!p.overwritten) created.push(done.path);
-      } catch (err) {
-        if (uploadAbort.signal.aborted) break;
-        const why = err.message || 'Error';
-        failed.push(`${p.rel}: ${why}`);
+    const tick = (label) => {
+      const elaps = (Date.now() - t0) / 1000;
+      const spd = elaps > 0.5 ? bytesSent / elaps : 0;
+      setUploadBar(bytesSent, totalBytes || total,
+        `${label || `Subiendo ${okCount + failed.length}/${total}…`}` +
+        `${totalBytes ? ` · ${Math.min(99, Math.round((bytesSent / totalBytes) * 100))}%` : ''}` +
+        `${spd ? ` · ${fmtSize(Math.round(spd))}/s · ${fmtEta((totalBytes - bytesSent) / spd)}` : ''}`);
+    };
+    tick('Subiendo…');
+    // Two files at a time — strictly serial uploads wasted idle bandwidth.
+    let nextUp = 0;
+    const worker = async () => {
+      while (nextUp < todo.length) {
+        if (uploadAbort.signal.aborted) return;
+        const p = todo[nextUp++];
+        try {
+          const done = await uploadFileParts(p, uploadAbort.signal, (fraction) => {
+            bytesSent += fraction * p.f.size - (p._sent || 0);
+            p._sent = fraction * p.f.size;
+            tick(`Subiendo ${Math.min(total, okCount + failed.length + 1)}/${total}: ${p.finalName}`);
+          });
+          okCount++;
+          if (!p.overwritten) created.push(done.path);
+        } catch (err) {
+          if (uploadAbort.signal.aborted) return;
+          failed.push(`${p.rel}: ${err.message || 'Error'}`);
+        }
+        bytesSent += p.f.size - (p._sent || 0);
+        p._sent = p.f.size;
+        tick();
       }
-      setUploadBar(okCount + failed.length, total, `Subiendo ${okCount + failed.length}/${total}…`);
-    }
+    };
+    await Promise.all([worker(), worker()]);
     const aborted = uploadAbort.signal.aborted;
     uploadAbort = null;
     el('fm-upload-progress').classList.add('hidden');
@@ -3362,7 +3671,11 @@
     let dir = dropTargetOf(e);
     // Same dir or the dragged dir itself are not valid targets.
     if (dir === S.dragging.dir) dir = null;
-    if (dir && S.dragging.names.length === 1 && dir === join(S.dragging.dir, S.dragging.names[0])) dir = null;
+    // A dragged folder can't land on itself or anywhere inside its subtree.
+    if (dir && S.dragging.names.some((n) => {
+      const src = join(S.dragging.dir, n);
+      return dir === src || dir.startsWith(src + '/');
+    })) dir = null;
     if (!dir) {
       clearSpring();
       clearDropMarks();
@@ -3386,6 +3699,13 @@
     const drag = S.dragging;
     S.dragging = null;
     if (!dir || dir === drag.dir) return;
+    if (drag.names.some((n) => {
+      const src = join(drag.dir, n);
+      return dir === src || dir.startsWith(src + '/');
+    })) {
+      toast('No se puede mover una carpeta dentro de sí misma', 'warn', '', 2500);
+      return;
+    }
     e.preventDefault();
     e.stopPropagation();
     const mode = e.ctrlKey || e.altKey ? 'copy' : 'cut';
@@ -3397,8 +3717,8 @@
     if (r.skipped && !n && !r.failed.length) toast('Mismo origen y destino', 'warn', '', 2000);
     // Refresh whichever view holds the destination.
     if (S.view === 'cols') {
-      const col = S.cols.find((c) => c.path === dir || c.path === drag.dir);
-      if (col) {
+      // Source and destination may live in different columns — refresh all.
+      for (const col of S.cols.filter((c) => c.path === dir || c.path === drag.dir)) {
         api(`/api/files?path=${encodeURIComponent(col.path)}`)
           .then((d) => { col.entries = d.entries || []; renderCols(); })
           .catch(() => {});
@@ -3493,7 +3813,6 @@
   el('fm-keys').addEventListener('click',showHelp);
   document.addEventListener('keydown',e=>{
     if(!sec.classList.contains('active') || sec.classList.contains('fm-cloud-mode')) return;
-    if(e.altKey && e.key==='ArrowUp'){e.preventDefault();navigate(parentOf(S.cwd));}
     if((e.ctrlKey||e.metaKey)&&e.shiftKey&&e.key.toLowerCase()==='l'){e.preventDefault();el('fm-location').focus();el('fm-location').select();}
   });
   const saveLocation=()=>{if(!sec.classList.contains('active') || sec.classList.contains('fm-cloud-mode'))return;queueMicrotask(()=>{

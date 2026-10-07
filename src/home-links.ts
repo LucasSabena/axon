@@ -39,7 +39,7 @@ export function normalizeLinks(input:unknown):HomeLink[]{
   });
 }
 export function importHomepage(source:string):{links:HomeLink[];skipped:number;warnings:string[]} {
-  if(source.length>250000||/^[^\n]*[&*][A-Za-z0-9_-]+/m.test(source))throw new MaintenanceError('Archivo demasiado grande o con referencias YAML no admitidas',400);
+  if(source.length>250000||/(?:^|\s)[&*][\w-]+/m.test(source))throw new MaintenanceError('Archivo demasiado grande o con referencias YAML no admitidas',400);
   let parsed:unknown;try{parsed=load(source,{schema:JSON_SCHEMA});}catch{throw new MaintenanceError('YAML/JSON inválido',400);}
   if(!Array.isArray(parsed))throw new MaintenanceError('Se espera una lista de grupos de Homepage',400);
   const found:HomeLink[]=[];let skipped=0;

@@ -8,6 +8,9 @@ const dirs:string[]=[];
 afterEach(async()=>{for(const dir of dirs.splice(0))await rm(dir,{recursive:true,force:true});});
 async function fixture(installed=false) {
   const home=await mkdtemp(path.join(tmpdir(),'axon-archive-'));dirs.push(home);
+  // The archive manifest lives next to CONFIG_PATH — in dev .env points at
+  // the container path /app/data, which isn't writable outside the container.
+  process.env.CONFIG_PATH=path.join(home,'config.json');
   const root=home+'/.config/residual';await mkdir(root,{recursive:true});await writeFile(root+'/config.json','secret fixture');
   const app=new Hono();registerAgentArchives(app,{home:()=>home,agents:()=>[{id:'residual',name:'Residual',root}],installed:async()=>installed,changed:()=>{}});
   return {home,root,app};

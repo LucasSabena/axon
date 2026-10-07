@@ -43,7 +43,11 @@ def run(args,timeout=20):
  try:
   p=subprocess.Popen(['docker']+args,stdin=subprocess.DEVNULL,stdout=out,stderr=err,start_new_session=True,env={k:v for k,v in os.environ.items() if k not in ('COMPOSE_FILE','COMPOSE_PROFILES','COMPOSE_PROJECT_NAME','COMPOSE_ENV_FILES')})
   try:p.wait(timeout=timeout)
-  except subprocess.TimeoutExpired:os.killpg(p.pid,signal.SIGTERM);p.wait(timeout=5);raise Guard('Docker no terminó dentro del límite; comprobá el estado antes de repetir')
+  except subprocess.TimeoutExpired:
+   os.killpg(p.pid,signal.SIGTERM)
+   try:p.wait(timeout=5)
+   except subprocess.TimeoutExpired:os.killpg(p.pid,signal.SIGKILL);p.wait()
+   raise Guard('Docker no terminó dentro del límite; comprobá el estado antes de repetir')
   out.seek(0);data=out.read(1048577)
   if p.returncode or len(data)>1048576:raise Guard('Docker no pudo validar o verificar este contexto; sus credenciales y logs no se muestran')
   return data
@@ -176,6 +180,11 @@ def worker(action):
    if any(not now.get(n,{}).get('running') for n in task['active']):raise Guard('No se pudo comprobar salud; recuperación disponible')
   space=os.statvfs(directory);task['diskFreeAfter']=str(space.f_bavail*space.f_frsize)
   task['state']='restored' if action=='rollback' else 'verified';task['message']=('Retirada verificada: datos y volúmenes pendientes, conservados para recuperación. ' if action=='apply' and task.get('retire') else '')+'Configuración y servicios seleccionados verificados. Los servicios apagados siguen apagados. Los datos y migraciones de las apps no se revierten.';task['canRollback']=action!='rollback';save()
+ except BlockingIOError:
+  # Lock contention is not a crash: another worker holds the release lock. Drop
+  # the launch marker so a later apply/rollback can retry instead of stranding.
+  try:os.unlink('launched-'+action,dir_fd=opfd);os.fsync(opfd)
+  except OSError:pass
  except:
   task['state']='interrupted';task['message']='La operación requiere revisión. Consultá el estado real; el checkpoint conserva la configuración y las imágenes anteriores. No se borraron volúmenes.'
   try:save()
@@ -192,16 +201,55 @@ try:
  rootfd=fd
  s=os.fstat(rootfd)
  if s.st_uid!=os.getuid() or s.st_mode&0o077:raise Guard('Checkpoint sin permisos privados')
- if not __import__('re').fullmatch('[0-9a-f-]{36}',req['id']):raise Guard('Operación inválida')
+ if req['action']!='cleanup' and not __import__('re').fullmatch('[0-9a-f-]{36}',req['id']):raise Guard('Operación inválida')
+ if req['action']=='cleanup' and req.get('id') is not None and not __import__('re').fullmatch('[0-9a-f-]{36}',req['id']):raise Guard('Operación inválida')
  if req['action']=='prepare':
   if len(os.listdir(rootfd))>=20:raise Guard('Límite de 20 checkpoints: exportá y revisá los anteriores antes de crear más')
   os.mkdir(req['id'],0o700,dir_fd=rootfd);opfd=os.open(req['id'],D,dir_fd=rootfd);task=prepare(home,rootfd);save()
+ elif req['action']=='cleanup':
+  # GC checkpoint dirs left by a crashed prepare (no valid state.json) so the
+  # 20-checkpoint cap cannot permanently lock out new releases.
+  removed=[]
+  for entry in sorted(os.listdir(rootfd)):
+   if not __import__('re').fullmatch('[0-9a-f-]{36}',entry):continue
+   if req.get('id') and entry!=req['id']:continue
+   try:efd=os.open(entry,D,dir_fd=rootfd)
+   except OSError:continue
+   try:
+    # A prepare in flight creates the dir before writing state.json and may
+    # legitimately sit there for the whole 180s prepare bound (sequential
+    # docker calls between draft.yaml and save()) — only sweep past that.
+    if time.time()-os.fstat(efd).st_mtime<300:continue
+    stale=False
+    try:
+     data,_=read(efd,'state.json',1048576);rec=json.loads(data)
+     stale=not (isinstance(rec,dict) and rec.get('id')==entry)
+    except (Guard,OSError,ValueError):stale=True
+    if stale:
+     try:
+      names=os.listdir(efd)
+      if not any(stat.S_ISDIR(os.stat(n,dir_fd=efd,follow_symlinks=False).st_mode) for n in names):
+       for n in names:os.unlink(n,dir_fd=efd)
+       os.rmdir(entry,dir_fd=rootfd);os.fsync(rootfd);removed.append(entry)
+     except OSError:pass
+   finally:os.close(efd)
+  print(json.dumps({'ok':True,'removed':removed}))
  else:
   opfd=os.open(req['id'],D,dir_fd=rootfd);data,_=read(opfd,'state.json',1048576);task=json.loads(data)
   if req['action'] in ('apply','rollback'):
    marker='launched-'+req['action']
    try:
-    write(opfd,marker,b'1');pid=os.fork()
+    # Re-launch is allowed only when a previous attempt provably never ran:
+    # interrupted with no phase or a phase equal to the bare action name.
+    if task.get('state')=='interrupted' and task.get('phase') in (None,req['action']):
+     try:os.unlink(marker,dir_fd=opfd)
+     except FileNotFoundError:pass
+    write(opfd,marker,b'1')
+    try:pid=os.fork()
+    except OSError:
+     try:os.unlink(marker,dir_fd=opfd)
+     except OSError:pass
+     raise
     if pid==0:
      os.setsid();signal.signal(signal.SIGHUP,signal.SIG_IGN);null=os.open('/dev/null',os.O_RDWR)
      for stream in (0,1,2):os.dup2(null,stream)
@@ -209,8 +257,8 @@ try:
    except FileExistsError:pass
   elif req['action']=='status' and task['state']=='running' and incarnation(int(task['owner'].split(':')[1]))!=task['owner']:
    task['state']='interrupted';task['message']='El worker se interrumpió; el checkpoint sigue disponible para comprobar y recuperar';save()
- if req['action']=='status' and task['state']=='planned' and 'launched-apply' in os.listdir(opfd) and time.time()-os.stat('launched-apply',dir_fd=opfd).st_mtime>10:
+ if req['action']!='cleanup' and req['action']=='status' and task['state']=='planned' and 'launched-apply' in os.listdir(opfd) and time.time()-os.stat('launched-apply',dir_fd=opfd).st_mtime>10:
   task['state']='interrupted';task['message']='El inicio se interrumpió antes de publicar un recibo; no se reejecuta automáticamente';save()
- print(json.dumps({'ok':True,**public()}))
+ if req['action']!='cleanup':print(json.dumps({'ok':True,**public()}))
 except Guard as e:print(json.dumps({'ok':False,'error':str(e)}))
 except:print(json.dumps({'ok':False,'error':'No se pudo preparar o leer el checkpoint. No se confirmó ningún efecto.'}))

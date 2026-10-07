@@ -1,8 +1,8 @@
 import type { Context, Hono } from 'hono';
 import { readdir, readFile, writeFile, mkdir, unlink, stat, rename as fsRename } from 'node:fs/promises';
-import { randomBytes } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import * as path from 'node:path';
-import { hostExec, hostSpawn, hostSpawnInteractive, hostSpawnDetached, hostToContainer } from './host';
+import { hostExec, hostSpawn, hostSpawnInteractive, hostSpawnDetached, hostToContainer, killHostProc } from './host';
 
 // ---------------------------------------------------------------------------
 // BIBLIOTECA — media tools: optimize / convert photos, videos and audio, and
@@ -303,8 +303,18 @@ function audCmd(src: string, out: string, o: AudOpts): string {
 
 let mozWorker: Worker | null = null;
 const mozWait = new Map<string, (r: { ok: boolean; out?: Uint8Array; error?: string }) => void>();
+const MOZJPEG_TIMEOUT_MS = 5 * 60_000;
 
-function mozjpeg(data: Uint8Array, width: number, height: number, quality: number): Promise<Uint8Array> {
+// A wedged WASM encode settles nothing — kill the worker so the encode slot
+// and the job don't leak forever.
+function killMozWorker(reason: string): void {
+  for (const w of mozWait.values()) w({ ok: false, error: reason });
+  mozWait.clear();
+  try { mozWorker?.terminate(); } catch { /* gone */ }
+  mozWorker = null;
+}
+
+function mozjpeg(data: Uint8Array, width: number, height: number, quality: number, cancelled?: () => boolean): Promise<Uint8Array> {
   if (!mozWorker) {
     mozWorker = new Worker(new URL('./mozjpeg-worker.ts', import.meta.url).href);
     mozWorker.onmessage = (e: MessageEvent) => {
@@ -312,16 +322,34 @@ function mozjpeg(data: Uint8Array, width: number, height: number, quality: numbe
       mozWait.delete(e.data.id);
       w?.(e.data);
     };
-    mozWorker.onerror = (e) => {
-      for (const w of mozWait.values()) w({ ok: false, error: String((e as ErrorEvent).message || 'worker error') });
-      mozWait.clear();
-      mozWorker?.terminate();
-      mozWorker = null;
-    };
+    mozWorker.onerror = (e) => killMozWorker(String((e as ErrorEvent).message || 'worker error'));
+    // Some runtimes report a dead worker via close/exit instead of error.
+    mozWorker.addEventListener?.('close', () => killMozWorker('worker exited'));
   }
   const id = randomBytes(6).toString('hex');
   return new Promise((resolve, reject) => {
-    mozWait.set(id, (r) => (r.ok && r.out ? resolve(r.out) : reject(new Error(r.error || 'MozJPEG falló'))));
+    const done = (r: { ok: boolean; out?: Uint8Array; error?: string }) => {
+      clearTimeout(timer);
+      if (poll) clearInterval(poll);
+      r.ok && r.out ? resolve(r.out) : reject(new Error(r.error || 'MozJPEG falló'));
+    };
+    const timer = setTimeout(() => {
+      mozWait.delete(id);
+      if (poll) clearInterval(poll);
+      killMozWorker('MozJPEG tardó demasiado');
+      reject(new Error('MozJPEG tardó demasiado'));
+    }, MOZJPEG_TIMEOUT_MS);
+    // Rejecting is enough when siblings are mid-flight; the WASM encode is
+    // synchronous so a cancelled job can't be interrupted without killing the
+    // worker for everyone.
+    const poll = cancelled ? setInterval(() => {
+      if (!cancelled()) return;
+      if (!mozWait.delete(id)) return;
+      clearInterval(poll); clearTimeout(timer);
+      reject(new Error('cancelado'));
+      if (!mozWait.size) killMozWorker('cancelado');
+    }, 300) : null;
+    mozWait.set(id, done);
     mozWorker!.postMessage({ id, data, width, height, quality }, [data.buffer] as unknown as Transferable[]);
   });
 }
@@ -341,6 +369,9 @@ function parsePam(buf: Uint8Array): { width: number; height: number; depth: numb
 async function writeHost(hp: string, data: Uint8Array): Promise<boolean> {
   const proc = hostSpawnInteractive(`cat > ${shq(hp)}`, { user: 'user' });
   const stdin = proc.stdin as { write(d: Uint8Array): unknown; flush(): unknown; end(): void };
+  // A wedged remote `cat` (dead mount, stuck write) must not hold the caller
+  // forever — bound the whole transfer at 5 minutes.
+  const timer = setTimeout(() => killHostProc(proc), 300_000);
   try {
     for (let i = 0; i < data.length; i += 1 << 20) {
       await stdin.write(data.subarray(i, i + (1 << 20)));
@@ -348,7 +379,7 @@ async function writeHost(hp: string, data: Uint8Array): Promise<boolean> {
     }
   } catch { /* reported by exit code */ }
   try { stdin.end(); } catch { /* closed */ }
-  return (await proc.exited) === 0;
+  try { return (await proc.exited) === 0; } finally { clearTimeout(timer); }
 }
 
 // ---------- Jobs ----------
@@ -436,7 +467,16 @@ async function runJob(j: Job): Promise<void> {
   const pidf = `${ctx.cacheHost()}/run/${tag}.pid`;
   j.cancel = () => {
     j.cancelled = true;
-    hostExec(`[ -s ${shq(pidf)} ] && kill -TERM -- -$(cat ${shq(pidf)}) 2>/dev/null; rm -f ${shq(tmp)}`, { user: 'user', timeoutMs: 5000 }).catch(() => {});
+    // TERM the group first (polite ffmpeg teardown); a wedged encode that
+    // ignores TERM gets KILL a few seconds later — the job already reports
+    // 'cancelled' but the encoder must not keep burning CPU forever.
+    void (async () => {
+      try {
+        await hostExec(`${killPidfile(pidf, 'TERM')}; rm -f ${shq(tmp)}`, { user: 'user', timeoutMs: 5000 });
+        await new Promise((r) => setTimeout(r, 4000));
+        await hostExec(`[ -s ${shq(pidf)} ] && ${killPidfile(pidf, 'KILL')}; true`, { user: 'user', timeoutMs: 5000 });
+      } catch { /* already gone */ }
+    })();
   };
   try {
     if (j.type === 'image') await runImage(j, it, tmp, pidf);
@@ -461,16 +501,19 @@ async function runJob(j: Job): Promise<void> {
       if (!trashed.includes(it.p)) throw new Error('No se pudo mover el original a la papelera — el resultado no se aplicó');
       const name = await ctx.freeName(dir, `${stem(it.n)}.${outExt}`);
       finalPath = `${dir}/${name}`;
-      const r = await hostExec(`mv -n -- ${shq(tmp)} ${shq(finalPath)}`, { user: 'user', timeoutMs: 60_000 });
-      if (!r.ok) throw new Error(`No se pudo ubicar el resultado: ${r.stderr}`);
+      // mv -n exits 0 when it skips an existing destination — require the tmp
+      // file to be gone so a silent no-op can't pass for success (the original
+      // is already in the trash at this point).
+      const r = await hostExec(`mv -nT -- ${shq(tmp)} ${shq(finalPath)}; [ ! -e ${shq(tmp)} ]`, { user: 'user', timeoutMs: 60_000 });
+      if (!r.ok) throw new Error(`No se pudo ubicar el resultado: ${r.stderr || 'el destino ya existía'}`);
       ctx.dropPath(it.p);
       ctx.repath(it.p, finalPath);
     } else {
       const want = outExt === extOf(it.n) ? `${stem(it.n)} (optimizado).${outExt}` : `${stem(it.n)}.${outExt}`;
       const name = await ctx.freeName(dir, want);
       finalPath = `${dir}/${name}`;
-      const r = await hostExec(`mv -n -- ${shq(tmp)} ${shq(finalPath)}`, { user: 'user', timeoutMs: 60_000 });
-      if (!r.ok) throw new Error(`No se pudo guardar la copia: ${r.stderr}`);
+      const r = await hostExec(`mv -nT -- ${shq(tmp)} ${shq(finalPath)}; [ ! -e ${shq(tmp)} ]`, { user: 'user', timeoutMs: 60_000 });
+      if (!r.ok) throw new Error(`No se pudo guardar la copia: ${r.stderr || 'el destino ya existía'}`);
     }
     const ni = await ctx.addPath(finalPath, carry);
     if (ni) {
@@ -485,6 +528,27 @@ async function runJob(j: Job): Promise<void> {
   }
 }
 
+// The pidfile records "pid:starttime" — the process identity, not just the
+// pid. If the payload finished and its pid was recycled as someone else's
+// group leader, an identity check keeps `kill -- -pid` from hitting an
+// innocent process group.
+const PIDSTAMP = `echo "$$:$(sed 's/^.*) //' /proc/$$/stat | cut -d' ' -f20)"`;
+const killPidfile = (pidf: string, sig: 'TERM' | 'KILL') =>
+  `P=$(cat ${shq(pidf)} 2>/dev/null); S=\${P#*:}; P=\${P%%:*}; ` +
+  `[ -n "$P" ] && [ "$S" != "$P" ] && ` +
+  `[ "$(sed 's/^.*) //' /proc/$P/stat 2>/dev/null | cut -d' ' -f20)" = "$S" ] && kill -${sig} -- -$P 2>/dev/null`;
+
+// The encode payload runs under an *inner* `setsid` (its pidfile records the
+// payload's pgid for cancellation). A remote `timeout` only kills the wrapper
+// group — the inner session escapes it — so bound the run in-process too.
+function pidfileWatchdog(pidf: string, ms: number): () => void {
+  const t = setTimeout(() => {
+    void hostExec(`[ -s ${shq(pidf)} ] && ${killPidfile(pidf, 'KILL')}; true`, { user: 'user', timeoutMs: 10_000 }).catch(() => {});
+  }, ms);
+  (t as { unref?: () => void }).unref?.();
+  return () => clearTimeout(t);
+}
+
 async function runImage(j: Job, it: LibItem, out: string, pidf: string): Promise<void> {
   const o = j.opts as unknown as ImgOpts;
   await encodeImage(it, o, out, pidf, j);
@@ -494,22 +558,25 @@ async function runImage(j: Job, it: LibItem, out: string, pidf: string): Promise
 async function encodeImage(it: LibItem, o: ImgOpts, out: string, pidf: string, j?: Job): Promise<void> {
   const flatten = o.format === 'jpg' || o.format === 'bmp';
   j && (j.stage = 'encoding', j.pct = 10);
-  const pre = `S=${shq(it.p)}; O=${shq(out)}; T=$(mktemp -d); trap 'rm -rf "$T"' EXIT; echo $$ > ${shq(pidf)};`;
-  if (o.format === 'jpg' && (it.w || 0) * (it.h || 0) < 80e6) {
+  const pre = `S=${shq(it.p)}; O=${shq(out)}; T=$(mktemp -d); trap 'rm -rf "$T"' EXIT; ${PIDSTAMP} > ${shq(pidf)};`;
+  // The MozJPEG path buffers whole pixels (w*h*4) — unknown dims (0) must take
+  // the streaming ImageMagick path, never a possibly-huge PAM.
+  if (o.format === 'jpg' && (it.w || 0) > 0 && (it.h || 0) > 0 && (it.w || 0) * (it.h || 0) < 80e6) {
     // Pixels out of ImageMagick as PAM → MozJPEG (WASM) → back to the host.
     const resize = o.maxSide ? `-resize "${o.maxSide}x${o.maxSide}>"` : '';
-    const dec = `S=${shq(it.p)}; echo $$ > ${shq(pidf)}; exec magick "$S[0]" -auto-orient ${resize} ${SRGB} -background white -alpha remove -alpha on -type TrueColorAlpha -depth 8 pam:-`;
-    const proc = hostSpawn(`nice -n 8 setsid -w bash -c ${shq(dec)}`, { user: 'user' });
+    const dec = `S=${shq(it.p)}; ${PIDSTAMP} > ${shq(pidf)}; exec magick "$S[0]" -auto-orient ${resize} ${SRGB} -background white -alpha remove -alpha on -type TrueColorAlpha -depth 8 pam:-`;
+    const proc = hostSpawn(`nice -n 8 setsid -w bash -c ${shq(dec)}`, { user: 'user', timeoutSec: 300 });
+    const unwatch = pidfileWatchdog(pidf, 310_000);
     const [buf, code, err] = await Promise.all([
       new Response(proc.stdout as ReadableStream).arrayBuffer(),
       proc.exited,
       new Response(proc.stderr as ReadableStream).text(),
-    ]);
+    ]).finally(unwatch);
     if (code !== 0) throw new Error(`No se pudo leer la imagen: ${err.trim().slice(-300) || `exit ${code}`}`);
     const pam = parsePam(new Uint8Array(buf));
     if (!pam) throw new Error('Decodificación inesperada (PAM)');
     j && (j.pct = 45);
-    const jpg = await mozjpeg(pam.data.slice(), pam.width, pam.height, o.quality);
+    const jpg = await mozjpeg(pam.data.slice(), pam.width, pam.height, o.quality, j ? () => !!j.cancelled : undefined);
     if (j?.cancelled) throw new Error('cancelado');
     if (!(await writeHost(out, jpg))) throw new Error('No se pudo escribir el resultado');
     j && (j.pct = 90);
@@ -521,7 +588,8 @@ async function encodeImage(it: LibItem, o: ImgOpts, out: string, pidf: string, j
     return;
   }
   const script = `${pre} ${decodeCmd(o, flatten)} && ${encodeCmd(o)} && [ -s "$O" ] && ${metaCmd(o)}`;
-  const r = await hostExec(`nice -n 8 setsid -w bash -c ${shq(script)}`, { user: 'user', timeoutMs: 15 * 60_000 });
+  const unwatch = pidfileWatchdog(pidf, 15 * 60_000);
+  const r = await hostExec(`nice -n 8 setsid -w bash -c ${shq(script)}`, { user: 'user', timeoutMs: 15 * 60_000 }).finally(unwatch);
   if (!r.ok) throw new Error(r.stderr.trim().split('\n').slice(-3).join(' ').slice(-400) || `exit ${r.code}`);
 }
 
@@ -544,7 +612,11 @@ async function runFfmpeg(j: Job, it: LibItem, out: string, pidf: string): Promis
   const attempt = async (useGpu: boolean) => {
     const cmd = j.type === 'video' ? vidCmd(it.p, out, j.opts as unknown as VidOpts, useGpu) : audCmd(it.p, out, j.opts as unknown as AudOpts);
     j.stage = useGpu ? 'encoding-gpu' : 'encoding';
-    const proc = hostSpawn(`setsid -w bash -c ${shq(`echo $$ > ${shq(pidf)}; exec ${cmd}`)}`, { user: 'user' });
+    const proc = hostSpawn(`setsid -w bash -c ${shq(`${PIDSTAMP} > ${shq(pidf)}; exec ${cmd}`)}`, { user: 'user', timeoutSec: 6 * 3600 });
+    const unwatch = pidfileWatchdog(pidf, 6 * 3600 * 1000);
+    // Consume stderr from spawn time — >64KB of ffmpeg -v error output fills
+    // the pipe and deadlocks the encoder if nothing drains it meanwhile.
+    const errP = new Response(proc.stderr as ReadableStream).text().catch(() => '');
     const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
     const dec = new TextDecoder();
     let buf = '';
@@ -562,7 +634,7 @@ async function runFfmpeg(j: Job, it: LibItem, out: string, pidf: string): Promis
         }
       }
     } catch { /* closed */ }
-    const [code, err] = await Promise.all([proc.exited, new Response(proc.stderr as ReadableStream).text()]);
+    const [code, err] = await Promise.all([proc.exited, errP]).finally(unwatch);
     return { code, err: err.trim() };
   };
   let r = await attempt(gpu);
@@ -581,9 +653,16 @@ const ENGINES = {
 type Engine = keyof typeof ENGINES;
 const starting = new Map<Engine, Promise<void>>();
 
+// The worker binds 127.0.0.1 — any local process could otherwise read job
+// results (host paths + transcripts) or kill it. A secret-derived token is
+// threaded through the spawn environment and required on every endpoint.
+const asrToken = (engine: Engine) =>
+  createHmac('sha256', process.env.SESSION_SECRET || 'axon').update(`axon-asr:${engine}`).digest('hex');
+const asrHeaders = (engine: Engine) => ({ 'x-axon-token': asrToken(engine) });
+
 async function asrHealth(engine: Engine): Promise<Record<string, unknown> | null> {
   try {
-    const r = await fetch(`http://127.0.0.1:${ENGINES[engine].port}/health`, { signal: AbortSignal.timeout(1500) });
+    const r = await fetch(`http://127.0.0.1:${ENGINES[engine].port}/health`, { headers: asrHeaders(engine), signal: AbortSignal.timeout(1500) });
     return r.ok ? ((await r.json()) as Record<string, unknown>) : null;
   } catch {
     return null;
@@ -614,10 +693,10 @@ async function ensureAsr(engine: Engine, j?: Job): Promise<void> {
     let cmd: string;
     if (engine === 'whisper') {
       if (!c.whisper) throw new Error('openai-whisper no está instalado en el servidor (pip install openai-whisper)');
-      cmd = `exec python3 ${shq(worker)} ${args}`;
+      cmd = `exec env AXON_ASR_TOKEN=${shq(asrToken(engine))} python3 ${shq(worker)} ${args}`;
     } else {
       if (!c.uv) throw new Error('Parakeet necesita uv instalado en el servidor');
-      cmd = `exec uv run -q --with 'onnx-asr[cpu,hub]' python ${shq(worker)} ${args}`;
+      cmd = `exec env AXON_ASR_TOKEN=${shq(asrToken(engine))} uv run -q --with 'onnx-asr[cpu,hub]' python ${shq(worker)} ${args}`;
     }
     const log = `${ctx.cacheHost()}/asr-${engine}.log`;
     const sp = await hostSpawnDetached(cmd, ctx.cacheHost(), log, 'user');
@@ -675,20 +754,20 @@ async function runTranscribe(j: Job, it: LibItem): Promise<void> {
   await ensureAsr(engine, j);
   const base = `http://127.0.0.1:${ENGINES[engine].port}`;
   const opts = { model: j.opts.model, language: j.opts.language || null, task: j.opts.task, prompt: j.opts.prompt };
-  const r = await fetch(`${base}/jobs`, { method: 'POST', body: JSON.stringify({ path: it.p, opts }), signal: AbortSignal.timeout(10_000) });
+  const r = await fetch(`${base}/jobs`, { method: 'POST', headers: asrHeaders(engine), body: JSON.stringify({ path: it.p, opts }), signal: AbortSignal.timeout(10_000) });
   const d = (await r.json().catch(() => ({}))) as { ok?: boolean; id?: string; error?: string };
   if (!d.ok || !d.id) throw new Error(d.error || 'El motor rechazó el trabajo');
   const wid = d.id;
   j.cancel = () => {
     j.cancelled = true;
-    fetch(`${base}/jobs/${wid}`, { method: 'DELETE', signal: AbortSignal.timeout(3000) }).catch(() => {});
+    fetch(`${base}/jobs/${wid}`, { method: 'DELETE', headers: asrHeaders(engine), signal: AbortSignal.timeout(3000) }).catch(() => {});
   };
   let misses = 0;
   while (true) {
     await Bun.sleep(1200);
     let s: Record<string, unknown> | null = null;
     try {
-      const res = await fetch(`${base}/jobs/${wid}`, { signal: AbortSignal.timeout(5000) });
+      const res = await fetch(`${base}/jobs/${wid}`, { headers: asrHeaders(engine), signal: AbortSignal.timeout(5000) });
       s = (await res.json()) as Record<string, unknown>;
     } catch { /* worker busy or gone */ }
     if (!s || s.ok === false) {
@@ -982,7 +1061,7 @@ export function registerLibraryTools(app: Hono, ctx: LibCtx): void {
   app.post('/api/library/asr/:engine/stop', async (c) => {
     const engine = c.req.param('engine') as Engine;
     if (!ENGINES[engine]) return fail(c, 404, 'Motor desconocido');
-    await fetch(`http://127.0.0.1:${ENGINES[engine].port}/shutdown`, { method: 'POST', signal: AbortSignal.timeout(3000) }).catch(() => {});
+    await fetch(`http://127.0.0.1:${ENGINES[engine].port}/shutdown`, { method: 'POST', headers: asrHeaders(engine), signal: AbortSignal.timeout(3000) }).catch(() => {});
     return c.json({ ok: true });
   });
 }

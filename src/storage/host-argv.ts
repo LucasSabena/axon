@@ -14,8 +14,10 @@ export function hostArgv(tool: ReadTool, args: string[], user = HOST_USER): stri
   return ['nsenter','-t','1','-m','-u','-i','-n','-p','--','runuser','-u',user,'--',...command];
 }
 export async function boundedCommand(argv: string[], stdin: string, signal?: AbortSignal, timeoutMs=22000): Promise<string> {
-  const p=Bun.spawn(argv,{stdin:new Blob([stdin]),stdout:'pipe',stderr:'pipe',env:{PATH:'/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'}});
-  let timedOut=false; const stop=()=>{try{p.kill('SIGKILL');}catch{}};
+  // setsid gives the wrapper (nsenter/runuser) its own process group so a timeout
+  // can kill the whole group — p.kill() alone would orphan the real worker on the host.
+  const p=Bun.spawn(['setsid',...argv],{stdin:new Blob([stdin]),stdout:'pipe',stderr:'pipe',env:{PATH:'/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'}});
+  let timedOut=false; const stop=()=>{try{process.kill(-p.pid,'SIGKILL');}catch{try{p.kill('SIGKILL');}catch{}}};
   const timer=setTimeout(()=>{timedOut=true;stop();},timeoutMs);signal?.addEventListener('abort',stop,{once:true});if(signal?.aborted)stop();
   const read=async(stream:ReadableStream<Uint8Array>)=>{let n=0;const chunks:Uint8Array[]=[];for await(const chunk of stream){n+=chunk.length;if(n>2*1024*1024){stop();throw new Error('Salida de análisis excedida');}chunks.push(chunk);}return Buffer.concat(chunks).toString('utf8');};
   try { const [out,,code]=await Promise.all([read(p.stdout),read(p.stderr),p.exited]);if(signal?.aborted)throw new Error('Análisis cancelado');if(timedOut||code!==0)throw new Error('Análisis interrumpido o permiso insuficiente');return out; }

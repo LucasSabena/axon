@@ -21,6 +21,10 @@ const FILE = path.join(
   'events.json'
 );
 const MAX_EVENTS = 500;
+// A buffering proxy can keep a dead SSE socket subscribed forever — bound
+// both the count and the lifetime so heartbeats eventually tear it down.
+const MAX_SUBSCRIBERS = 100;
+const MAX_STREAM_MS = 6 * 60 * 60_000;
 
 let events: AppEvent[] = []; // newest last
 let loaded = false;
@@ -111,13 +115,15 @@ export function registerEventRoutes(app: Hono): void {
     c.header('Cache-Control', 'private, no-store, no-transform');
     c.header('X-Accel-Buffering', 'no');
     return streamSSE(c, async stream => {
+      if (subscribers.size >= MAX_SUBSCRIBERS) return;
       let wake: (() => void) | null = null;
       const changed = () => wake?.();
       subscribers.add(changed);
       stream.onAbort(changed);
       let last = -1;
+      const deadline = Date.now() + MAX_STREAM_MS;
       try {
-        while (!stream.aborted && !stream.closed) {
+        while (!stream.aborted && !stream.closed && Date.now() < deadline) {
           if (last !== revision) {
             last = revision;
             await stream.writeSSE({ event:'change', id:String(revision), data:JSON.stringify({unread:unreadCount()}) });

@@ -30,17 +30,30 @@ const sha=(data:Uint8Array)=>createHash('sha256').update(data).digest('hex');
 export class CloudAgents {
   private locks = new Set<string>();
   constructor(readonly store:PlatformStore,readonly providers:Record<string,CloudProvider>,private vault:CloudVault) {
-    for(const u of store.list<Upload>(KIND))if(u.state==='starting'){
-      u.state='failed';u.error='El inicio fue interrumpido. No se publicó el archivo.';this.save(u);
-      store.append({actor:u.owner,credentialId:u.credentialId,action:'cloud.upload.interrupted',resource:u.provider+':'+u.path,status:'interrupted',operationId:u.id,detail:u.agent});
+    for(const u of store.list<Upload>(KIND)){
+      // 'running'/'starting' persisted across a restart mean the worker died
+      // with the previous process — the upload can never resume.
+      if(u.state==='starting'||u.state==='running'){
+        u.state='failed';u.error='La subida fue interrumpida. No se publicó el archivo.';this.save(u);
+        store.append({actor:u.owner,credentialId:u.credentialId,action:'cloud.upload.interrupted',resource:u.provider+':'+u.path,status:'interrupted',operationId:u.id,detail:u.agent});
+      }
+      // 'committing' across a restart may or may not have landed on Dropbox —
+      // honest state is 'uncertain'; it no longer counts toward the cap but
+      // keeps its block receipts until status() reconciles it.
+      if(u.state==='committing'){
+        u.state='uncertain';u.error='No se confirmó la publicación. Revisá el destino antes de iniciar otra subida.';this.save(u);
+      }
+      // Retire per-block hash receipts of uploads that can no longer resume.
+      if(!['starting','running','committing','uncertain'].includes(u.state))this.clearBlocks(u.id);
     }
   }
+  private clearBlocks(id:string){this.store.db.query("DELETE FROM records WHERE kind='cloud-agent-block' AND id>=? AND id<?").run(id+':',id+';');}
   available(owner:string){return Object.entries(this.providers).flatMap(([id,p])=>{const s=p.status(owner);return s.connected?[{id,name:CLOUD_NAMES[id as keyof typeof CLOUD_NAMES],sources:s.sources,uploadSupported:!!s.uploadSupported,uploadGranted:!!s.uploadGranted}]:[];});}
   async grants(owner:string,value:unknown):Promise<CloudGrant[]> {
     if(!Array.isArray(value)||value.length>100)throw new PlatformError('Permisos de conexión inválidos');
     const result:CloudGrant[]=[];
     for(const g of value){
-      exact(g,['provider','source','root','scopes']);const p=this.providers[g.provider];
+      exact(g,['provider','source','root','scopes']);const p=Object.hasOwn(this.providers,g.provider)?this.providers[g.provider]:undefined;
       if(!p?.status(owner).connected||!p.connectionIdentity)throw new PlatformError('Conexión no disponible',409);
       if(typeof g.source!=='string'||!p.status(owner).sources.some(s=>s.id===g.source)||!Array.isArray(g.scopes)||!g.scopes.length||g.scopes.some((s:any)=>!['cloud:read','cloud:upload'].includes(s)))throw new PlatformError('Ubicación o permiso inválido');
       const root=agentPath(g.root),connectionId=p.connectionIdentity(owner);
@@ -55,7 +68,7 @@ export class CloudAgents {
   connections(identity:ApiIdentity){this.store.assertActive(identity);return this.available(identity.owner).flatMap(p=>{const grants=(identity.cloudGrants||[]).filter(g=>g.provider===p.id&&g.connectionId===this.providers[p.id].connectionIdentity?.(identity.owner));return grants.length?[{...p,sources:p.sources.filter(s=>grants.some(g=>g.source===s.id)),grants:grants.map(({source,root,scopes})=>({source,root,scopes}))}]:[];});}
   private async access(identity:ApiIdentity,provider:string,source:string,path:string,scope:CloudScope){
     this.store.assertActive(identity);agentPath(path);
-    const p=this.providers[provider];
+    const p=Object.hasOwn(this.providers,provider)?this.providers[provider]:undefined;
     const grants=(identity.cloudGrants||[]).filter(g=>g.provider===provider&&g.source===source&&g.scopes.includes(scope)&&within(provider,path,g.root));
     if(!grants.length||!p)throw new PlatformError('El token no tiene permiso para esta conexión, carpeta y acción',403);
     if(!p.status(identity.owner).connected||!p.connectionIdentity||!grants.some(g=>g.connectionId===p.connectionIdentity!(identity.owner)))throw new PlatformError('La conexión cambió. Creá un token para la cuenta actual',403);
@@ -99,16 +112,23 @@ export class CloudAgents {
   private publicUpload(u:Upload){const {sealed,inflight,last,connectionId,owner,credentialId,...result}=u;return {...result,chunkSize:UPLOAD_CHUNK};}
   retireCredentials(){
     const active=new Set(this.store.tokens().filter(t=>!t.revoked&&t.expiresAt>Date.now()).map(t=>t.id));
-    for(const u of this.store.list<Upload>(KIND))if(['starting','running'].includes(u.state)&&!active.has(u.credentialId)){u.state='cancelled';u.error='El token fue revocado o venció. No se publicó el archivo.';this.save(u);this.store.append({actor:u.owner,credentialId:u.credentialId,action:'cloud.upload.credential-expired',resource:u.provider+':'+u.path,status:'interrupted',operationId:u.id});}
+    for(const u of this.store.list<Upload>(KIND))if(['starting','running'].includes(u.state)&&!active.has(u.credentialId)){u.state='cancelled';u.error='El token fue revocado o venció. No se publicó el archivo.';this.save(u);this.clearBlocks(u.id);this.store.append({actor:u.owner,credentialId:u.credentialId,action:'cloud.upload.credential-expired',resource:u.provider+':'+u.path,status:'interrupted',operationId:u.id});}
   }
   ownerUploads(owner:string,provider:string){this.retireCredentials();return this.store.list<Upload>(KIND).filter(u=>u.owner===owner&&u.provider===provider).slice(0,20).map(u=>this.publicUpload(u));}
-  private save(u:Upload){u.updated=Date.now();this.store.put(KIND,u.id,u);}
+  private save(u:Upload){
+    u.updated=Date.now();this.store.put(KIND,u.id,u);
+    // Terminal uploads prune the tail of the history so records stop growing.
+    if(['complete','failed','cancelled','uncertain'].includes(u.state)){
+      const rows=this.store.list<Upload>(KIND).filter(v=>v.owner===u.owner&&v.provider===u.provider).sort((a,b)=>b.at-a.at);
+      for(const v of rows.slice(30))this.store.db.query('DELETE FROM records WHERE kind=? AND id=?').run(KIND,v.id);
+    }
+  }
   private uploadProvider(provider:string):CloudUploadProvider {const p=this.providers[provider] as CloudUploadProvider;if(provider!=='dropbox'||!p?.beginUpload)throw new PlatformError('Las subidas están disponibles para Dropbox',409);return p;}
   private async upload(identity:ApiIdentity,id:string){
     const u=this.store.get<Upload>(KIND,id);if(!u||u.credentialId!==identity.id||u.owner!==identity.owner)throw new PlatformError('Subida no encontrada',404);
     const {connectionId}=await this.access(identity,u.provider,u.source,u.path,'cloud:upload');
     if(connectionId!==u.connectionId)throw new PlatformError('Cambió la conexión de esta subida',403);
-    if(Date.now()-u.at>6*86400000&&['starting','running'].includes(u.state)){u.state='failed';u.error='La sesión de subida expiró';this.save(u);}
+    if(Date.now()-u.at>6*86400000&&['starting','running'].includes(u.state)){u.state='failed';u.error='La sesión de subida expiró';this.save(u);this.clearBlocks(u.id);}
     return u;
   }
   private async locked<T>(id:string,fn:()=>Promise<T>){if(this.locks.has(id))throw new PlatformError('La subida tiene una operación en curso',409);this.locks.add(id);try{return await fn();}catch(e){throw cloudError(e);}finally{this.locks.delete(id);}}
@@ -122,8 +142,11 @@ export class CloudAgents {
       const old=this.store.get<Upload>(KIND,value.requestId);
       if(old){await this.upload(identity,old.id);if(old.provider!==provider||old.source!==source||old.path!==path||old.size!==value.size)throw new PlatformError('requestId ya usado para otro archivo',409);return this.publicUpload(old);}
       this.retireCredentials();
-      if(this.store.list<Upload>(KIND).filter(u=>u.owner===identity.owner&&Date.now()-u.at<6*86400000&&['starting','running','committing'].includes(u.state)).length>=3)throw new PlatformError('Ya hay tres subidas en curso',409);
-      const u:Upload={id:value.requestId,owner:identity.owner,credentialId:identity.id,agent:identity.name,provider,source,path,size:value.size,received:0,state:'starting',at:Date.now(),updated:Date.now(),connectionId};this.save(u);this.audit(identity,'upload.start',provider,path,'running',u.id);
+      const u=this.store.db.transaction(():Upload=>{
+        if(this.store.list<Upload>(KIND).filter(v=>v.owner===identity.owner&&Date.now()-v.at<6*86400000&&['starting','running','committing'].includes(v.state)).length>=3)throw new PlatformError('Ya hay tres subidas en curso',409);
+        const created:Upload={id:value.requestId,owner:identity.owner,credentialId:identity.id,agent:identity.name,provider,source,path,size:value.size,received:0,state:'starting',at:Date.now(),updated:Date.now(),connectionId};this.save(created);return created;
+      }).immediate();
+      this.audit(identity,'upload.start',provider,path,'running',u.id);
       try{const session=await p.beginUpload(identity.owner);this.unchanged(identity,provider,connectionId);u.sealed=this.vault.seal({session},'agent-upload:'+u.id);u.state='running';this.save(u);}
       catch(e){u.state='failed';u.error=cloudError(e).message;this.save(u);this.audit(identity,'upload.start',provider,path,'failed',u.id);throw e;}
       return this.publicUpload(u);
@@ -147,7 +170,7 @@ export class CloudAgents {
     }).immediate();return this.publicUpload(u);
   });}
   private fullHash(u:Upload){const h=createHash('sha256');let count=0;for(const row of this.store.db.query('SELECT payload FROM records WHERE kind=? AND id>=? AND id<? ORDER BY id').iterate('cloud-agent-block',u.id+':',u.id+';') as Iterable<{payload:string}>){h.update(Buffer.from(JSON.parse(row.payload).hash,'hex'));count++;}if(count!==Math.ceil(u.size/BLOCK))throw new PlatformError('Faltan comprobantes de bloques; no se publicó el archivo',409);return h.digest('hex');}
-  private complete(identity:ApiIdentity,u:Upload,m:CloudEntry){if(m.type!=='file'||m.size!==u.size||m.hash!==u.hash)throw new PlatformError('No se pudo confirmar la integridad del archivo publicado',409);u.state='complete';u.result=m;delete u.error;this.save(u);this.audit(identity,'upload.complete',u.provider,u.path,'ok',u.id);}
+  private complete(identity:ApiIdentity,u:Upload,m:CloudEntry){if(m.type!=='file'||m.size!==u.size||m.hash!==u.hash)throw new PlatformError('No se pudo confirmar la integridad del archivo publicado',409);u.state='complete';u.result=m;delete u.error;this.save(u);this.clearBlocks(u.id);this.audit(identity,'upload.complete',u.provider,u.path,'ok',u.id);}
   async status(identity:ApiIdentity,id:string){return this.locked(id,async()=>{const u=await this.upload(identity,id);if(['committing','uncertain'].includes(u.state)){
     try{const m=await this.providers[u.provider].metadata(identity.owner,u.source,u.path);this.unchanged(identity,u.provider,u.connectionId);this.complete(identity,u,m);}catch{u.state='uncertain';u.error='No se confirmó la publicación. Revisá el destino antes de iniciar otra subida.';this.save(u);}
   }return this.publicUpload(u);});}
@@ -158,11 +181,11 @@ export class CloudAgents {
       u.hash=value.hash;u.state='committing';this.save(u);
       const {session}=this.vault.open<{session:string}>(u.sealed!,'agent-upload:'+u.id);
       try{const m=await this.uploadProvider(u.provider).finishUpload(identity.owner,session,u.size,u.path,signal);this.unchanged(identity,u.provider,u.connectionId);this.complete(identity,u,m);}
-      catch(e){u.state=e instanceof UploadRejected?'failed':'uncertain';u.error=e instanceof UploadRejected?e.message:'No se confirmó la publicación. Consultá el estado y revisá el destino.';this.save(u);this.audit(identity,'upload.unconfirmed',u.provider,u.path,'failed',u.id);throw e;}
+      catch(e){u.state=e instanceof UploadRejected?'failed':'uncertain';u.error=e instanceof UploadRejected?e.message:'No se confirmó la publicación. Consultá el estado y revisá el destino.';this.save(u);if(u.state==='failed')this.clearBlocks(u.id);this.audit(identity,'upload.unconfirmed',u.provider,u.path,'failed',u.id);throw e;}
       return this.publicUpload(u);
     });
   }
-  async cancel(identity:ApiIdentity,id:string){return this.locked(id,async()=>{const u=await this.upload(identity,id);if(['committing','uncertain','complete'].includes(u.state))throw new PlatformError('La publicación ya comenzó. Consultá su resultado',409);u.state='cancelled';this.save(u);this.audit(identity,'upload.cancel',u.provider,u.path,'ok',u.id);return this.publicUpload(u);});}
+  async cancel(identity:ApiIdentity,id:string){return this.locked(id,async()=>{const u=await this.upload(identity,id);if(['committing','uncertain','complete'].includes(u.state))throw new PlatformError('La publicación ya comenzó. Consultá su resultado',409);u.state='cancelled';this.save(u);this.clearBlocks(u.id);this.audit(identity,'upload.cancel',u.provider,u.path,'ok',u.id);return this.publicUpload(u);});}
 }
 
 export async function boundedBytes(body:ReadableStream<Uint8Array>|null,max:number,truncate=false){

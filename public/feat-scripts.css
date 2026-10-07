@@ -5,6 +5,29 @@
   margin: -4px 0 14px;
 }
 
+#tab-scripts .sc-toolbar {
+  margin-bottom: 14px;
+}
+
+#tab-scripts .sc-toolbar .filter-input {
+  width: 100%;
+  max-width: 420px;
+}
+
+#tab-scripts .sc-desc {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-faint);
+  line-height: 1.4;
+}
+
+#tab-scripts .sc-root-warn {
+  margin: 0;
+  font-size: 0.74rem;
+  color: var(--warn);
+  line-height: 1.35;
+}
+
 #tab-scripts .sc-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
@@ -69,6 +92,12 @@
   word-break: break-all;
   max-height: 84px;
   overflow: auto;
+  cursor: pointer;
+}
+
+#tab-scripts .sc-cmd.sc-cmd-open {
+  max-height: 40vh;
+  cursor: text;
 }
 
 #tab-scripts .sc-meta {
@@ -109,6 +138,21 @@
 
 #tab-scripts .sc-last-wrap {
   color: var(--text-faint);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* La última corrida es un botón (abre el log del job). */
+#tab-scripts button.sc-last {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
 }
 
 #tab-scripts .sc-last.ok {
@@ -187,6 +231,78 @@
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* ---------- Validación inline del editor ---------- */
+
+.sc-modal .sc-field-err,
+.sc-modal .sc-field-warn {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.sc-modal .sc-field-err {
+  color: var(--danger);
+}
+
+.sc-modal .sc-field-warn {
+  color: var(--warn);
+}
+
+.sc-modal input[aria-invalid='true'] {
+  border-color: var(--danger);
+}
+
+/* ---------- Historial de ejecuciones ---------- */
+
+.sc-modal .sc-hist-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 50vh;
+  overflow: auto;
+}
+
+.sc-modal .sc-hist-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-canvas);
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.sc-modal .sc-hist-row:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.sc-modal .sc-hist-row .sc-hist-mark {
+  width: 14px;
+  text-align: center;
+}
+
+.sc-modal .sc-hist-row.ok .sc-hist-mark {
+  color: var(--ok);
+}
+
+.sc-modal .sc-hist-row.fail .sc-hist-mark {
+  color: var(--danger);
+}
+
+.sc-modal .sc-hist-id {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-faint);
 }
 
 @media (max-width: 640px) {

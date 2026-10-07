@@ -29,7 +29,7 @@ export function registerQaBoundary(app:Hono,root:string|null){
    const fixtureSoftwareIcons=/^\/api\/software\/icons\/[^/]+(?:\/upload)?$/.test(p);
    // Account metadata and launcher writes use the QA-owned home. Logins remain
    // blocked: they would run real agent binaries and contact external accounts.
-   const fixtureAccounts=/^\/api\/agent-accounts\/(codex|claude)(?:\/(activate|rename|install))?$/.test(p);
+   const fixtureAccounts=/^\/api\/agent-accounts\/(codex|claude)(?:\/(activate|rename|install|delete))?$/.test(p);
    const fixturePlatform=/^\/api\/(access\/tokens(?:\/[^/]+)?|project-hub\/[^/]+\/(diagnose|bindings)|backups\/(recovery-kit|policies(?:\/[^/]+(?:\/run)?)?|jobs\/[^/]+\/(restore|verify)))$/.test(p);
    // Onboarding and credential routes only write files inside the QA data dir.
    const fixtureOnboarding=/^\/api\/(onboarding\/(setup|complete|dismiss|check|reset)|auth\/(password|totp\/(setup|enable|disable)))$/.test(p);

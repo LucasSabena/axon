@@ -2,7 +2,7 @@ import type {Hono} from 'hono';
 import * as path from 'node:path';
 import {stat} from 'node:fs/promises';
 import {hostExec,hostToContainer} from './host';
-import {resolveHostPath} from './host-storage';
+import {resolveHostPath,hostHome} from './host-storage';
 import {listJobs} from './jobs';
 import {software,softwareCommand,runSoftwareJob,nativeSoftwareRunner,softwareIcon} from './software';
 import {HOST_USER} from './host';
@@ -49,6 +49,9 @@ const quote=(s:string)=>"'"+s.replace(/'/g,"'\\''")+"'";
 const cache=new SnapshotCache<any>(15_000);
 const searchCache=new SnapshotCache<any>(60_000,16);
 const discovered=new Map<string,StoreApp>();
+// Catálogo completo conocido por esta instancia: fijo + resultados Flathub
+// ya vistos. El inventario físico los usa para resolver referencias store:*.
+export function allStoreEntries():StoreApp[]{return [...STORE_APPS,...discovered.values()];}
 const validAppId=(id:string)=>/^[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z][A-Za-z0-9_-]*){2,}$/.test(id)&&id.length<=200;
 export function storeSteps(app:StoreApp,action:'install'|'update'|'remove'):JobStep[]{
  if(app.backend==='external')throw new Error('Este programa usa el instalador oficial del fabricante');
@@ -102,8 +105,8 @@ const KIND_WARN:Partial<Record<InstallerKind,string>>={
  run:'Los instaladores ejecutables pueden pedir confirmaciones (licencia, opciones). Si se interrumpe vas a poder revisar el log y reintentar respondiendo "sí" a todo.',
  rpm:'RPM no es nativo de este sistema: se convierte con alien (best-effort).',
  snap:'Se instala sin firma (--dangerous) y puede pedir --classic si la primera pasada falla.',
- archive:'El ejecutable principal se detecta por heurística; verificá el resultado en el log.',
- appimage:'Se copia a /opt/appimages con un acceso en el menú de aplicaciones.',
+ archive:'Se extrae en /opt y se enlaza el ejecutable principal (detectado por heurística) desde /usr/local/bin; un enlace existente no se pisa. Verificá el resultado en el log.',
+ appimage:'Se copia a /opt/appimages con un acceso en el menú de aplicaciones; una copia anterior del mismo nombre se reemplaza.',
 };
 function appImageInstallScript(src:string,slug:string,name:string):string{
  const dest=`/opt/appimages/${slug}.AppImage`;
@@ -125,33 +128,44 @@ function archiveInstallScript(src:string,slug:string,name:string):string{
   `case ${quote(src)} in *.zip) unzip -q ${quote(src)} -d "$dest";; *) tar -xf ${quote(src)} -C "$dest";; esac`,
   `bin=$(find "$dest" -type f -perm -u+x ! -name '*.so*' -printf '%s\\t%f\\t%p\\n' 2>/dev/null | awk -F'\\t' -v s=${quote(slug)} '{n=tolower($2);s2=$1;if(n==s||index(n,s)==1)s2+=1e15;if(s2>b){b=s2;p=$3}}END{print p}')`,
   `if [ -z "$bin" ]; then echo 'No encontré un ejecutable dentro del archivo' >&2; exit 1; fi`,
-  `chmod +x "$bin" 2>/dev/null || true; ln -sf "$bin" ${quote('/usr/local/bin/'+slug)}`,
+  `chmod +x "$bin" 2>/dev/null || true; if [ -e ${quote('/usr/local/bin/'+slug)} ] && [ "$(readlink -f -- ${quote('/usr/local/bin/'+slug)} 2>/dev/null)" != "$bin" ]; then echo "Aviso: /usr/local/bin/${slug} ya existe y apunta a otro programa; no se pisa. El ejecutable quedó en $dest." >&2; else ln -sf "$bin" ${quote('/usr/local/bin/'+slug)}; fi`,
   `printf '[Desktop Entry]\\nType=Application\\nName=%s\\nExec=\\"%s\\"\\nIcon=application-x-executable\\nCategories=Utility;\\n' ${quote(name)} "$bin" > ${quote('/usr/share/applications/'+slug+'.desktop')}`,
   `echo "Ejecutable detectado: $bin — acceso '${slug}'"`,
  ].join('\n');
 }
-export function installerSteps(hostPath:string,kind:InstallerKind,opts:{force?:boolean}={}):JobStep[]{
- const dir=path.posix.dirname(hostPath),base=path.posix.basename(hostPath);
+// Los instaladores se ejecutan desde una copia en un directorio sólo de root.
+// La copia se verifica (hash, tamaño y permisos) dentro del mismo job, antes de
+// cualquier paso que la use: un archivo reemplazado en /tmp entre la inspección
+// y la ejecución no llega a correr como root (cierra el TOCTOU).
+export const INSTALLER_STAGE_DIR='/var/tmp/axon-installers';
+export function installerSteps(hostPath:string,kind:InstallerKind,opts:{force?:boolean;stage?:{sha256:string;size:number}}={}):JobStep[]{
+ const base=path.posix.basename(hostPath);
+ const execPath=opts.stage?`${INSTALLER_STAGE_DIR}/${base}`:hostPath;
+ const dir=path.posix.dirname(execPath),execBase=path.posix.basename(execPath);
  const slug=installerSlug(base),name=installerName(base);
  const steps:JobStep[]=[];
  const push=(label:string,cmd:string)=>{steps.push({label,user:'root' as const,group:'store',cmd});};
  const aptEnsure=(bin:string,pkg:string,label:string)=>push(label,`command -v ${bin} >/dev/null || { apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ${pkg}; }`);
+ if(opts.stage){
+  push('Copiar el instalador a un área segura',`install -d -m0700 -- ${quote(INSTALLER_STAGE_DIR)} && rm -f -- ${quote(execPath)} && install -m0600 -- ${quote(hostPath)} ${quote(execPath)}`);
+  push('Verificar la integridad del instalador',`test -f ${quote(execPath)} && test ! -L ${quote(execPath)} && test "$(stat -c '%u:%s' -- ${quote(execPath)})" = ${quote('0:'+opts.stage.size)} && test "$(sha256sum -- ${quote(execPath)} | cut -d' ' -f1)" = ${quote(opts.stage.sha256)}`);
+ }
  switch(kind){
-  case 'deb':push('Instalar el paquete y resolver dependencias',`DEBIAN_FRONTEND=noninteractive apt-get install -y -- ${quote(hostPath)}`);break;
-  case 'flatpak':steps.push(...setupSteps());push('Instalar la aplicación desde el archivo',`flatpak install --system --noninteractive -y -- ${quote(hostPath)}`);break;
-  case 'appimage':push('Instalar en /opt/appimages y crear el acceso',appImageInstallScript(hostPath,slug,name));break;
+  case 'deb':push('Instalar el paquete y resolver dependencias',`DEBIAN_FRONTEND=noninteractive apt-get install -y -- ${quote(execPath)}`);break;
+  case 'flatpak':steps.push(...setupSteps());push('Instalar la aplicación desde el archivo',`flatpak install --system --noninteractive -y -- ${quote(execPath)}`);break;
+  case 'appimage':push('Instalar en /opt/appimages y crear el acceso',appImageInstallScript(execPath,slug,name));break;
   case 'archive':
    if(/\.zip$/i.test(base))aptEnsure('unzip','unzip','Preparar unzip para extraer el archivo');
    if(/\.zst$/i.test(base))aptEnsure('zstd','zstd','Preparar zstd para extraer el archivo');
-   push(`Extraer en /opt/${slug} y crear el acceso`,archiveInstallScript(hostPath,slug,name));break;
-  case 'rpm':aptEnsure('alien','alien','Preparar el conversor de paquetes RPM');push('Convertir e instalar el paquete',`alien --install --scripts ${quote(hostPath)}`);break;
-  case 'snap':aptEnsure('snap','snapd','Preparar snapd');push('Instalar el paquete snap local',`snap install --dangerous ${quote(hostPath)} || snap install --dangerous --classic ${quote(hostPath)}`);break;
+   push(`Extraer en /opt/${slug} y crear el acceso`,archiveInstallScript(execPath,slug,name));break;
+  case 'rpm':aptEnsure('alien','alien','Preparar el conversor de paquetes RPM');push('Convertir e instalar el paquete',`alien --install --scripts ${quote(execPath)}`);break;
+  case 'snap':aptEnsure('snap','snapd','Preparar snapd');push('Instalar el paquete snap local',`snap install --dangerous ${quote(execPath)} || snap install --dangerous --classic ${quote(execPath)}`);break;
   case 'run':
-   push('Hacer ejecutable el instalador',`chmod +x -- ${quote(hostPath)}`);
+   push('Hacer ejecutable el instalador',`chmod +x -- ${quote(execPath)}`);
    push(opts.force?'Ejecutar el instalador respondiendo sí a las confirmaciones':'Ejecutar el instalador',
-    `cd ${quote(dir)} && ${opts.force?'yes | ':''}timeout 3600 ${/\.sh$/i.test(base)?'bash ':''}./${quote(base)}${opts.force?'':' < /dev/null'}`);break;
+    `cd ${quote(dir)} && ${opts.force?'yes | ':''}timeout 3600 ${/\.sh$/i.test(execBase)?'bash ':''}./${quote(execBase)}${opts.force?'':' < /dev/null'}`);break;
  }
- push('Eliminar el instalador',`rm -f -- ${quote(hostPath)}`);
+ push('Eliminar el instalador',opts.stage?`rm -f -- ${quote(execPath)} ${quote(hostPath)}`:`rm -f -- ${quote(hostPath)}`);
  return steps;
 }
 async function resolveInstaller(input:unknown):Promise<{hostPath?:string;size?:number;error?:string;status?:number}>{
@@ -173,12 +187,39 @@ async function detectFor(hostPath:string):Promise<{kind:InstallerKind|null;error
  if(!det.kind&&!det.error)det={kind:null,error:'No reconozco el tipo de instalador. Soportados: .deb, .AppImage, .flatpak, .run, .sh, .rpm, .snap, .zip, .tar.gz…'};
  return det;
 }
+// Huella del archivo tal como se aprobó en el request: el job la vuelve a
+// comprobar sobre la copia segura antes de ejecutar nada.
+async function installerFingerprint(hostPath:string,size:number):Promise<{sha256:string;size:number}|null>{
+ const r=await hostExec(`sha256sum -- ${quote(hostPath)} | cut -d' ' -f1`,{timeoutMs:120_000});
+ const sha256=r.stdout.trim();
+ return r.ok&&/^[a-f0-9]{64}$/.test(sha256)?{sha256,size}:null;
+}
+
+// Gestión del área de espera: los instaladores subidos (~/.local/share/axon/instaladores)
+// y la copia segura (/var/tmp/axon-installers) no crecen sin límite.
+const UPLOAD_STAGE='/.local/share/axon/instaladores';
+let stagingProbe:{at:number;value:{count:number;bytes:number}}={at:0,value:{count:0,bytes:0}};
+let lastAutoPrune=0;
+async function stagingDirs(){const home=await hostHome();return [home+UPLOAD_STAGE,INSTALLER_STAGE_DIR];}
+async function stagedInstallers(){
+ if(Date.now()-stagingProbe.at<300_000)return stagingProbe.value;
+ const dirs=await stagingDirs();
+ const r=await hostExec(`find ${dirs.map(quote).join(' ')} -type f -printf '%s\\n' 2>/dev/null | awk '{n++;b+=$1}END{print n+0, b+0}'`,{timeoutMs:15_000});
+ const [count,bytes]=r.ok?r.stdout.trim().split(/\s+/).map(Number):[0,0];
+ stagingProbe={at:Date.now(),value:{count:count||0,bytes:bytes||0}};
+ if(Date.now()-lastAutoPrune>3_600_000){
+  lastAutoPrune=Date.now();
+  hostExec(`find ${quote(dirs[0])} -type f -mtime +7 -delete 2>/dev/null; find ${quote(INSTALLER_STAGE_DIR)} -type f -mtime +1 -delete 2>/dev/null; true`,{timeoutMs:60_000}).then(()=>{stagingProbe.at=0;}).catch(()=>{});
+ }
+ return stagingProbe.value;
+}
 export function invalidateStoreCache(){cache.clear();searchCache.clear();}
 async function storeJob(title:string,steps:JobStep[],expected?:{manager:string;packageName:string}) {
  const cmd=await softwareCommand({action:'recipe',user:HOST_USER,steps:steps.map(s=>({label:s.label,cmd:s.cmd})),expected});
  cache.clear();return runSoftwareJob(title,[{label:steps.map(s=>s.label).join(' → '),cmd,displayCommand:'Instalador del catálogo · locks nativos · comprobación posterior',user:'root',group:'software:store'}]);
 }
-async function snapshot(){
+const snapshot=()=>cache.get('store',loadSnapshot);
+async function loadSnapshot(){
  const native=await software.get();
  const installedFlatpak=Object.fromEntries(native.installations.filter(p=>p.manager==='flatpak'&&p.kind==='application').map(p=>[p.applicationId,p.version||'Instalada']));
  const apps=STORE_APPS.map(a=>{
@@ -186,12 +227,16 @@ async function snapshot(){
   const detected=native.installations.some(p=>a.bin&&(p.executables.includes(a.bin)||p.executablePath?.split('/').pop()===a.bin));
   return {...a,installed:installations.length>0,detected,version:installations[0]?.version||null,iconUrl:installations[0]?.iconUrl,installations:installations.map(p=>({id:p.id,user:p.user,scope:p.scope,manager:p.manager,version:p.version,canUpdate:p.canUpdate}))};
  });
- return {ok:true,canAdministerSystem:native.canAdministerSystem,flatpak:native.sources.some(s=>s.manager==='flatpak'&&s.scope==='system'&&s.available),apt:native.sources.some(s=>s.manager==='apt'&&s.available),checkedAt:native.checkedAt,installedFlatpak,apps,installedApplications:native.installations.filter(p=>['application','tool'].includes(p.kind)),sources:native.sources,checking:native.checking,error:native.error,jobs:listJobs().filter(j=>j.status==='running'&&(j.title.startsWith('Tienda:')||j.steps.some(s=>s.group?.startsWith('software:')))).map(j=>({id:j.id,title:j.title}))};
+ const staging=await stagedInstallers().catch(()=>({count:0,bytes:0}));
+ return {ok:true,canAdministerSystem:native.canAdministerSystem,flatpak:native.sources.some(s=>s.manager==='flatpak'&&s.scope==='system'&&s.available),apt:native.sources.some(s=>s.manager==='apt'&&s.available),checkedAt:native.checkedAt,installedFlatpak,apps,installedApplications:native.installations.filter(p=>['application','tool'].includes(p.kind)),sources:native.sources,checking:native.checking,error:native.error,staging,jobs:listJobs().filter(j=>j.status==='running'&&(j.title.startsWith('Tienda:')||j.steps.some(s=>s.group?.startsWith('software:')))).map(j=>({id:j.id,title:j.title}))};
 }
 const catalogIconCache=new Map<string,{at:number;file:string|null}>();
 export function registerStoreRoutes(app:Hono){
  app.get('/api/store/icons/:id',async c=>{
-  const entry=STORE_APPS.find(a=>a.id===c.req.param('id'))||discovered.get(c.req.param('id'));
+  let entry=STORE_APPS.find(a=>a.id===c.req.param('id'))||discovered.get(c.req.param('id'));
+  // Los iconos de apps buscadas en Flathub deben seguir resolviendo tras un
+  // reinicio, aunque `discovered` ya no recuerde la búsqueda.
+  if(!entry&&validAppId(c.req.param('id')))entry={id:c.req.param('id'),name:c.req.param('id'),description:'',category:'Flathub',backend:'flatpak',package:c.req.param('id'),url:''};
   if(!entry)return c.json({ok:false,error:'Aplicación desconocida'},404);
   let file=(await stat(path.resolve('public/store-icons',entry.id+'.png')).catch(()=>null))?.isFile()?path.resolve('public/store-icons',entry.id+'.png'):null;
   const localFile=file;
@@ -202,23 +247,30 @@ export function registerStoreRoutes(app:Hono){
   }
   return softwareIcon({name:entry.name,packageName:entry.package,iconFile:localFile?undefined:file||undefined} as any,localFile||undefined);
  });
- app.get('/api/store/:id/removal-preview',async c=>{
-  c.header('Cache-Control','private, no-store');
-  const entry=STORE_APPS.find(a=>a.id===c.req.param('id'))||discovered.get(c.req.param('id'));
-  if(!entry)return c.json({ok:false,error:'Aplicación desconocida'},404);
+ // Revisión de desinstalación compartida por la vista previa y la ejecución.
+ // Falla cerrada: cualquier duda sobre la instalación física o las
+ // dependencias bloquea `canExecute` en vez de adivinar un alcance.
+ async function removalAssessment(entry:StoreApp){
   const current=await snapshot(),version=current.apps.find((a:any)=>a.id===entry.id)?.version||current.installedFlatpak[entry.package]||null;
   const {physicalInstallations}=await import('./installation-inventory');
-  const matches=(await physicalInstallations([])).filter(i=>i.references.includes('store:'+entry.id)&&i.scope==='system'&&i.backend===entry.backend&&(entry.backend!=='apt'||i.name.split(':')[0]===entry.package));
-  const blockers=['La desinstalación necesita un adapter durable con locks nativos y comprobación posterior. Esta revisión no ejecuta cambios.'];
+  const matches=(await physicalInstallations([])).filter(i=>i.references.includes('store:'+entry.id)&&i.scope==='system'&&i.backend===entry.backend&&(entry.backend!=='apt'||(i.packageName||i.name).split(':')[0]===entry.package));
+  const blockers:string[]=[];
   let dependencies:{complete:boolean;removed:string[];installed:string[]}={complete:false,removed:[],installed:[]};
+  if(!current.canAdministerSystem)blockers.push('La desinstalación de sistema requiere permisos de administración del host.');
   if(entry.backend==='apt'){
    const result=await hostExec(`LC_ALL=C apt-get --simulate remove -- ${quote(entry.package)}`,{user:'user',timeoutMs:15000});
    if(result.ok){dependencies={complete:true,...removalSimulation(result.stdout)};}else blockers.push('La simulación APT no pudo completarse; dependencias desconocidas.');
    if(['ffmpeg','imagemagick','git','jq','ripgrep'].includes(entry.package))blockers.push('Axon o sus herramientas pueden usar este ejecutable. Resolver sus dependientes antes de retirarlo.');
-  }else blockers.push('No hay simulación fiable de dependencias para este backend; no se sustituye por un comando aproximado.');
+  }
   if(!version)blockers.push('La Tienda no identificó una instalación system de este paquete. No se selecciona otra instalación por nombre.');
   if(matches.length!==1)blockers.push('La instalación física no se resolvió de forma inequívoca; ID desconocido.');
-  return c.json({ok:true,preview:{installationId:matches.length===1?matches[0].id:null,name:entry.name,backend:entry.backend,scope:'system',package:entry.package,version,dependencies,retained:['Datos y perfiles personales','Configuración del usuario','Cachés: requieren otra acción'],canExecute:false,blockers}});
+  return {installationId:matches.length===1?matches[0].id:null,name:entry.name,backend:entry.backend,scope:'system',package:entry.package,version,dependencies,retained:['Datos y perfiles personales','Configuración del usuario','Cachés: requieren otra acción'],canExecute:!blockers.length,blockers};
+ }
+ app.get('/api/store/:id/removal-preview',async c=>{
+  c.header('Cache-Control','private, no-store');
+  const entry=STORE_APPS.find(a=>a.id===c.req.param('id'))||discovered.get(c.req.param('id'));
+  if(!entry)return c.json({ok:false,error:'Aplicación desconocida'},404);
+  return c.json({ok:true,preview:await removalAssessment(entry)});
  });
  app.get('/api/store',async c=>{if(c.req.query('refresh')==='1'){cache.clear();await software.get(true);}return c.json(await snapshot());});
  app.get('/api/store/search',async c=>{
@@ -227,10 +279,11 @@ export function registerStoreRoutes(app:Hono){
   return c.json(await searchCache.get(q,async()=>{
    const result=await hostExec(`flatpak search --system --columns=application,name,description,version,remotes -- ${quote(q)}`,{timeoutMs:30_000});
    if(!result.ok)throw new Error('No se pudo consultar Flathub. Reintentá en unos minutos.');
-   const apps=result.stdout.split('\n').map(l=>l.split('\t')).filter(r=>validAppId(r[0])&&r[4]?.split(',').map(s=>s.trim()).includes('flathub')).slice(0,100).map(r=>{
+   const seen=new Set<string>();
+   const apps=result.stdout.split('\n').map(l=>l.split('\t')).filter(r=>validAppId(r[0])&&r[4]?.split(',').map(s=>s.trim()).includes('flathub')&&!seen.has(r[0])&&seen.add(r[0])).slice(0,100).map(r=>{
     const a:StoreApp={id:r[0],name:r[1]||r[0],description:r[2]||'Aplicación de Flathub',category:'Flathub',backend:'flatpak',package:r[0],url:'https://flathub.org/en/apps/'+encodeURIComponent(r[0])};
     if(discovered.size>=500)discovered.delete(discovered.keys().next().value!);discovered.set(a.id,a);
-    return {...a,installed:!!current.installedFlatpak[a.package],version:current.installedFlatpak[a.package]||null};
+    return {...a,installed:!!current.installedFlatpak[a.package],version:current.installedFlatpak[a.package]||null,flathubVersion:r[3]||null};
    });return {ok:true,apps};
   }).catch(e=>({ok:false,error:e.message})));
  });
@@ -254,13 +307,33 @@ export function registerStoreRoutes(app:Hono){
   if(!(await software.get()).canAdministerSystem)return c.json({ok:false,error:'Este instalador requiere administrar el host'},409);
   const force=det.kind==='run'&&!!b?.force;
   if(listJobs().some(j=>j.status==='running'&&j.title.startsWith('Tienda:')))return c.json({ok:false,error:'Hay otra operación de la tienda en curso'},409);
-  let job;try{job=await storeJob(`Tienda: instalar ${installerName(path.posix.basename(r.hostPath))}`,installerSteps(r.hostPath,det.kind,{force}));}catch(e){return c.json({ok:false,error:(e as Error).message},409);}
+  const fingerprint=await installerFingerprint(r.hostPath,r.size!);
+  if(!fingerprint)return c.json({ok:false,error:'No se pudo verificar el archivo; no se ejecuta un instalador sin huella'},409);
+  let job;try{job=await storeJob(`Tienda: instalar ${installerName(path.posix.basename(r.hostPath))}`,installerSteps(r.hostPath,det.kind,{force,stage:fingerprint}));}catch(e){return c.json({ok:false,error:(e as Error).message},409);}
   return c.json({ok:true,jobId:job.id,kind:det.kind,force});
+ });
+ app.post('/api/store/installers/prune',async c=>{
+  const dirs=await stagingDirs();
+  const r=await hostExec(`find ${dirs.map(quote).join(' ')} -type f -delete 2>/dev/null; true`,{timeoutMs:60_000});
+  stagingProbe.at=0;
+  return c.json({ok:r.ok});
  });
  app.post('/api/store/:id/:action',async c=>{
   const entry=STORE_APPS.find(a=>a.id===c.req.param('id')) || discovered.get(c.req.param('id'));const action=c.req.param('action');
   if(!entry||!['install','update','remove'].includes(action))return c.json({ok:false,error:'Aplicación o acción desconocida'},400);
-  if(action==='remove')return c.json({ok:false,error:'Revisá la instalación y dependencias antes de desinstalar. El executor durable de este gestor todavía no está habilitado; no se ejecutó ningún cambio.',preview:'/api/store/'+encodeURIComponent(entry.id)+'/removal-preview'},409);
+  if(action==='remove'){
+   if(entry.backend==='external')return c.json({ok:false,error:'Este programa se retira con su propio desinstalador'},400);
+   if(listJobs().some(j=>j.status==='running'&&j.title.startsWith('Tienda:')))return c.json({ok:false,error:'Hay otra operación de la tienda en curso'},409);
+   // Bloqueo estático: las herramientas que usa el propio AXON ni siquiera
+   // disparan la revisión (que consulta el inventario completo del host).
+   if(entry.backend==='apt'&&['ffmpeg','imagemagick','git','jq','ripgrep'].includes(entry.package))return c.json({ok:false,error:'Axon o sus herramientas pueden usar este ejecutable. Resolver sus dependientes antes de retirarlo.',preview:'/api/store/'+encodeURIComponent(entry.id)+'/removal-preview'},409);
+   const assessment=await removalAssessment(entry).catch((e:unknown)=>({error:e instanceof Error?e.message:'No se pudo revisar la instalación',canExecute:false,blockers:[]as string[]}));
+   if(!assessment.canExecute){
+    const blockers=assessment.blockers.length?assessment.blockers:['error' in assessment?assessment.error:'La revisión no pudo completarse'];
+    return c.json({ok:false,error:'La desinstalación no pasó la revisión: '+blockers[0],preview:'/api/store/'+encodeURIComponent(entry.id)+'/removal-preview',blockers},409);
+   }
+   try{const job=await storeJob(`Tienda: desinstalar ${entry.name}`,storeSteps(entry,'remove'));return c.json({ok:true,jobId:job.id});}catch(e){return c.json({ok:false,error:(e as Error).message},409);}
+  }
   if(entry.backend==='external')return c.json({ok:false,error:'Usá la descarga oficial del fabricante'},400);
   if(listJobs().some(j=>j.status==='running'&&j.title.startsWith('Tienda:')))return c.json({ok:false,error:'Hay otra operación de la tienda en curso'},409);
   // Preflight is read-only. Recheck the job lock after its await.

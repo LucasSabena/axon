@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { PlatformStore } from '../platform/store';
 import { MaintenanceError, type Actor } from '../storage/types';
 import { CloudVault } from './vault';
-import { cloudName, type CloudEntry } from './dropbox';
+import { cloudName, maskClientId, type CloudEntry } from './dropbox';
 import type { CloudProvider } from './provider';
 
 export type DriveId='gdrive'|'onedrive';
@@ -15,7 +15,7 @@ interface Account {generation:string;clientId:string;access:string;refresh:strin
 const digest=(s:string)=>createHash('sha256').update(s).digest('hex');
 /** Paths contain opaque IDs, never names. This preserves duplicate Drive names. */
 export function drivePath(value:unknown) {
-  if(typeof value!=='string'||value.length>4096||(value&&!/^\/[A-Za-z0-9_!-]+(?:\/[A-Za-z0-9_!-]+)*$/.test(value))||value.split('/').length>51||value.split('/').some(s=>s.length>200))throw new MaintenanceError('Ubicación de la nube inválida',400);
+  if(typeof value!=='string'||value.length>4096||(value&&!/^\/[A-Za-z0-9_.!-]+(?:\/[A-Za-z0-9_.!-]+)*$/.test(value))||value.split('/').length>51||value.split('/').some(s=>s.length>200||s==='.'||s==='..'))throw new MaintenanceError('Ubicación de la nube inválida',400);
   return value;
 }
 function downloadUrl(raw:string):URL {
@@ -51,13 +51,23 @@ export class Drive implements CloudProvider {
     this.source(owner,source);drivePath(p);if(!p)return;
     let parent=(await this.json(owner,this.itemUrl(''))).id;
     if(typeof parent!=='string'||!parent)throw new MaintenanceError('La plataforma no confirmó su carpeta raíz',502);
-    for(const id of p.split('/').filter(Boolean)){
+    const ids=p.split('/').filter(Boolean);
+    for(const [index,id] of ids.entries()){
       const m=await this.json(owner,this.itemUrl('/'+id));
-      if(m.id!==id||m.trashed||m.remoteItem||(this.id==='gdrive'?!m.parents?.includes(parent):m.parentReference?.id!==parent))throw new MaintenanceError('El archivo no pertenece a la carpeta autorizada',403);
+      // Shared Drive items report the drive itself as parent, not the My Drive root. Only a leading path
+      // component may anchor there; later components must keep proving real parentage.
+      const sharedRoot=index===0&&this.id==='gdrive'&&typeof m.driveId==='string'&&!!m.driveId&&(!Array.isArray(m.parents)||m.parents.includes(m.driveId));
+      if(m.id!==id||m.trashed||m.remoteItem||(!sharedRoot&&(this.id==='gdrive'?!m.parents?.includes(parent):m.parentReference?.id!==parent)))throw new MaintenanceError('El archivo no pertenece a la carpeta autorizada',403);
       parent=m.id;
     }
   }
-  status(owner:string){const a=this.record(owner)?this.account(owner):null,config=this.app(owner);return {configured:!!config,serverConfigured:this.serverConfigured(),clientId:config?.clientId||'',connected:!!a,account:a?{name:a.name,email:a.email}:null,sources:a?[{id:'account',name:'Mi '+this.spec.name,type:'account'}]:[]};}
+  status(owner:string){const a=this.record(owner)?this.account(owner):null,config=this.app(owner);return {configured:!!config,serverConfigured:this.serverConfigured(),clientId:maskClientId(config?.clientId||''),connected:!!a,account:a?{name:a.name,email:a.email}:null,sources:a?[{id:'account',name:'Mi '+this.spec.name,type:'account'}]:[]};}
+  async checkConnection(owner:string){
+    const a=await this.access(owner);
+    const num=(v:unknown)=>{const n=Number(v);return Number.isSafeInteger(n)&&n>=0?n:undefined;};
+    if(this.id==='gdrive'){const d=await this.jsonWith(a.access,'https://www.googleapis.com/drive/v3/about?fields=storageQuota');return {used:num(d?.storageQuota?.usage),total:num(d?.storageQuota?.limit)};}
+    const d=await this.jsonWith(a.access,'https://graph.microsoft.com/v1.0/me/drive?$select=quota');return {used:num(d?.quota?.used),total:num(d?.quota?.total)};
+  }
   source(owner:string,id:string){this.account(owner);if(id!=='account')throw new MaintenanceError('Ubicación no encontrada',404);}
   authorize(by:Actor,origin:string){
     const config=this.app(by.actorId);if(!config)throw new MaintenanceError('Configurá primero '+this.spec.name,409);
@@ -92,6 +102,8 @@ export class Drive implements CloudProvider {
     this.store.db.query("DELETE FROM records WHERE kind='cloud-oauth' AND json_extract(payload,'$.owner')=? AND json_extract(payload,'$.provider')=?").run(owner,this.id);
     if(a&&this.id==='gdrive')await this.http('https://oauth2.googleapis.com/revoke',{method:'POST',body:new URLSearchParams({token:a.refresh}),redirect:'error',signal:AbortSignal.timeout(10000)}).then(r=>r.body?.cancel()).catch(()=>{});
     this.store.append({actor:owner,action:this.id+'.disconnect',resource:a?.id||this.id,status:'ok'});
+    // Microsoft no expone revocación para tokens delegados: el usuario debe retirar el permiso desde su cuenta.
+    return this.id==='onedrive'?{notice:'Cuenta desconectada. OneDrive no permite revocar el acceso desde AXON: para cortarlo por completo, retirá el permiso en account.live.com/consent/Manage.'}:{};
   }
   private async token(config:App,args:Record<string,string>){
     const r=await this.http(this.spec.token,{method:'POST',body:new URLSearchParams({...args,client_id:config.clientId,client_secret:config.clientSecret,...(this.id==='onedrive'?{scope:this.spec.scope}:{})}),redirect:'error',signal:AbortSignal.timeout(30000)});
@@ -105,7 +117,7 @@ export class Drive implements CloudProvider {
   private async check(r:Response){if(r.ok||r.status===416)return;await r.body?.cancel();throw new MaintenanceError(r.status===401?this.spec.name+' necesita que vuelvas a conectar tu cuenta':r.status===429?'La plataforma limitó las consultas. Esperá y reintentá.':r.status===403||r.status===404?'No tenés acceso a este contenido o ya no está disponible':'La plataforma no respondió. Volvé a intentar.',r.status===401?409:r.status===429?429:r.status===404?404:r.status===403?403:502);}
   private async jsonWith(token:string,url:string){const r=await this.http(url,{headers:{Authorization:'Bearer '+token},redirect:'error',signal:AbortSignal.timeout(30000)});await this.check(r);return r.json() as Promise<any>;}
   private async json(owner:string,url:string){return this.jsonWith((await this.access(owner)).access,url);}
-  private itemUrl(p:string){const id=drivePath(p).split('/').pop();return this.id==='gdrive'?'https://www.googleapis.com/drive/v3/files/'+encodeURIComponent(id||'root')+'?supportsAllDrives=true&fields=id,name,mimeType,size,modifiedTime,version,md5Checksum,capabilities(canDownload),parents,trashed':'https://graph.microsoft.com/v1.0/me/drive/'+(id?'items/'+encodeURIComponent(id):'root');}
+  private itemUrl(p:string){const id=drivePath(p).split('/').pop();return this.id==='gdrive'?'https://www.googleapis.com/drive/v3/files/'+encodeURIComponent(id||'root')+'?supportsAllDrives=true&fields=id,name,mimeType,size,modifiedTime,version,md5Checksum,capabilities(canDownload),parents,trashed,driveId':'https://graph.microsoft.com/v1.0/me/drive/'+(id?'items/'+encodeURIComponent(id):'root');}
   private entry(m:any,p:string):CloudEntry {
     const folder=this.id==='gdrive'?m.mimeType==='application/vnd.google-apps.folder':!!m.folder;
     const native=this.id==='gdrive'&&m.mimeType?.startsWith('application/vnd.google-apps.')&&!folder;
@@ -118,15 +130,15 @@ export class Drive implements CloudProvider {
     this.source(owner,source);drivePath(p);let raw:string|undefined;
     if(cursor)try{if(cursor.length>20000)throw new Error();const c=this.vault.open<any>(cursor,'cursor:'+this.id);if(c.owner!==owner||c.generation!==this.account(owner).generation||c.source!==source||c.path!==p)throw new Error();raw=c.raw;}catch{throw new MaintenanceError('La página expiró. Actualizá la carpeta.',400);}
     const parent=p.split('/').pop()||'root';let url:string;
-    if(this.id==='gdrive'){const q=new URLSearchParams({q:"'"+parent+"' in parents and trashed = false",pageSize:'500',supportsAllDrives:'true',includeItemsFromAllDrives:'true',fields:'nextPageToken,files(id,name,mimeType,size,modifiedTime,version,md5Checksum,capabilities(canDownload))',...(raw?{pageToken:raw}:{})});url='https://www.googleapis.com/drive/v3/files?'+q;}
+    if(this.id==='gdrive'){const q=new URLSearchParams({q:"'"+parent.replace(/'/g,"\\'")+"' in parents and trashed = false",pageSize:'500',supportsAllDrives:'true',includeItemsFromAllDrives:'true',fields:'nextPageToken,files(id,name,mimeType,size,modifiedTime,version,md5Checksum,capabilities(canDownload))',...(raw?{pageToken:raw}:{})});url='https://www.googleapis.com/drive/v3/files?'+q;}
     else{url=raw||'https://graph.microsoft.com/v1.0/me/drive/'+(p?'items/'+encodeURIComponent(parent):'root')+'/children?$top=200';const u=new URL(url);if(u.origin!=='https://graph.microsoft.com'||!u.pathname.startsWith('/v1.0/me/drive/'))throw new MaintenanceError('Page de OneDrive inválida',502);}
-    const d=await this.json(owner,url),entries=(this.id==='gdrive'?d.files:d.value).map((m:any)=>{if(typeof m.id!=='string'||!/^[A-Za-z0-9_!-]{1,200}$/.test(m.id))throw new MaintenanceError('Identificador de archivo inválido',502);return this.entry(m,p+'/'+m.id);});
+    const d=await this.json(owner,url),entries=(this.id==='gdrive'?d.files:d.value).map((m:any)=>{if(typeof m.id!=='string'||!/^[A-Za-z0-9_.!-]{1,200}$/.test(m.id)||m.id==='.'||m.id==='..')throw new MaintenanceError('Identificador de archivo inválido',502);return this.entry(m,p+'/'+m.id);});
     const next=this.id==='gdrive'?d.nextPageToken:d['@odata.nextLink'];
     return {entries,cursor:next?this.vault.seal({owner,generation:this.account(owner).generation,source,path:p,raw:next},'cursor:'+this.id):null};
   }
   async breadcrumbs(owner:string,p:string){drivePath(p);const result:{name:string;path:string}[]=[];let at='';for(const id of p.split('/').filter(Boolean)){at+='/'+id;const e=await this.metadata(owner,'account',at);result.push({name:e.name,path:at});}return result;}
   async content(owner:string,source:string,p:string,revision?:string,range?:string,signal?:AbortSignal){
-    this.source(owner,source);drivePath(p);if(!p)throw new MaintenanceError('Seleccioná un archivo',400);if(range&&!/^bytes=\d*-\d*$/.test(range))throw new MaintenanceError('Rango inválido',400);
+    this.source(owner,source);drivePath(p);if(!p)throw new MaintenanceError('Seleccioná un archivo',400);if(range&&!/^bytes=(?:\d+-\d*|\d*-\d+)$/.test(range))throw new MaintenanceError('Rango inválido',400);
     const a=await this.access(owner),m=await this.jsonWith(a.access,this.itemUrl(p)),entry=this.entry(m,p);
     if(!entry.downloadable||entry.type!=='file')throw new MaintenanceError('Abrí o exportá este documento desde su plataforma',409);
     if(revision&&revision!==entry.revision)throw new MaintenanceError('El archivo cambió. Actualizá la carpeta y volvé a copiar.',409);

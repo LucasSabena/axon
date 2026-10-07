@@ -37,6 +37,6 @@ export class HomepageMigration {
   if(Date.parse(p.expiresAt)<Date.now())throw new MaintenanceError('La revisión venció');
   const record=await this.migrations.compare('homepage');if(record.revision!==p.installationRevision)throw new MaintenanceError('La instalación cambió; compará nuevamente');
   const sources=await this.sources(record);if(hash(sources)!==hash(p.sources))throw new MaintenanceError('Cambió una configuración. Volvé a revisar antes de importar');
-  return repo.db.transaction(()=>{const imported=this.links.importLinks(sources.flatMap(s=>s.links),p.linkRevision);record.state='imported';record.importReceipt=id;repo.put('migration','homepage',record);const result={state:'imported',count:imported.links.length,skipped:sources.reduce((sum,s)=>sum+s.skipped,0),message:'Accesos importados. Revisá widgets omitidos, autenticación y dependientes antes de retirar Homepage.'};repo.put('homepage-import-receipt',id,result,'verified');return result;}).immediate();
+  return repo.db.transaction(()=>{const existing=this.links.get().links.length;const imported=this.links.importLinks(sources.flatMap(s=>s.links),p.linkRevision);record.state='imported';record.importReceipt=id;repo.put('migration','homepage',record);const result={state:'imported',count:imported.links.length-existing,skipped:sources.reduce((sum,s)=>sum+s.skipped,0),message:'Accesos importados. Revisá widgets omitidos, autenticación y dependientes antes de retirar Homepage.'};repo.put('homepage-import-receipt',id,result,'verified');return result;}).immediate();
  }
 }

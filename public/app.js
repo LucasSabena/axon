@@ -37,8 +37,16 @@ async function api(path, opts = {}) {
   return window.AxonUI.request(path, { cacheMs: ttl, ...opts });
 }
 document.addEventListener('axon:session-expired', () => {
+  // Guardar la ruta actual para volver tras el login — sin esto una sesión
+  // expirada en /dominios o /proyectos volvía siempre a la raíz.
+  try {
+    const back = location.pathname + location.search + location.hash;
+    if (back && back !== '/') sessionStorage.setItem('axon:return', back);
+  } catch { /* storage no disponible */ }
   $('#login-screen')?.classList.remove('hidden');
   $('#main-screen')?.classList.add('hidden');
+  const status = $('#login-status');
+  if (status) status.textContent = 'Tu sesión expiró — al ingresar volvés a donde estabas.';
 });
 
 function toast(msg, type = 'error', detail = '', ms = 6000) {
@@ -87,7 +95,10 @@ function setLoginSecondFactor(enabled) {
   $('#login-code').classList.toggle('hidden', !enabled);
   $('#login-code-label').classList.toggle('hidden', !enabled);
   $('#login-code-help').classList.toggle('hidden', !enabled);
-  $('#login-code').required = enabled;
+  // Nunca required: /api/me ya no revela si la cuenta usa 2FA antes de
+  // autenticar, así que el campo aparece tras el primer intento fallido y
+  // quienes no usan 2FA lo dejan vacío.
+  $('#login-code').required = false;
 }
 async function initAuth(attempt = 0) {
   clearTimeout(bootRetryTimer);
@@ -155,15 +166,20 @@ $('#login-form').addEventListener('submit', async (e) => {
     });
     $('#login-submit-label').textContent = 'Abriendo tu espacio…';
     $('#login-status').textContent = 'Acceso verificado. Abriendo tu espacio.';
-    location.reload();
+    // Volver a la sección donde expiró la sesión (guardada en axon:return).
+    let back = '';
+    try { back = sessionStorage.getItem('axon:return') || ''; sessionStorage.removeItem('axon:return'); } catch { /* noop */ }
+    if (back && back !== location.pathname + location.search) location.assign(back);
+    else location.reload();
   } catch (err) {
     $('#login-error').textContent = err.message;
     submit.disabled = false;
     form.setAttribute('aria-busy', 'false');
     $('#login-submit-label').textContent = 'Ingresar';
     $('#login-status').textContent = '';
-    // Server says the 2FA code is wrong/required — make sure the field is visible.
-    if ((err.message || '').toLowerCase().includes('código')) { setLoginSecondFactor(true); $('#login-code').focus(); }
+    // Mostrar el campo de código tras cualquier intento fallido: quienes
+    // tienen 2FA reintentan con su código; el resto lo deja vacío.
+    setLoginSecondFactor(true); $('#login-code').focus();
   }
 });
 
@@ -313,7 +329,10 @@ function healthDotFor(port, listeners) {
 }
 
 function isLoopbackAddr(addr) {
-  return !addr || addr === '::1' || addr === 'localhost' || addr.startsWith('127.');
+  // ss/devuelve [::1] con corchetes para IPv6 — sin normalizar, un listener
+  // solo-loopback parecía accesible desde la red.
+  const a = String(addr || '').replace(/^\[|\]$/g, '');
+  return !a || a === '::1' || a === 'localhost' || a.startsWith('127.');
 }
 
 function remoteReachable(port, listeners) {
@@ -347,7 +366,7 @@ function portLinksHtml(port, listeners) {
   if (net) {
     remote = remoteReachable(port, listeners)
       ? `<a class="link-network" href="http://${net}:${port}" target="_blank" rel="noopener noreferrer" title="Abrir ${esc(net)}:${port}">${esc(net)}:${port}</a>`
-      : `<span class="link-network link-dead" title="${esc(net)}:${port} no es accesible: este proceso solo escucha en 127.0.0.1 (usá --host o un dominio)">${esc(net)}:${port}</span>`;
+      : `<span class="link-network link-dead" title="${esc(net)}:${port} no es accesible: este proceso solo escucha en loopback (usá --host o un dominio)">${esc(net)}:${port}</span>`;
   }
   return `<span class="port-links">${local}${remote}</span>`;
 }
@@ -506,22 +525,26 @@ $('#ports-table').addEventListener('click', async (e) => {
     if (!pids.length) return;
     if (!(await confirmDialog('Detener proyecto', `Se cerrarán ${pids.length} proceso(s) del proyecto.\nPIDs: ${pids.join(', ')}`, 'Detener'))) return;
     btn.disabled = true;
-    let okCount = 0;
-    let failCount = 0;
-    for (const pid of pids) {
-      try { await api(`/api/ports/${pid}/kill`, { method: 'POST' }); okCount++; }
-      catch { failCount++; }
-    }
-    toast(`Proyecto: ${okCount} proceso(s) cerrado(s)${failCount ? `, ${failCount} fallaron` : ''}`, failCount ? 'warn' : 'ok');
-    loadPorts();
+    try {
+      let okCount = 0;
+      let failCount = 0;
+      for (const pid of pids) {
+        try { await api(`/api/ports/${pid}/kill`, { method: 'POST' }); okCount++; }
+        catch { failCount++; }
+      }
+      toast(`Proyecto: ${okCount} proceso(s) cerrado(s)${failCount ? `, ${failCount} fallaron` : ''}`, failCount ? 'warn' : 'ok');
+      loadPorts();
+    } finally { if (btn.isConnected) btn.disabled = false; }
   }
 });
 
 // ---------- Kill modal ----------
 
 let killPid = null;
+let killTicket = 0;
 
 async function openKillModal(pid) {
+  const ticket = ++killTicket;
   killPid = pid;
   $('#kill-error').textContent = '';
   $('#kill-plan-body').innerHTML = 'Cargando…';
@@ -529,6 +552,7 @@ async function openKillModal(pid) {
   $('#kill-confirm').disabled = true;
   try {
     const { plan } = await api(`/api/ports/${pid}/plan`);
+    if (ticket !== killTicket) return;
     const tree = plan.tree.map((t, i) =>
       `<div class="kill-tree-row">${icon(i === 0 ? 'chevron-right' : 'corner-down-right')} <code>${t.pid}</code> ${esc(t.name)} <span class="cmd-cell">${esc(t.cmd.slice(0, 80))}</span></div>`
     ).join('');
@@ -555,6 +579,7 @@ async function openKillModal(pid) {
       $('#kill-confirm').disabled = false;
     }
   } catch (err) {
+    if (ticket !== killTicket) return;
     $('#kill-plan-body').innerHTML = '';
     $('#kill-error').textContent = err.message;
   }
@@ -599,13 +624,16 @@ $('#kill-confirm').addEventListener('click', async () => {
 // ---------- Detail modal ----------
 
 let detailPid = null;
+let detailTicket = 0;
 
 async function openDetailModal(pid) {
+  const ticket = ++detailTicket;
   detailPid = pid;
   $('#detail-modal').classList.remove('hidden');
   $('#detail-title').textContent = '…';
   try {
     const { detail } = await api(`/api/ports/${pid}/detail`);
+    if (ticket !== detailTicket) return;
     $('#detail-title').innerHTML = `${icon(lucideName(detail.identity.icon, 'box'))} ${esc(detail.identity.label)}`;
     refreshIcons();
     $('#detail-meta').innerHTML = `
@@ -618,12 +646,18 @@ async function openDetailModal(pid) {
     $('#detail-start').textContent = detail.startedAt ? new Date(detail.startedAt).toLocaleString() : '-';
     $('#detail-cmd').textContent = detail.cmd;
     $('#detail-kill-btn').style.display = detail.identity.protected ? 'none' : '';
-    renderEnv(detail.env);
+    detailEnvCache = detail.env || {};
+    renderEnv(detailEnvCache);
   } catch (err) {
+    if (ticket !== detailTicket) return;
     errToast(err);
     $('#detail-modal').classList.add('hidden');
   }
 }
+
+// El env del modal de detalle se cachea al abrir — filtrar por tecla ya no
+// dispara un /detail completo (hostExec por keystroke) sino render local.
+let detailEnvCache = {};
 
 function renderEnv(env) {
   const tbody = $('#detail-env-table tbody');
@@ -635,15 +669,7 @@ function renderEnv(env) {
     .join('');
 }
 
-$('#detail-env-filter').addEventListener('input', () => {
-  if (detailPid) openDetailModalEnvOnly();
-});
-async function openDetailModalEnvOnly() {
-  try {
-    const { detail } = await api(`/api/ports/${detailPid}/detail`);
-    renderEnv(detail.env);
-  } catch { /* ignore */ }
-}
+$('#detail-env-filter').addEventListener('input', () => renderEnv(detailEnvCache));
 
 $$('.detail-tab-btn').forEach((btn) => {
   btn.addEventListener('click', () => {
@@ -866,15 +892,15 @@ function renderProjects(projects) {
       <td class="cmd-cell" title="${esc(p.cwd)}">${esc(p.cwd)}</td>
       <td><div class="actions">
         ${running
-          ? `<button class="btn-danger pj-stop" data-id="${p.id}">${icon('square')} Parar</button>`
-          : `<button class="btn-action pj-start" data-id="${p.id}">${icon('play')} Iniciar</button>`}
-        ${!running && (p.type === 'node' || p.type === 'bun' || p.type === 'python') ? `<button class="btn-action pj-install" data-id="${p.id}">${icon('package-plus')} Deps</button>` : ''}
-        <button class="btn-secondary pj-logs" data-id="${p.id}">${icon('file-text')} Logs</button>
-        <button class="btn-secondary pj-edit" data-id="${p.id}" title="Editar">${icon('pencil')}</button>
+          ? `<button class="btn-danger pj-stop" data-id="${esc(p.id)}">${icon('square')} Parar</button>`
+          : `<button class="btn-action pj-start" data-id="${esc(p.id)}">${icon('play')} Iniciar</button>`}
+        ${!running && (p.type === 'node' || p.type === 'bun' || p.type === 'python') ? `<button class="btn-action pj-install" data-id="${esc(p.id)}">${icon('package-plus')} Deps</button>` : ''}
+        <button class="btn-secondary pj-logs" data-id="${esc(p.id)}">${icon('file-text')} Logs</button>
+        <button class="btn-secondary pj-edit" data-id="${esc(p.id)}" title="Editar">${icon('pencil')}</button>
       </div></td>`;
     tbody.appendChild(tr);
   }
-  tbody.dataset.projects = JSON.stringify(projects.map((p) => ({ id: p.id, name: p.name, cwd: p.cwd, command: p.command, port: p.port, type: p.type })));
+  tbody.dataset.projects = JSON.stringify(projects.map((p) => ({ id: p.id, name: p.name, cwd: p.cwd, command: p.command, port: p.port, type: p.type, framework: p.framework, packageManager: p.packageManager })));
   refreshIcons();
 }
 
@@ -882,12 +908,13 @@ $('#projects-table').addEventListener('click', async (e) => {
   const btn = e.target.closest('button');
   if (!btn) return;
   const id = btn.dataset.id;
+  const eid = encodeURIComponent(id);
   const list = JSON.parse($('#projects-table tbody').dataset.projects || '[]');
   const project = list.find((p) => p.id === id);
 
   if (btn.classList.contains('pj-start')) {
     try {
-      const res = await api(`/api/projects/${id}/start`, { method: 'POST',busy:btn });
+      const res = await api(`/api/projects/${eid}/start`, { method: 'POST',busy:btn });
       toast(`Iniciado (pid ${res.pid})`, 'ok', res.command || '');
       loadProjects();
     } catch (err) {
@@ -900,13 +927,13 @@ $('#projects-table').addEventListener('click', async (e) => {
   } else if (btn.classList.contains('pj-stop')) {
     if(!await confirmDialog('Detener proyecto',`Se detiene ${project?.name || 'el proyecto'} y deja de atender solicitudes.`,'Detener'))return;
     try {
-      await api(`/api/projects/${id}/stop`, { method: 'POST',busy:btn });
+      await api(`/api/projects/${eid}/stop`, { method: 'POST',busy:btn });
       toast('Proyecto detenido', 'ok');
       loadProjects();
     } catch (err) { errToast(err); }
   } else if (btn.classList.contains('pj-install')) {
     try {
-      const { job } = await api(`/api/projects/${id}/install`, { method: 'POST' });
+      const { job } = await api(`/api/projects/${eid}/install`, { method: 'POST' });
       openJobModal(job);
     } catch (err) { errToast(err); }
   } else if (btn.classList.contains('pj-logs')) {
@@ -926,25 +953,75 @@ $('#projects-detect-btn').addEventListener('click', async () => {
 
 $('#projects-add-btn').addEventListener('click', () => openProjectEdit(null));
 
-// Project logs modal (polling tail)
+// Project logs modal (polling tail). The same #logs-pre is shared with docker
+// logs — logsReload remembers which fetch to repeat and logsTicket discards
+// responses that resolve after the modal switched source.
 let logsProjectId = null;
-$('#logs-close').addEventListener('click', () => { $('#logs-modal').classList.add('hidden'); logsProjectId = null; });
-$('#logs-reload').addEventListener('click', () => { if (logsProjectId) fetchProjectLogs(logsProjectId); });
+let logsReload = null;
+let logsTicket = 0;
+let logsSocket = null;
+function closeLogsSocket() {
+  const s = logsSocket;
+  logsSocket = null;
+  try { s?.close(); } catch { /* cerrado */ }
+}
+// Docker logs llegan con escapes ANSI de las apps — el <pre> del modal no los
+// interpreta, así que los limpiamos acá (no vale la pena cargar xterm).
+const stripAnsi = (s) => s
+  .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+  .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+  .replace(/\x1b[()#%*+-./][0-9A-Za-z]/g, '')
+  .replace(/\x1b[=>NO\\\^_]|[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
+
+function connectDockerLogs(name) {
+  closeLogsSocket();
+  const ticket = ++logsTicket;
+  const pre = $('#logs-pre');
+  pre.textContent = '';
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/ws/logs?src=${encodeURIComponent(`docker:${name}`)}`);
+  logsSocket = ws;
+  ws.binaryType = 'arraybuffer';
+  const decoder = new TextDecoder();
+  ws.onmessage = (e) => {
+    if (logsSocket !== ws || ticket !== logsTicket) return;
+    const raw = typeof e.data === 'string' ? e.data : decoder.decode(e.data, { stream: true });
+    const text = stripAnsi(raw).replace(/\r\n|\r/g, '\n');
+    if (!text) return;
+    const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 60;
+    pre.textContent += text;
+    if (pre.textContent.length > 200_000) pre.textContent = pre.textContent.slice(-120_000);
+    if (atBottom) pre.scrollTop = pre.scrollHeight;
+  };
+  ws.onclose = () => {
+    if (logsSocket !== ws || ticket !== logsTicket) return;
+    if (!pre.textContent.trim()) pre.textContent = '(sin logs)';
+    pre.textContent += '\n[stream desconectado — Recargar para reintentar]';
+  };
+  ws.onerror = () => { /* onclose le sigue */ };
+}
+
+$('#logs-close').addEventListener('click', () => { $('#logs-modal').classList.add('hidden'); logsProjectId = null; logsReload = null; logsTicket++; closeLogsSocket(); });
+$('#logs-reload').addEventListener('click', () => { logsReload?.(); });
 
 function openProjectLogs(project) {
+  closeLogsSocket();
   logsProjectId = project.id;
+  logsReload = () => fetchProjectLogs(project.id);
   $('#logs-modal-title').textContent = `Logs — ${project.name}`;
   $('#logs-modal').classList.remove('hidden');
   fetchProjectLogs(project.id);
 }
 
 async function fetchProjectLogs(id) {
+  const ticket = ++logsTicket;
   try {
-    const { lines } = await api(`/api/projects/${id}/logs?tail=300`);
+    const { lines } = await api(`/api/projects/${encodeURIComponent(id)}/logs?tail=300`);
+    if (ticket !== logsTicket) return;
     const pre = $('#logs-pre');
     pre.textContent = lines.join('\n') || '(sin logs)';
     pre.scrollTop = pre.scrollHeight;
-  } catch (err) { errToast(err); }
+  } catch (err) { if (ticket === logsTicket) errToast(err); }
 }
 
 // Project edit modal
@@ -955,6 +1032,12 @@ function openProjectEdit(project) {
   $('#project-edit-command').value = project?.command || '';
   $('#project-edit-cwd').value = project?.cwd || '';
   $('#project-edit-port').value = project?.port || '';
+  // Detected metadata isn't editable but must survive the save round-trip —
+  // re-submitting 'other' would strip the framework badge and the Deps button.
+  const form = $('#project-edit-form');
+  form.dataset.type = project?.type || '';
+  form.dataset.framework = project?.framework || '';
+  form.dataset.packageManager = project?.packageManager || '';
   $('#project-edit-delete').classList.toggle('hidden', !project);
   $('#project-edit-error').textContent = '';
   $('#project-edit-modal').classList.remove('hidden');
@@ -965,7 +1048,7 @@ $('#project-edit-delete').addEventListener('click', async () => {
   const id = $('#project-edit-id').value;
   if (!id || !(await confirmDialog('Eliminar proyecto del panel', 'Los archivos del proyecto se conservan.'))) return;
   try {
-    await api(`/api/projects/${id}`, { method: 'DELETE',busy:$('#project-edit-delete') });
+    await api(`/api/projects/${encodeURIComponent(id)}`, { method: 'DELETE',busy:$('#project-edit-delete') });
     $('#project-edit-modal').classList.add('hidden');
     loadProjects();
   } catch (err) { errToast(err); }
@@ -973,14 +1056,24 @@ $('#project-edit-delete').addEventListener('click', async () => {
 
 $('#project-edit-form').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const id = $('#project-edit-id').value;
+  const id = $('#project-edit-id').value.trim();
+  const form = $('#project-edit-form');
+  // Mismo formato que el server (^[a-z0-9-]{1,64}$), con la misma exención:
+  // un id legado ya existente se puede editar, uno nuevo inválido se rechaza.
+  const known = JSON.parse($('#projects-table tbody').dataset.projects || '[]').some((p) => p.id === id);
+  if (id && !known && !/^[a-z0-9-]{1,64}$/.test(id)) {
+    $('#project-edit-error').textContent = 'ID de proyecto inválido (solo minúsculas, números y guiones, máx. 64).';
+    return;
+  }
   const body = {
     id: id || undefined,
     name: $('#project-edit-name').value,
     cwd: $('#project-edit-cwd').value,
     command: $('#project-edit-command').value || undefined,
     port: parseInt($('#project-edit-port').value, 10) || undefined,
-    type: 'other',
+    type: form.dataset.type || 'other',
+    framework: form.dataset.framework || undefined,
+    packageManager: form.dataset.packageManager || undefined,
   };
   try {
     await api('/api/projects', { method: 'POST', body });
@@ -993,9 +1086,18 @@ $('#project-edit-form').addEventListener('submit', async (e) => {
 
 // ---------- Docker ----------
 
+// Puertos web típicos para elegir cuál publicar como dominio (ver dk-domain).
+const DOCKER_WEB_PORTS = [80, 443, 3000, 4200, 5000, 5173, 8000, 8080, 8081, 8443, 9000];
+
 async function loadDocker() {
   try {
-    const { containers } = await api('/api/docker');
+    const { containers, daemonError } = await api('/api/docker');
+    const daemonBox = $('#docker-daemon-error');
+    if (daemonBox) {
+      // Sin esto, un daemon caído se ve idéntico a "sin contenedores".
+      daemonBox.classList.toggle('hidden', !daemonError);
+      daemonBox.textContent = daemonError ? `Docker no responde: ${daemonError}` : '';
+    }
     $('#docker-updated').textContent = `Actualizado ${new Date().toLocaleTimeString()}`;
     const ncd = $('#nav-count-docker');
     if (ncd) ncd.textContent = (containers || []).length || '';
@@ -1020,7 +1122,7 @@ async function loadDocker() {
           ${ct.state === 'running'
             ? `<button class="btn-secondary dk-term" data-id="${ct.id}" data-name="${esc(ct.names)}" title="Terminal">${icon('terminal')}</button>`
             : ''}
-          <button class="btn-secondary dk-logs" data-id="${ct.id}">${icon('file-text')} Logs</button>
+          <button class="btn-secondary dk-logs" data-id="${ct.id}" data-name="${esc(ct.names)}">${icon('file-text')} Logs</button>
           <button class="btn-action dk-domain" data-id="${ct.id}" data-ports="${ct.publicPorts.join(',')}" data-name="${esc(ct.names)}">${icon('globe')} Dominio</button>
           <button class="btn-danger dk-stop" data-id="${ct.id}">${icon('square')} Parar</button>
         </div></td>`;
@@ -1054,17 +1156,19 @@ $('#docker-table').addEventListener('click', async (e) => {
   } else if (btn.classList.contains('dk-term')) {
     openTermExec(id, btn.dataset.name || id);
   } else if (btn.classList.contains('dk-logs')) {
-    $('#logs-modal-title').textContent = `Logs — ${id}`;
+    // Logs en vivo por /ws/logs (docker logs -f) — antes el modal era una
+    // foto estática que había que recargar a mano.
+    const name = (btn.dataset.name || id).split(',')[0] || id;
+    $('#logs-modal-title').textContent = `Logs — ${name}`;
     $('#logs-modal').classList.remove('hidden');
     logsProjectId = null;
-    try {
-      const { lines } = await api(`/api/docker/${id}/logs`);
-      const pre = $('#logs-pre');
-      pre.textContent = lines.join('\n') || '(sin logs)';
-      pre.scrollTop = pre.scrollHeight;
-    } catch (err) { errToast(err); }
+    logsReload = () => connectDockerLogs(name);
+    connectDockerLogs(name);
   } else if (btn.classList.contains('dk-domain')) {
-    const port = parseInt((btn.dataset.ports || '').split(',')[0], 10);
+    const ports = (btn.dataset.ports || '').split(',').map((n) => parseInt(n, 10)).filter(Boolean);
+    // Preferir el puerto web típico en vez del primero declarado (que puede
+    // ser un puerto interno como 5432 o un agente).
+    const port = ports.find((p) => DOCKER_WEB_PORTS.includes(p)) || ports[0];
     if (!port) { toast('El contenedor no publica puertos', 'warn'); return; }
     openDomainModal({ port, processType: 'docker', projectName: btn.dataset.name, label: btn.dataset.name });
   }
@@ -1100,6 +1204,11 @@ async function loadDomains() {
       tbody.appendChild(tr);
     }
     refreshIcons();
+    // Re-render completo: podar la selección de dominios que ya no existen y
+    // refrescar la barra de acción masiva (antes quedaba desincronizada).
+    const alive = new Set(domains.map((d) => d.id));
+    for (const id of [...domainSel]) if (!alive.has(id)) domainSel.delete(id);
+    updateDomainBulkbar();
     loadDomainStatuses();
   } catch (err) { errToast(err); }
 }
@@ -1232,7 +1341,7 @@ $('#domains-del-sel').addEventListener('click', async () => {
     const res = await api('/api/domains/bulk-delete', { method: 'POST', body: { ids },busy:$('#domains-del-sel') });
     removeDomainRows(ids.filter((id) => !(res.failedIds || []).includes(id)));
     toast(`${res.removed} eliminado${res.removed === 1 ? '' : 's'}${res.failed ? `, ${res.failed} fallaron` : ''}`, res.failed ? 'warn' : 'ok');
-    if (!res.syncOk) toast('El sync del túnel falló — revisá cloudflared', 'err');
+    if (!res.syncOk) toast('El sync del túnel falló — revisá cloudflared', 'error');
     loadDomains();
   } catch (err) { errToast(err); }
 });
@@ -1248,7 +1357,8 @@ $('#domains-table').addEventListener('click', async (e) => {
   if (!btn) return;
   const id = btn.dataset.id;
   if (btn.classList.contains('dm-del')) {
-    const ok = await confirmDialog('Eliminar dominio', 'Se borra el DNS de Cloudflare y la ruta del túnel.');
+    const fqdn = btn.closest('tr')?.querySelector('.domain-link')?.textContent.trim() || id;
+    const ok = await confirmDialog('Eliminar dominio', `Se borra ${fqdn}: el DNS de Cloudflare y la ruta del túnel.`);
     if (!ok) return;
     try {
       await api(`/api/domains/${id}`, { method: 'DELETE',busy:btn });
@@ -1392,50 +1502,92 @@ function updateTotpStatus(enabled) {
 }
 
 let totpMode = 'enable';
+let totpTicket = 0;
 
 function openTotpModal(mode) {
   totpMode = mode;
   const enabling = mode === 'enable';
   $('#totp-title').textContent = enabling ? 'Activar verificación en dos pasos' : 'Desactivar verificación en dos pasos';
   $('#totp-desc').textContent = enabling
-    ? 'Escaneá el QR con tu app autenticadora (Google Authenticator, Aegis, 1Password…) e ingresá el código de 6 dígitos para confirmar.'
-    : 'Ingresá el código actual de tu app autenticadora para desactivar el 2FA.';
+    ? 'Escaneá el QR con tu app autenticadora (Google Authenticator, Aegis, 1Password…) e ingresá el código de 6 dígitos y tu contraseña actual para confirmar.'
+    : 'Ingresá tu contraseña actual (o el código de tu app autenticadora) para desactivar el 2FA.';
   $('#totp-qr').innerHTML = '';
   $('#totp-secret').textContent = '';
   $('#totp-qr').classList.toggle('hidden', !enabling);
   $('#totp-secret-wrap').classList.toggle('hidden', !enabling);
   $('#totp-code').value = '';
+  $('#totp-password').value = '';
   $('#totp-error').textContent = '';
+  $('#totp-recovery').classList.add('hidden');
+  $('#totp-recovery-codes').innerHTML = '';
+  $('#totp-code').classList.remove('hidden');
+  $('#totp-password').classList.remove('hidden');
+  $('#totp-confirm').classList.remove('hidden');
+  $('#totp-cancel').textContent = 'Cancelar';
   $('#totp-modal').classList.remove('hidden');
+  // Invalidate any in-flight setup request on every open — a stale rejection
+  // must not write its error into a modal reopened in the other mode.
+  const ticket = ++totpTicket;
   if (enabling) {
     api('/api/auth/totp/setup', { method: 'POST' })
       .then((res) => {
+        // A slow response from a previous open must not overwrite the newest
+        // pending secret — the backend only keeps the latest one.
+        if (ticket !== totpTicket) return;
         const qr = qrcode(0, 'M');
         qr.addData(res.uri);
         qr.make();
         $('#totp-qr').innerHTML = qr.createSvgTag(6, 8);
         $('#totp-secret').textContent = res.secret;
       })
-      .catch((err) => { $('#totp-error').textContent = err.message; });
+      .catch((err) => { if (ticket === totpTicket) $('#totp-error').textContent = err.message; });
   }
   setTimeout(() => $('#totp-code').focus(), 50);
 }
 
 $('#totp-enable-btn').addEventListener('click', () => openTotpModal('enable'));
 $('#totp-disable-btn').addEventListener('click', () => openTotpModal('disable'));
-$('#totp-cancel').addEventListener('click', () => $('#totp-modal').classList.add('hidden'));
-$('#totp-confirm').addEventListener('click', async () => {
+$('#totp-cancel').addEventListener('click', () => { totpTicket++; $('#totp-modal').classList.add('hidden'); });
+$('#totp-confirm').addEventListener('click', async (e) => {
+  const btn = e.currentTarget;
+  if (btn.disabled) return;
+  btn.disabled = true;
   $('#totp-error').textContent = '';
   try {
-    await api(`/api/auth/totp/${totpMode}`, { method: 'POST', body: { code: $('#totp-code').value.trim() } });
+    const res = await api(`/api/auth/totp/${totpMode}`, { method: 'POST', body: { code: $('#totp-code').value.trim(), password: $('#totp-password').value } });
+    if (totpMode === 'enable' && Array.isArray(res.recovery) && res.recovery.length) {
+      // Mostrar una sola vez — quedan hasheados en el servidor.
+      $('#totp-recovery-codes').innerHTML = res.recovery.map(c => `<code>${esc(c)}</code>`).join('');
+      $('#totp-recovery').classList.remove('hidden');
+      $('#totp-qr').classList.add('hidden');
+      $('#totp-secret-wrap').classList.add('hidden');
+      $('#totp-code').classList.add('hidden');
+      $('#totp-password').classList.add('hidden');
+      $('#totp-confirm').classList.add('hidden');
+      $('#totp-cancel').textContent = 'Cerrar';
+      $('#totp-desc').textContent = '2FA activado.';
+      updateTotpStatus(true);
+      toast('2FA activado — guardá los códigos de recuperación', 'ok');
+      return;
+    }
     $('#totp-modal').classList.add('hidden');
     updateTotpStatus(totpMode === 'enable');
     toast(totpMode === 'enable' ? '2FA activado — el próximo login pide el código' : '2FA desactivado', 'ok');
   } catch (err) {
     $('#totp-error').textContent = err.message;
+  } finally {
+    btn.disabled = false;
   }
 });
+$('#totp-recovery-copy').addEventListener('click', async () => {
+  const codes = [...$('#totp-recovery-codes').querySelectorAll('code')].map(c => c.textContent).join('\n');
+  try { await navigator.clipboard.writeText(codes); toast('Códigos copiados', 'ok'); }
+  catch { $('#totp-error').textContent = 'No se pudo copiar — guardalos a mano.'; }
+});
 $('#totp-code').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); $('#totp-password').focus(); }
+});
+$('#totp-password').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); $('#totp-confirm').click(); }
 });
 
@@ -1478,15 +1630,26 @@ let scanIntervalMs = 5000;
 
 function bootMain() {
   document.dispatchEvent(new Event('axon:authenticated'));
-  loadStats();
-  // Only the visible section loads; counters are filled when visited.
-  setInterval(() => { if (!document.hidden && !$('#main-screen').classList.contains('hidden')) loadStats(); }, 5000);
+  loadStats(); // primer fetch: también puebla serverHosts para los links de red
+  // Stats del topbar: si #server-stats está oculto (móvil/legacy shell), no
+  // seguir polleando — el DOM no muestra nada igualmente.
+  setInterval(() => {
+    if (!document.hidden && !$('#main-screen').classList.contains('hidden') && $('#server-stats')?.offsetParent) loadStats();
+  }, 5000);
   scheduleSectionPoll();
 }
 function scheduleSectionPoll() {
   clearTimeout(portsTimer);
   portsTimer = setTimeout(async () => {
-    if (!document.hidden && !$('#main-screen').classList.contains('hidden') && !document.querySelector('.modal:not(.hidden)') && ['ports','projects','docker','domains'].includes(activeTabName)) {
+    // No re-renderizar mientras hay un modal abierto (incluye el wa-dialog de
+    // confirmación — antes una fila borrada "resucitaba" por el poll), ni
+    // mientras el usuario edita un input/selecciona texto en la sección.
+    const ae = document.activeElement;
+    const editing = !!(ae?.closest?.('#main-screen input, #main-screen textarea, #main-screen select, #main-screen [contenteditable]'));
+    const sel = window.getSelection();
+    const selecting = !!(sel && !sel.isCollapsed && sel.anchorNode && $('#main-screen')?.contains(sel.anchorNode));
+    const modalOpen = !!document.querySelector('.modal:not(.hidden), wa-dialog[open]') || !!pendingConfirm;
+    if (!document.hidden && !$('#main-screen').classList.contains('hidden') && !modalOpen && !editing && !selecting && ['ports','projects','docker','domains'].includes(activeTabName)) {
       await loaders[activeTabName]?.();
     }
     scheduleSectionPoll();
@@ -1496,7 +1659,13 @@ function scheduleSectionPoll() {
 
 // ---------- Theme + sidebar ----------
 
-function setTheme(t) { window.AxonThemes?.select(t); }
+function setTheme(t) {
+  // Desde ⌘K "Tema: X" el usuario espera VER el tema — en modo Sistema,
+  // select() sólo precargaría la variante sin cambiar nada visible.
+  const th = window.AxonThemes?.byId?.get?.(t);
+  if (th) window.AxonThemes.setMode(th.mode);
+  window.AxonThemes?.select(t);
+}
 document.addEventListener('axon:theme', () => {
   drawSpark('spark-cpu', sparkHist.cpu); drawSpark('spark-ram', sparkHist.ram);
   const style = getComputedStyle(document.documentElement);
@@ -1525,19 +1694,25 @@ const cmdkList = $('#cmdk-list');
 let cmdkIndex = 0;
 let cmdkItems = [];
 
+const CMDK_SECTION_ICON = {
+  dashboard:'house', ports:'plug', projects:'folder-git-2', docker:'container', domains:'globe',
+  files:'folder-open', library:'images', terminal:'terminal', navegador:'globe', programs:'package',
+  store:'store', drop:'upload-cloud', metrics:'chart-line', logs:'scroll-text', ops:'heart-pulse',
+  scripts:'code', storage:'hard-drive', compose:'layers', agents:'bot', settings:'settings',
+  backups:'archive', audit:'history', access:'plug', desktop:'monitor',
+};
+
 function cmdkCommands() {
   const net = netHost();
-  const cmds = [
-    {icon:'house',label:'Ir a Inicio',hint:'sección',run:()=>gotoTab('dashboard')},
-    {icon:'folder-open',label:'Ir a Archivos',hint:'sección',run:()=>gotoTab('files')},
-    {icon:'images',label:'Ir a Biblioteca',hint:'sección',run:()=>gotoTab('library')},
-    {icon:'terminal',label:'Ir a Terminal',hint:'sección',run:()=>gotoTab('terminal')},
-    { icon: 'plug', label: 'Ir a Puertos', hint: 'sección', run: () => gotoTab('ports') },
-    { icon: 'folder-git-2', label: 'Ir a Proyectos', hint: 'sección', run: () => gotoTab('projects') },
-    { icon: 'package', label: 'Ir a Programas', hint: 'sección', run: () => gotoTab('programs') },
-    { icon: 'container', label: 'Ir a Docker', hint: 'sección', run: () => gotoTab('docker') },
-    { icon: 'globe', label: 'Ir a Dominios', hint: 'sección', run: () => gotoTab('domains') },
-    { icon: 'bot', label: 'Ir a Agents', hint: 'sección', run: () => document.querySelector('.tab-btn[data-tab="agents"]')?.click() },
+  const cmds = [];
+  // Secciones reales desde el modelo de navegación (antes era una lista
+  // hardcodeada con ~8 de las 24 secciones).
+  const sections = window.AxonNavigation?.sections
+    || Object.fromEntries($$('.tab-btn').map((b) => [b.dataset.tab, ['', b.textContent.trim()]]));
+  for (const [key, [, label]] of Object.entries(sections)) {
+    cmds.push({ icon: CMDK_SECTION_ICON[key] || 'box', label: `Ir a ${label || key}`, hint: 'sección', run: () => gotoTab(key) });
+  }
+  cmds.push(
     { icon: 'layout-grid', label: 'Agents: matriz de MCPs', hint: 'sección', run: () => window.pmGotoAgent?.('__matrix') },
     { icon: 'file-text', label: 'Agents: documentos', hint: 'sección', run: () => window.pmGotoAgent?.('__docs') },
     ...(window.__pmAgents || []).filter((a) => a.installed).map((a) => ({
@@ -1549,7 +1724,7 @@ function cmdkCommands() {
     { icon: 'moon', label: 'Tema: Linear', hint: 'tema', run: () => setTheme('linear') },
     { icon: 'moon', label: 'Tema: Netdata', hint: 'tema', run: () => setTheme('netdata') },
     { icon: 'moon', label: 'Tema: Warp', hint: 'tema', run: () => setTheme('warp') },
-  ];
+  );
   for (const p of portsData) {
     const label = p.identity.label;
     for (const port of p.ports.slice(0, 4)) {
@@ -1683,8 +1858,10 @@ function openProcMenu(p, anchor, coords) {
     items.push(
       { icon: 'monitor', label: `Abrir :${port} en el navegador`, run: () => openInServerBrowser(`http://localhost:${port}`) },
       { icon: 'external-link', label: `Abrir :${port} (proxy)`, run: () => window.open(`/p/${port}/`, '_blank', 'noopener') },
-      { icon: 'house', label: `Abrir localhost:${port}`, run: () => window.open(`http://localhost:${port}`, '_blank', 'noopener') },
     );
+    // localhost solo tiene sentido si el cliente está en el propio servidor;
+    // para un cliente remoto (Tailscale/dominio) ese link no resuelve nada.
+    if (isLocalClient()) items.push({ icon: 'house', label: `Abrir localhost:${port}`, run: () => window.open(`http://localhost:${port}`, '_blank', 'noopener') });
     if (net) items.push({ icon: 'network', label: `Abrir ${net}:${port}`, run: () => window.open(`http://${net}:${port}`, '_blank', 'noopener') });
     items.push({ icon: 'link', label: 'Copiar URL', run: () => { navigator.clipboard.writeText(`${location.origin}/p/${port}/`).catch(() => {}); toast('URL copiada', 'ok', '', 2000); } });
     items.push({ sep: true });
@@ -1719,8 +1896,10 @@ $('#ports-table').addEventListener('contextmenu', (e) => {
 // ---------- Convert to systemd service ----------
 
 let servicePid = null;
+let serviceTicket = 0;
 
 async function openServiceModal(pid, suggested) {
+  const ticket = ++serviceTicket;
   servicePid = pid;
   $('#service-name').value = suggested || '';
   $('#service-preview').textContent = 'Cargando…';
@@ -1728,17 +1907,21 @@ async function openServiceModal(pid, suggested) {
   $('#service-modal').classList.remove('hidden');
   try {
     const res = await api('/api/systemd/preview-service', { method: 'POST', body: { pid, name: $('#service-name').value } });
+    if (ticket !== serviceTicket) return;
     $('#service-preview').textContent = res.unit;
   } catch (err) {
+    if (ticket !== serviceTicket) return;
     $('#service-preview').textContent = '';
     $('#service-error').textContent = err.message;
   }
 }
 
 $('#service-name').addEventListener('input', async () => {
+  const ticket = ++serviceTicket;
   if (!servicePid) return;
   try {
     const res = await api('/api/systemd/preview-service', { method: 'POST', body: { pid: servicePid, name: $('#service-name').value } });
+    if (ticket !== serviceTicket) return;
     $('#service-preview').textContent = res.unit;
   } catch { /* preview is best-effort */ }
 });
@@ -1768,7 +1951,7 @@ let activeTerm = null;
 const TERM_SESSIONS_KEY = 'pm.termSessions';
 
 function savedTermSessions() {
-  try { return JSON.parse(localStorage.getItem(TERM_SESSIONS_KEY) || '[]'); } catch { return []; }
+  try { const v = JSON.parse(localStorage.getItem(TERM_SESSIONS_KEY) || '[]'); return Array.isArray(v) ? v : []; } catch { return []; }
 }
 function saveTermSessions() {
   // Only tmux-backed sessions persist across reloads; docker exec tabs die
@@ -1805,7 +1988,7 @@ async function openTermTab(name, cwd, opts = {}) {
   });
   $('#term-tabs').appendChild(tabBtn);
 
-  const sess = { term: t, fit, ws: null, page, tabBtn, name, exec: opts.exec || '', pendingCwd: cwd || '', pendingCommand: opts.command || '', retries: 0, closed: false, retryTimer: null };
+  const sess = { term: t, fit, ws: null, page, tabBtn, name, exec: opts.exec || '', pendingCwd: cwd || '', pendingCommand: opts.command || '', retries: 0, closed: false, retryTimer: null, resizeTimer: null, ctrlArmed: false, altArmed: false };
   t.parser.registerOscHandler(777, data => {
     if (data !== 'axon-ready') return false;
     if (sess.ws?.readyState === 1) {
@@ -1817,13 +2000,94 @@ async function openTermTab(name, cwd, opts = {}) {
   termSessions.set(name, sess);
   saveTermSessions();
 
-  t.onData((d) => { if (sess.ws?.readyState === 1) sess.ws.send(JSON.stringify({ t: 'i', d })); });
-  t.onResize(({ cols, rows }) => { if (sess.ws?.readyState === 1) sess.ws.send(JSON.stringify({ t: 'r', c: cols, r: rows })); });
+  t.onData((d) => sendTermInput(sess, d));
+  // Debounce: cada resize dispara un hostExec con tmux en el servidor — sin
+  // pausa, arrastrar una ventana spawnea decenas de procesos.
+  t.onResize(({ cols, rows }) => {
+    clearTimeout(sess.resizeTimer);
+    sess.resizeTimer = setTimeout(() => {
+      if (sess.ws?.readyState === 1) sess.ws.send(JSON.stringify({ t: 'r', c: cols, r: rows }));
+    }, 250);
+  });
 
   connectTermTab(sess);
   activateTermTab(name);
   refreshIcons();
   return sess;
+}
+
+// Input al ws aplicando el Ctrl "pegajoso" de la barra de teclas móvil:
+// si está armado, el próximo carácter se convierte en su código de control
+// (Ctrl+C → \x03) y las flechas en sus variantes Ctrl+flecha.
+const TERM_CTRL_SEQ = { '\x1b[A': '\x1b[1;5A', '\x1b[B': '\x1b[1;5B', '\x1b[C': '\x1b[1;5C', '\x1b[D': '\x1b[1;5D' };
+function sendTermInput(sess, d) {
+  if (sess.ctrlArmed) {
+    sess.ctrlArmed = false;
+    syncTermCtrl(sess);
+    if (d.length === 1) {
+      const c = d.toUpperCase().charCodeAt(0);
+      if (c >= 64 && c < 96) d = String.fromCharCode(c - 64);
+    } else if (TERM_CTRL_SEQ[d]) d = TERM_CTRL_SEQ[d];
+  }
+  if (sess.altArmed) {
+    sess.altArmed = false;
+    syncTermCtrl(sess);
+    d = '\x1b' + d;
+  }
+  if (sess.ws?.readyState === 1) sess.ws.send(JSON.stringify({ t: 'i', d }));
+}
+function syncTermCtrl(sess) {
+  const host = sess.tabBtn?.closest('.term-tabbar')?.parentElement;
+  const paint = (b, on) => {
+    b.classList.toggle('term-key-armed', on);
+    b.style.outline = on ? '2px solid var(--accent, #5e6ad2)' : '';
+    b.style.outlineOffset = '-2px';
+  };
+  const active = termSessions.get(activeTerm) === sess;
+  host?.querySelectorAll('.term-key-ctrl').forEach((b) => paint(b, active && sess.ctrlArmed));
+  host?.querySelectorAll('.term-key-alt').forEach((b) => paint(b, active && sess.altArmed));
+}
+
+// Barra de teclas especiales para móviles (sin teclado físico: Esc/Tab/Ctrl
+// y flechas son inalcanzables). Se inyecta desde JS porque es funcionalidad
+// de la sesión, no del markup estático.
+const TERM_KEYBAR = [
+  ['Esc', '\x1b'], ['Tab', '\t'], ['Ctrl', 'ctrl'], ['Alt', 'alt'],
+  ['←', '\x1b[D'], ['↓', '\x1b[B'], ['↑', '\x1b[A'], ['→', '\x1b[C'],
+  ['Home', '\x1b[H'], ['End', '\x1b[F'], ['PgUp', '\x1b[5~'], ['PgDn', '\x1b[6~'],
+];
+function ensureTermKeybar() {
+  if ($('#term-keybar')) return;
+  const bar = document.createElement('div');
+  bar.id = 'term-keybar';
+  bar.className = 'term-keybar';
+  bar.style.cssText = 'display:flex;gap:6px;padding:4px 8px;overflow-x:auto;flex:0 0 auto;touch-action:manipulation;border-bottom:1px solid var(--border, #262c3a);background:var(--bg-surface, #10141d)';
+  for (const [label, key] of TERM_KEYBAR) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn-secondary' + (key === 'ctrl' ? ' term-key-ctrl' : key === 'alt' ? ' term-key-alt' : '');
+    b.textContent = label;
+    b.style.cssText = 'padding:4px 10px;white-space:nowrap;flex:0 0 auto';
+    b.addEventListener('click', () => {
+      const sess = termSessions.get(activeTerm);
+      if (!sess) return;
+      // Ctrl/Alt son "pegajosos": modifican la próxima tecla (del teclado
+      // virtual del SO o de esta barra) y se sueltan solos.
+      if (key === 'ctrl') { sess.ctrlArmed = !sess.ctrlArmed; sess.altArmed = false; syncTermCtrl(sess); sess.term.focus(); return; }
+      if (key === 'alt') { sess.altArmed = !sess.altArmed; sess.ctrlArmed = false; syncTermCtrl(sess); sess.term.focus(); return; }
+      sendTermInput(sess, key);
+      sess.term.focus();
+    });
+    bar.appendChild(b);
+  }
+  const host = $('#tab-terminal');
+  host.insertBefore(bar, $('#term-pages'));
+  syncTermKeybarVisibility();
+  window.matchMedia('(pointer:coarse)').addEventListener('change', syncTermKeybarVisibility);
+}
+function syncTermKeybarVisibility() {
+  const bar = $('#term-keybar');
+  if (bar) bar.style.display = window.matchMedia('(pointer:coarse)').matches || !window.matchMedia('(pointer:fine)').matches ? 'flex' : 'none';
 }
 
 function updateTermStatus() {
@@ -1860,11 +2124,14 @@ function connectTermTab(sess) {
     // A stale socket closing must not mark the replacement as offline.
     if (sess.ws !== ws || sess.closed) return;
     updateTermStatus();
-    if (!sess.exec && sess.retries < 6) {
-      const delay = Math.min(15_000, 1000 * 2 ** sess.retries++);
-      sess.retryTimer = setTimeout(() => { if (!document.hidden && activeTabName === 'terminal') connectTermTab(sess); }, delay);
+    // Reintento ilimitado con backoff (tope 30s) también con la pestaña en
+    // background — antes se rendía a los ~6 intentos y solo si la sección
+    // estaba activa, dejando la sesión muda sin aviso.
+    if (!sess.exec) {
+      const delay = Math.min(30_000, 1000 * 2 ** Math.min(sess.retries++, 5));
+      sess.retryTimer = setTimeout(() => connectTermTab(sess), delay);
     }
-    sess.term.write('\r\n[desconectado — click para reconectar]\r\n');
+    sess.term.write('\r\n[desconectado — reintentando]\r\n');
     sess.tabBtn.classList.add('term-tab-offline');
   };
 }
@@ -1878,19 +2145,24 @@ function activateTermTab(name) {
     s.tabBtn.querySelector('.term-tab-select')?.setAttribute('aria-pressed', String(n===name));
   }
   const s = termSessions.get(name);
-  if (s) requestAnimationFrame(() => { s.fit.fit(); s.term.focus(); });
+  // Si la pestaña quedó offline en background, activarla la reconecta.
+  if (s) { connectTermTab(s); syncTermCtrl(s); requestAnimationFrame(() => { s.fit.fit(); s.term.focus(); }); }
 }
 
 function closeTermTab(name) {
   const s = termSessions.get(name);
   if (!s) return;
-  s.closed = true; clearTimeout(s.retryTimer);
+  s.closed = true; clearTimeout(s.retryTimer); clearTimeout(s.resizeTimer);
   try { s.ws?.close(); } catch { /* gone */ }
   s.term.dispose();
   s.page.remove();
   s.tabBtn.remove();
   termSessions.delete(name);
   saveTermSessions();
+  // La sesión tmux del host sobrevive al detach y quedaba huérfana
+  // (axon-term-* acumuladas). Kill best-effort: si el endpoint falta, el
+  // 404 se ignora en silencio.
+  if (!s.exec) api(`/api/term/${encodeURIComponent(name)}`, { method: 'DELETE' }).catch(() => {});
   if (activeTerm === name) {
     const next = termSessions.keys().next().value;
     if (next) activateTermTab(next);
@@ -1936,7 +2208,10 @@ function openTermCmd(cmd, opts = {}) {
 // openTermExec(id, name): open a fresh terminal tab running an interactive
 // shell inside a docker container (`docker exec -it`). Not tmux-persistent —
 // the session dies when the tab/socket closes.
-function openTermExec(id, name) {
+async function openTermExec(id, name) {
+  // docker exec abre una shell con los privilegios del contenedor — pedir
+  // confirmación nombrando el container antes de lanzarla.
+  if (!(await confirmDialog('Terminal en contenedor', `Se abre una shell interactiva (docker exec) en ${name || id}.`, 'Abrir terminal'))) return;
   document.querySelector('.tab-btn[data-tab="terminal"]')?.click();
   termCounter++;
   const label = (name || id).length > 20 ? `${(name || id).slice(0, 19)}…` : (name || id);
@@ -1945,6 +2220,7 @@ function openTermExec(id, name) {
 
 loaders.terminal = async () => {
   try { await AxonAssets.terminal(); } catch (err) { errToast(err); return; }
+  ensureTermKeybar();
   updateTermStatus();
   if (!termSessions.size) {
     const saved = savedTermSessions();
@@ -1966,8 +2242,18 @@ let browserLoaded = false;
 let browserTicket = 0;
 
 async function loadBrowser() {
-  if (browserLoaded) return;
   const ticket = ++browserTicket, status = $('#browser-state');
+  if (browserLoaded) {
+    // El iframe puede quedar mostrando un 502 viejo del proxy aunque la
+    // página cargó OK — verificar que el contenedor siga vivo al volver.
+    try {
+      const r = await api('/api/browser/status');
+      if (ticket !== browserTicket) return;
+      if (r.available) return;
+      browserLoaded = false;
+      $('#browser-frame').src = 'about:blank';
+    } catch { if (ticket !== browserTicket) return; }
+  }
   status.dataset.state='loading'; status.innerHTML=`${icon('loader','spin')} Conectando con Chromium…`; refreshIcons();
   try {
     const result=await api('/api/browser/status');
@@ -1982,8 +2268,23 @@ function unloadBrowser(force = false) {
   // Preserve the established viewer when moving between sections.
   if (force) { browserTicket++; $('#browser-frame').src='about:blank'; browserLoaded=false; }
 }
-$('#browser-frame').addEventListener('load',()=>{
-  if(browserLoaded){$('#browser-state').dataset.state='ready';$('#browser-state').textContent='Visor del navegador cargado';}
+$('#browser-frame').addEventListener('load', async ()=>{
+  // El evento load también dispara con la página de error 502 del proxy —
+  // no declarar "listo" hasta confirmar que Chromium responde de verdad.
+  if(!browserLoaded)return;
+  const ticket = browserTicket, status = $('#browser-state');
+  try {
+    const r = await api('/api/browser/status');
+    if(ticket!==browserTicket || !browserLoaded)return;
+    if(!r.available)throw new Error('no disponible');
+    status.dataset.state='ready'; status.textContent='Visor del navegador cargado';
+  } catch {
+    if(ticket!==browserTicket)return;
+    status.dataset.state='error';
+    status.textContent='Chromium no responde — puede seguir arrancando. Reintentando…';
+    // Reintento diferido: si el contenedor está levantando, vuelve solo.
+    setTimeout(()=>{ if(ticket===browserTicket){browserLoaded=false;$('#browser-frame').src='about:blank';loadBrowser();} }, 4000);
+  }
 });
 
 loaders.navegador = loadBrowser;

@@ -2,7 +2,9 @@ import { resolveHostPath, hostVolumes } from '../host-storage';
 import { volumeForPath, volumeContains, type VolumeSnapshot, type FileVolume } from '../file-volumes';
 import { firstBackupAt, followingBackupAt } from './backup-schedule';
 import { readFile, readlink } from 'node:fs/promises';
-import { hostSpawnInteractive, ON_HOST } from '../host';
+import { hostSpawnInteractive, killHostProc, hostExec, ON_HOST } from '../host';
+import { notify } from '../notify';
+import { MaintenanceError } from '../storage/types';
 import { PlatformError, type PlatformStore } from './store';
 import type { ProjectHub } from './projects';
 import type { Hono } from 'hono';
@@ -22,38 +24,52 @@ export interface BackupJob {
   forgottenSnapshots?:string[];expired?:boolean;paths?:string[];sourcePaths?:string[];endedAt?:number;
 }
 export type BackupRunner = (request:Record<string,unknown>) => Promise<any>;
-let workerSource:Promise<string>;
+let workerSource:Promise<string>|undefined;
+// The launcher must outlive the worker's own inner deadlines: a postgres
+// 'start' runs docker inspects + psql (each up to 120s) before detaching, and
+// 'browse' can wait on a cold repository listing.
+const launcherTimeouts:Record<string,number>={start:300000,browse:150000,databases:300000};
 export async function backupWorker(request:Record<string,unknown>) {
-  const source = await (workerSource ||= readFile(new URL('./backup-host.py',import.meta.url),'utf8'));
+  const source = await (workerSource ??= readFile(new URL('./backup-host.py',import.meta.url),'utf8').catch(e=>{workerSource=undefined;throw e;}));
   const quote = (s:string) => `'${s.replace(/'/g,`'"'"'`)}'`;
   const p = hostSpawnInteractive('python3 -c '+quote(source),{user:'root'});
   (p.stdin as Bun.FileSink).write(JSON.stringify({...request,workerSource:source}));(p.stdin as Bun.FileSink).end();
-  const timer = setTimeout(() => p.kill(),25000);
+  const timer = setTimeout(() => killHostProc(p),launcherTimeouts[String(request.action)]||25000);
+  // Stop reading (and kill the worker) once a stream exceeds the bound instead
+  // of buffering it unbounded until the process ends.
+  const bounded=async(stream:ReadableStream<Uint8Array>)=>{let n=0;const chunks:Uint8Array[]=[];for await(const chunk of stream){n+=chunk.length;if(n>2_000_000){killHostProc(p);throw new PlatformError('No se pudo consultar el worker de backups',503);}chunks.push(chunk);}return Buffer.concat(chunks).toString('utf8');};
   try {
-    const [out,,code] = await Promise.all([new Response(p.stdout as ReadableStream).text(),new Response(p.stderr as ReadableStream).text(),p.exited]);
-    if (code || out.length > 2_000_000) throw new PlatformError('No se pudo consultar el worker de backups',503);
+    const [out,,code] = await Promise.all([bounded(p.stdout as ReadableStream<Uint8Array>),bounded(p.stderr as ReadableStream<Uint8Array>),p.exited]);
+    if (code) throw new PlatformError('No se pudo consultar el worker de backups',503);
     const result = JSON.parse(out);if (!result.ok) throw new PlatformError(result.error || 'Backup no disponible',409);return result;
   } finally {clearTimeout(timer);}
 }
 export async function hostDataDirectory(configDir:string):Promise<string> {
   if (ON_HOST) return configDir;
+  // A wedged Docker daemon must not block the serial backup mutation chain;
+  // every docker call gets the same kill deadline as the project inventory.
+  const docker=async(argv:string[])=>{
+    const p=Bun.spawn(argv,{stdout:'pipe',stderr:'pipe'});
+    const timer=setTimeout(()=>{try{p.kill();}catch{}},15000);
+    try{return await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text(),p.exited]);}
+    finally{clearTimeout(timer);}
+  };
   let container=process.env.AXON_CONTAINER_NAME;
   if(!container){
     // A 1.1 updater activates the new image before replacing its own manager,
     // so the first upgrade has no AXON_CONTAINER_NAME yet. Host PID/network
     // mode also makes HOSTNAME/cgroup unreliable. Match our mount namespace.
-    const list=Bun.spawn(['docker','ps','-q'],{stdout:'pipe',stderr:'pipe'});
-    const ids=(await new Response(list.stdout).text()).trim().split(/\s+/).filter(Boolean);
-    if(await list.exited||!ids.length)throw new Error('No se pudo identificar el contenedor de AXON');
-    const inspect=Bun.spawn(['docker','inspect',...ids,'--format','{{.Id}} {{.State.Pid}}'],{stdout:'pipe',stderr:'pipe'});
-    const rows=(await new Response(inspect.stdout).text()).trim().split('\n');
-    if(await inspect.exited)throw new Error('No se pudo identificar el contenedor de AXON');
+    const [listed,,listCode]=await docker(['docker','ps','-q']);
+    const ids=listed.trim().split(/\s+/).filter(Boolean);
+    if(listCode||!ids.length)throw new Error('No se pudo identificar el contenedor de AXON');
+    const [inspected,,inspectCode]=await docker(['docker','inspect',...ids,'--format','{{.Id}} {{.State.Pid}}']);
+    if(inspectCode)throw new Error('No se pudo identificar el contenedor de AXON');
+    const rows=inspected.trim().split('\n');
     const own=await readlink('/proc/self/ns/mnt');
     for(const row of rows){const [id,pid]=row.split(' ');try{if(await readlink('/proc/'+pid+'/ns/mnt')===own){container=id;break;}}catch{/* Container exited during discovery. */}}
     if(!container)throw new Error('No se pudo identificar el montaje propio de AXON');
   }
-  const p = Bun.spawn(['docker','inspect',container,'--format','{{json .Mounts}}'],{stdout:'pipe',stderr:'pipe'});
-  const [out,,code] = await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text(),p.exited]);
+  const [out,,code] = await docker(['docker','inspect',container,'--format','{{json .Mounts}}']);
   if (code) throw new Error('No se pudo resolver el montaje de configuración');
   const mounts = JSON.parse(out) as {Destination:string;Source:string;Type:string}[];
   const mount = mounts.find(m => m.Type === 'bind' && (configDir === m.Destination || configDir.startsWith(m.Destination+'/')));
@@ -128,6 +144,8 @@ export class Backups {
       if(!Array.isArray(input.destinations)||!input.destinations.length||input.destinations.length>5)throw new PlatformError('Elegí entre 1 y 5 destinos');
       const snapshot=await this.environment.volumes();policy.sourceVolumes={};
       if(input.sourceIdentities!==undefined&&(!input.sourceIdentities||typeof input.sourceIdentities!=='object'||Array.isArray(input.sourceIdentities)))throw new PlatformError('Discos de origen inválidos');
+      // Keys are resolved source paths; unknown ones would silently skip the disk-identity check.
+      if(input.sourceIdentities&&Object.keys(input.sourceIdentities).some(k=>!this.sources(policy).includes(k)))throw new PlatformError('Discos de origen inválidos');
       for(const p of this.sources(policy)){
         const v=volumeForPath(snapshot.volumes,p);if(!v?.path||!v.readable)throw new PlatformError('No se pudo identificar el disco de origen. Actualizá los discos',409);
         const selected=input.sourceIdentities?.[p];
@@ -137,10 +155,15 @@ export class Backups {
       }
       if(policy.diskMode&&policy.sources?.length!==1)throw new PlatformError('Elegí un disco por backup completo');
       policy.destinations=[];
+      const claimedIds=new Set<string>();
       for(const raw of input.destinations){
         if(!raw||typeof raw.path!=='string'||Object.keys(raw).some(k=>!['id','path','label','volumeId','volumeUuid'].includes(k)))throw new PlatformError('Destino inválido');
+        // Two entries reusing one id would share a destinationId: the schedule
+        // key and the enqueue dedup would merge them and skip a disk.
+        if(raw.id!==undefined&&(typeof raw.id!=='string'||claimedIds.has(raw.id)))throw new PlatformError('Destino inválido');
+        if(typeof raw.id==='string')claimedIds.add(raw.id);
         const root=await this.environment.resolve(raw.path,{fresh:true,root:true});
-        const previous=existing?.destinations?.find(t=>t.id===raw.id);
+        const previous=typeof raw.id==='string'?existing?.destinations?.find(t=>t.id===raw.id):undefined;
         const selectedPath=previous?.path===root?root:root.replace(/\/$/,'')+'/AXON-Backups/'+policy.id;
         const v=volumeForPath(snapshot.volumes,selectedPath);
         if(!v?.path||v.readOnly||!v.readable)throw new PlatformError('Este destino no permite guardar copias',409);
@@ -161,6 +184,38 @@ export class Backups {
     this.store.append({actor,action:'backup.policy.save',resource:policy.id,projectId:policy.projectId,status:'ok'});return policy;
   });}
   private cancelPending(policyId:string,message:string){for(const j of this.store.list<BackupJob>('backup-job').filter(j=>j.policy.id===policyId&&!j.launchedAt&&activeStates.includes(j.state)))this.store.put('backup-job',j.id,{...j,state:'cancelled',message,endedAt:Date.now()});}
+  // Deleting a policy keeps every snapshot already made (they remain
+  // restorable through their durable job receipts) — only the plan, its
+  // schedule and its still-unlaunched queue entries go away.
+  async remove(id:string,actor:string){return this.serial(async()=>{
+    const policy=this.store.get<BackupPolicy>('backup-policy',id);if(!policy)throw new PlatformError('Backup no encontrado',404);
+    this.cancelPending(id,'Backup eliminado. Las copias existentes se conservan.');
+    for(const t of this.targets(policy)){this.store.remove('backup-schedule',policy.id+':'+t.id);this.store.remove('backup-retry',policy.id+':'+t.id);}
+    this.store.remove('backup-policy',id);
+    this.store.append({actor,action:'backup.policy.delete',resource:id,projectId:policy.projectId,status:'ok',detail:policy.name});
+    return {deleted:true};
+  });}
+  // Cancel one job: an unlaunched queue entry is stamped directly; a launched
+  // one gets its worker process group killed (start_new_session gives the
+  // worker its own pgid, so restic dies with it) and the stale-worker check
+  // in status() then records the honest 'interrupted' outcome.
+  async cancel(id:string,actor:string){return this.serial(async()=>{
+    const job=this.store.get<BackupJob>('backup-job',id);if(!job)throw new PlatformError('Copia no encontrada',404);
+    if(!activeStates.includes(job.state))return job;
+    if(!job.launchedAt){
+      const done={...job,state:'cancelled',message:'Copia cancelada antes de iniciar.',endedAt:Date.now()};
+      this.store.put('backup-job',id,done);
+      this.store.append({actor,credentialId:job.credentialId,action:'backup.'+job.mode+'.cancel',resource:id,projectId:job.policy.projectId,status:'ok'});
+      return done;
+    }
+    const current:any=await this.status(id).catch(()=>job);
+    if(!activeStates.includes(current.state))return current;
+    const pid=Number(current.pid||0);
+    if(!Number.isInteger(pid)||pid<2)throw new PlatformError('La copia está en curso pero no se pudo identificar su proceso. Se interrumpe cuando el worker pierde contacto.',409);
+    await hostExec(`kill -TERM -${pid} 2>/dev/null || kill -TERM ${pid} 2>/dev/null || true`,{user:'root',timeoutMs:10_000}).catch(()=>{});
+    this.store.append({actor,credentialId:job.credentialId,action:'backup.'+job.mode+'.cancel',resource:id,projectId:job.policy.projectId,status:'ok',detail:'Proceso detenido'});
+    return this.status(id).catch(()=>current);
+  });}
   async toggle(id:string,enabled:boolean,actor:string){return this.serial(async()=>{
     const policy=this.store.get<BackupPolicy>('backup-policy',id);if(!policy)throw new PlatformError('Backup no encontrado',404);
     if(typeof enabled!=='boolean')throw new PlatformError('Estado inválido');policy.enabled=enabled;this.store.put('backup-policy',id,policy);
@@ -187,21 +242,61 @@ export class Backups {
   async status(id:string){
     const job=this.store.get<BackupJob>('backup-job',id);if(!job)throw new PlatformError('Copia no encontrada',404);
     if(!job.launchedAt&&!['verified','failed','interrupted'].includes(job.state))return job;
-    if(!['queued','running','interrupted'].includes(job.state))return job;
-    let status:any;try{status=await this.run({action:'status',home:await this.home(),id});}catch{return {...job,state:'running',message:'No se pudo consultar la copia. Todavía no se confirma que terminó.'};}
-    const value={...job,...status,actor:job.actor,credentialId:job.credentialId};delete value.ok;
-    if(value.state!==job.state&&['verified','failed','interrupted'].includes(value.state)){
+    // A worker-confirmed terminal state is authoritative — never re-query it.
+    // Only a TS-side unconfirmed-launch interrupt keeps polling the worker.
+    if(!['queued','running','interrupted'].includes(job.state)||(job as any).reconciled)return job;
+    // A persistently unreachable worker must not spawn a status subprocess on
+    // every poll — back off linearly (30s, 60s, … up to 10min).
+    if((job as any).statusRetryAt&&Date.now()<(job as any).statusRetryAt)return {...job,message:'Reintentando la consulta de la copia…'} as BackupJob;
+    let status:any;try{status=await this.run({action:'status',home:await this.home(),id});}catch{
+      // A concurrent status() may have reconciled a terminal state while our
+      // query was in flight — merge backoff into the CURRENT record or a
+      // stale 'running' write would re-fire the transition and double-audit.
+      const cur=this.store.get<BackupJob>('backup-job',id);
+      if(!cur||(cur as any).reconciled)return cur||job;
+      const fails=((cur as any).statusFails||0)+1;
+      const patched={...cur,statusFails:fails,statusRetryAt:Date.now()+Math.min(fails*30_000,600_000)};
+      this.store.put('backup-job',id,patched);
+      return {...patched,state:['verified','failed','interrupted'].includes(cur.state)?cur.state:'running',message:'No se pudo consultar la copia. Todavía no se confirma que terminó.'};
+    }
+    const value={...job,...status,actor:job.actor,credentialId:job.credentialId};delete value.ok;delete value.statusFails;delete value.statusRetryAt;
+    if(['verified','failed','interrupted'].includes(value.state))(value as any).reconciled=true;
+    // The transition must fire on the FIRST worker-confirmed terminal state,
+    // not only on a state change — a job stored 'interrupted' by a launch
+    // failure still needs its audit entry and retry backoff once confirmed.
+    if(['verified','failed','interrupted'].includes(value.state)&&!(job as any).reconciled){
+      // Concurrent pollers each reach this transition; only the first observer
+      // (store still unreconciled) records receipts. The reads and writes below
+      // are synchronous, so this check is atomic.
+      const stored=this.store.get<BackupJob>('backup-job',id);
+      if(stored&&!(stored as any).reconciled){
       this.store.append({actor:job.actor,credentialId:job.credentialId,action:'backup.'+job.mode+'.result',resource:id,projectId:job.policy.projectId,status:value.state==='verified'?'ok':value.state==='interrupted'?'interrupted':'failed',detail:value.message,recovery:value.snapshot?{label:'Abrir backup',url:'/backups?job='+encodeURIComponent(id)}:undefined});
+      this.notifyFailure(job,value.state,value.message);
       if(job.mode==='backup'){
         const current=this.store.get<BackupPolicy>('backup-policy',job.policy.id);
         if(value.state==='verified'&&current?.enabled&&current.revision===job.policy.revision&&current.dailyAt&&(current.intervalDays??1)>0){
           const key=current.id+':'+job.destinationId,slot=this.store.get<{nextAt:number}>('backup-schedule',key);
           this.store.put('backup-schedule',key,{nextAt:!job.scheduledFor&&slot?.nextAt&&slot.nextAt>Date.now()?slot.nextAt:followingBackupAt(job.scheduledFor||slot?.nextAt||firstBackupAt(job.createdAt,current.dailyAt),Date.now(),current.intervalDays??1)});
-        }else if(value.state!=='verified')this.store.put('backup-retry',job.policy.id+':'+job.destinationId,{after:Date.now()+3600000});
+        // A 'rejected' phase is a deterministic refusal (invalid policy,
+        // missing snapshot) — retrying hourly would fail forever.
+        }else if(value.state!=='verified'&&value.phase!=='rejected')this.store.put('backup-retry',job.policy.id+':'+job.destinationId,{after:Date.now()+3600000});
       }
       for(const snapshot of value.forgottenSnapshots||[])for(const old of this.store.list<BackupJob>('backup-job').filter(j=>j.snapshot===snapshot&&j.policy.repository===job.policy.repository))this.store.put('backup-job',old.id,{...old,expired:true});
+      }
     }
+    // A concurrent status() may have reconciled a terminal record while our
+    // query was in flight — never let a stale non-terminal snapshot unset
+    // `reconciled`, or the transition would fire again (duplicate audit).
+    const cur=this.store.get<BackupJob>('backup-job',id);
+    if(cur&&(cur as any).reconciled&&!['verified','failed','interrupted'].includes(value.state))return cur;
     this.store.put('backup-job',id,value);return value as BackupJob;
+  }
+  // A failed/interrupted backup used to surface only in the UI — fire the
+  // same outbound channel the alert watcher uses, once per terminal state
+  // (both call sites run inside the first-observer reconciliation guard).
+  private notifyFailure(job:BackupJob,state:string,message?:string){
+    if(job.mode!=='backup'||!['failed','interrupted'].includes(state))return;
+    notify(`Backup no completado: ${job.policy.name||'copia'}`,(message||'La copia no terminó.').slice(0,300),4).catch(()=>{});
   }
   private async prepare(job:BackupJob){
     const policy={...job.policy},mounted=(await this.environment.volumes()).volumes;
@@ -226,9 +321,13 @@ export class Backups {
     return {policy,sourceMounts,repositoryMountId};
   }
   async drain():Promise<void>{
-    if(this.draining)return this.draining;
+    if(this.draining){
+      // The in-flight pass listed the queue before a concurrent enqueue may
+      // have added jobs; run a follow-up pass if eligible work remains.
+      return this.draining.then(()=>this.store.list<BackupJob>('backup-job').some(j=>!j.launchedAt&&['queued','waiting'].includes(j.state)&&(!j.retryAt||j.retryAt<=Date.now()))?this.drain():undefined);
+    }
     this.draining=this.serial(async()=>{
-      const active=this.store.list<BackupJob>('backup-job').filter(j=>j.launchedAt&&['queued','running','interrupted'].includes(j.state));
+      const active=this.store.list<BackupJob>('backup-job').filter(j=>j.launchedAt&&['queued','running'].includes(j.state)||(j.launchedAt&&j.state==='interrupted'&&!(j as any).reconciled));
       for(const j of active){const s=await this.status(j.id);if(['queued','running'].includes(s.state))return;}
       const queue=this.store.list<BackupJob>('backup-job').filter(j=>!j.launchedAt&&['queued','waiting'].includes(j.state)&&(!j.retryAt||j.retryAt<=Date.now())).sort((a,b)=>a.createdAt-b.createdAt);
       for(const job of queue){
@@ -238,13 +337,30 @@ export class Backups {
         const launch={...job,policy:prepared.policy,launchedAt:Date.now(),state:'queued'};this.store.put('backup-job',job.id,launch);
         try{
           const result=await this.run({action:'start',home:await this.home(),id:job.id,policy:prepared.policy,mode:job.mode,originalId:(job as any).originalId,paths:job.paths,excludedRepositories:[...new Set([...this.policies().flatMap(p=>this.targets(p).map(t=>t.path)),...this.store.list<BackupJob>('backup-job').map(j=>j.policy.repository)].filter(Boolean))],sourceMounts:prepared.sourceMounts,repositoryMountId:prepared.repositoryMountId});
-          this.store.put('backup-job',job.id,{...launch,...result,launchedAt:launch.launchedAt});
+          const merged:any={...launch,...result,launchedAt:launch.launchedAt};
+          // A worker-side deterministic rejection is already terminal —
+          // record it reconciled with its audit entry so the transition never
+          // re-fires and no backup-retry is scheduled for a permanent refusal.
+          if(merged.state==='failed'){
+            merged.reconciled=true;
+            this.store.put('backup-job',job.id,merged);
+            this.store.append({actor:job.actor,credentialId:job.credentialId,action:'backup.'+job.mode+'.result',resource:job.id,projectId:job.policy.projectId,status:'failed',detail:merged.message});
+            this.notifyFailure(job,'failed',merged.message);
+          }else this.store.put('backup-job',job.id,merged);
         }catch(e){this.store.put('backup-job',job.id,{...launch,state:'interrupted',message:'El inicio no pudo confirmarse. AXON conserva el intento y no lo repite para evitar duplicados.'});}
         return;
       }
     }).finally(()=>{this.draining=undefined;});return this.draining;
   }
-  async list(projectId?:string){await this.drain();const jobs=this.store.list<BackupJob>('backup-job').filter(j=>!projectId||j.policy.projectId===projectId).slice(0,500);return Promise.all(jobs.map(j=>j.launchedAt&&['queued','running','interrupted'].includes(j.state)?this.status(j.id):Promise.resolve(j)));}
+  private resolveJobs(jobs:BackupJob[]){return Promise.all(jobs.map(j=>j.launchedAt&&['queued','running'].includes(j.state)||(j.launchedAt&&j.state==='interrupted'&&!(j as any).reconciled)?this.status(j.id):Promise.resolve(j)));}
+  async list(projectId?:string){return (await this.jobsPage(projectId,0,500)).jobs;}
+  // Paginated variant — the flat 500-job cap used to hide older receipts.
+  async jobsPage(projectId:string|undefined,offset:number,limit:number){
+    await this.drain();
+    const all=this.store.list<BackupJob>('backup-job').filter(j=>!projectId||j.policy.projectId===projectId);
+    const jobs=await this.resolveJobs(all.slice(Math.max(0,offset),Math.max(0,offset)+Math.min(500,Math.max(1,limit))));
+    return {jobs,total:all.length};
+  }
   async forProject(projectId:string,actor:string,credentialId?:string){this.hub.project(projectId);const policies=this.policies(projectId).filter(p=>p.enabled),policy=policies.find(p=>p.kind==='files')||policies[0];if(!policy)throw new PlatformError('El proyecto todavía no tiene un backup configurado',409);return this.start(policy.id,actor,credentialId);}
   async recover(originalId:string,mode:'restore'|'verify',actor:string,paths?:string[]){
     const original=await this.status(originalId);if(!original.snapshot||original.expired||activeStates.includes(original.state))throw new PlatformError('Esta versión no está disponible para recuperar',409);
@@ -284,15 +400,28 @@ export class Backups {
 }
 export function registerBackups(app:Hono,backups:Backups){
   app.use('/api/backups*',async(c,next)=>{c.header('Cache-Control','private, no-store');await next();});
-  const handle=(fn:(c:any)=>Promise<any>)=>async(c:any)=>{try{return await fn(c);}catch(e){return c.json({ok:false,error:e instanceof Error?e.message:'No se pudo completar el backup'},e instanceof PlatformError?e.status:409);}};
+  const handle=(fn:(c:any)=>Promise<any>)=>async(c:any)=>{try{return await fn(c);}catch(e){return c.json({ok:false,error:e instanceof Error?e.message:'No se pudo completar el backup'},e instanceof PlatformError||e instanceof MaintenanceError?e.status:409);}};
   const body=async(c:any)=>{const raw=await c.req.text();if(raw.length>32768)throw new PlatformError('Solicitud demasiado grande',413);try{return JSON.parse(raw);}catch{throw new PlatformError('Solicitud inválida');}};
-  app.get('/api/backups',handle(async c=>{const policies=backups.policies(c.req.query('project'));const jobs=await backups.list(c.req.query('project'));return c.json({ok:true,policies:policies.map(p=>({...p,schedule:backups.schedule(p)})),jobs,availability:await backups.availability(),projects:backups.hub.sources.projects().map(({id,name,cwd})=>({id,name,cwd})),containers:(await backups.hub.sources.containers()).filter(c=>/(?:^|\/)postgres(?:[:@]|$)/.test(c.image)).map(({id,name,state})=>({id,name,state}))});}));
+  app.get('/api/backups',handle(async c=>{
+    const project=c.req.query('project'),policies=backups.policies(project);
+    const offset=Number(c.req.query('offset')||0),limit=Number(c.req.query('limit')||120);
+    if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(limit)||limit<1)throw new PlatformError('Página inválida');
+    const page=await backups.jobsPage(project,offset,limit);
+    return c.json({ok:true,policies:policies.map(p=>({...p,schedule:backups.schedule(p)})),jobs:page.jobs,jobsTotal:page.total,availability:await backups.availability(),projects:backups.hub.sources.projects().map(({id,name,cwd})=>({id,name,cwd})),containers:(await backups.hub.sources.containers()).filter(c=>/(?:^|\/)postgres(?:[:@]|$)/.test(c.image)).map(({id,name,state})=>({id,name,state}))});
+  }));
   app.post('/api/backups/policies',handle(async c=>c.json({ok:true,policy:await backups.save(await body(c),c.get('user'))},201)));
   app.patch('/api/backups/policies/:id',handle(async c=>{const value=await body(c);if(!value||Object.keys(value).some(k=>k!=='enabled'))throw new PlatformError('Solicitud inválida');return c.json({ok:true,policy:await backups.toggle(c.req.param('id'),value.enabled,c.get('user'))});}));
+  app.delete('/api/backups/policies/:id',handle(async c=>{const raw=await c.req.text();if(raw)throw new PlatformError('Solicitud inválida');return c.json({ok:true,...await backups.remove(c.req.param('id'),c.get('user'))});}));
   app.get('/api/backups/databases/:id',handle(async c=>c.json(await backups.databases(c.req.param('id')))));
   app.post('/api/backups/policies/:id/run',handle(async c=>{const value=await body(c);if(!value||Object.keys(value).length)throw new PlatformError('No se aceptan parámetros');return c.json({ok:true,job:await backups.start(c.req.param('id'),c.get('user'))},202);}));
   app.get('/api/backups/jobs/:id',handle(async c=>{await backups.drain();return c.json({ok:true,job:await backups.status(c.req.param('id'))});}));
-  app.get('/api/backups/jobs/:id/files',handle(async c=>c.json(await backups.browse(c.req.param('id'),c.req.query('path')||'/',Number(c.req.query('offset')||0)))));
+  app.get('/api/backups/jobs/:id/files',handle(async c=>{const offset=Number(c.req.query('offset')||0);if(!Number.isSafeInteger(offset)||offset<0||offset>100000)throw new PlatformError('Página inválida');return c.json(await backups.browse(c.req.param('id'),c.req.query('path')||'/',offset));}));
   app.post('/api/backups/recovery-kit',handle(async c=>{const value=await body(c);if(!value||Object.keys(value).length)throw new PlatformError('Solicitud inválida');c.header('Content-Disposition','attachment; filename="axon-clave-de-recuperacion.json"');return c.json(await backups.recoveryKit(c.get('user')));}));
-  app.post('/api/backups/jobs/:id/:mode',handle(async c=>{const mode=c.req.param('mode');if(!['restore','verify'].includes(mode))throw new PlatformError('Acción inválida');const value=await body(c);if(!value||Object.keys(value).some(k=>k!=='paths')||(mode==='verify'&&Object.keys(value).length))throw new PlatformError('Solicitud inválida');return c.json({ok:true,job:await backups.recover(c.req.param('id'),mode,c.get('user'),value.paths)},202);}));
+  app.post('/api/backups/jobs/:id/:mode',handle(async c=>{
+    const mode=c.req.param('mode');
+    if(mode==='cancel'){const raw=await c.req.text();if(raw)throw new PlatformError('Solicitud inválida');return c.json({ok:true,job:await backups.cancel(c.req.param('id'),c.get('user'))});}
+    if(!['restore','verify'].includes(mode))throw new PlatformError('Acción inválida');
+    const value=await body(c);if(!value||Object.keys(value).some(k=>k!=='paths')||(mode==='verify'&&Object.keys(value).length))throw new PlatformError('Solicitud inválida');
+    return c.json({ok:true,job:await backups.recover(c.req.param('id'),mode,c.get('user'),value.paths)},202);
+  }));
 }

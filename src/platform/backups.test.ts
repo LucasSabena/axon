@@ -38,8 +38,13 @@ test('configuration backup uses SQLite online backup for WAL data and verifies r
 test('backup worker rejects symlink roots and self-recursive sources before launching',async()=>{
   const home=await mkdtemp(path.join(tmpdir(),'axon-backup-paths-'));await mkdir(path.join(home,'actual'));await symlink(path.join(home,'actual'),path.join(home,'link'));
   try{
-    await expect(backupWorker({action:'start',home,id:crypto.randomUUID(),policy:{id:'fixture',kind:'files',source:path.join(home,'link')}})).rejects.toThrow('enlazadas');
-    await expect(backupWorker({action:'start',home,id:crypto.randomUUID(),policy:{id:'fixture',kind:'files',source:home}})).rejects.toThrow('repositorio');
+    // A deterministic rejection is a durable 'failed' receipt (phase
+    // 'rejected'), never a spawned worker — and the status action agrees.
+    const bad=await backupWorker({action:'start',home,id:crypto.randomUUID(),policy:{id:'fixture',kind:'files',source:path.join(home,'link')}})as any;
+    expect(bad.state).toBe('failed');expect(bad.phase).toBe('rejected');expect(bad.message).toContain('enlazadas');expect(bad.pid).toBeUndefined();
+    const recursive=await backupWorker({action:'start',home,id:crypto.randomUUID(),policy:{id:'fixture',kind:'files',source:home}})as any;
+    expect(recursive.state).toBe('failed');expect(recursive.phase).toBe('rejected');expect(recursive.message).toContain('repositorio');
+    expect((await backupWorker({action:'status',home,id:recursive.id})as any).state).toBe('failed');
   }finally{await rm(home,{recursive:true,force:true});}
 });
 test('a chosen repository stores encrypted snapshots separately and survives policy changes during recovery',async()=>{

@@ -2,8 +2,11 @@
 (() => {
   'use strict';
   const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  document.head.append(Object.assign(document.createElement('style'),{textContent:'.host-crumbs{display:flex;flex-wrap:wrap;gap:0;align-items:center;font-size:12px;margin:0 0 8px}.host-crumbs button{border:0;background:none;color:var(--text-dim);cursor:pointer;padding:2px 4px;border-radius:4px;font:inherit;font-size:inherit}.host-crumbs button:hover{color:var(--text);background:var(--bg-hover)}.host-crumbs button:last-child{color:var(--text);font-weight:600}.host-crumbs span{color:var(--text-faint)}'}));
   const size=n=>n==null?'No disponible':new Intl.NumberFormat('es-AR',{maximumFractionDigits:1}).format(n/2**30)+' GB';
-  let data=null,flight=null,error='',dialog=null,request=null,folder='',chosen=null,generation=0;
+  let data=null,flight=null,error='',dialog=null,request=null,folder='',chosen=null,generation=0,signedIn=false;
+  document.addEventListener('axon:authenticated',()=>{signedIn=true;refresh().catch(()=>{});});
+  document.addEventListener('axon:session-expired',()=>{signedIn=false;});
   const uniqueVolumes=volumes=>{
     const seen=new Set();return [...volumes].sort((a,b)=>Number(b.path==='/')-Number(a.path==='/')||Number(!!b.path)-Number(!!a.path)||Number(!!a.path?.startsWith('/mnt/axon-disks/'))-Number(!!b.path?.startsWith('/mnt/axon-disks/'))).filter(v=>{
       const k=(v.uuid||v.device)+':'+v.majorMinor;if(seen.has(k))return false;seen.add(k);return true;
@@ -28,16 +31,16 @@
   }
   async function openVolume(id){
     let v=data?.volumes.find(v=>v.id===id);if(!v)return;
-    if(!v.path){const result=await api('/api/files/volumes/'+encodeURIComponent(id)+'/mount',{method:'POST',body:{}});await refresh();v=data.volumes.find(v=>v.path===result.path);}
+    if(!v.path){const result=await api('/api/files/volumes/'+encodeURIComponent(id)+'/mount',{method:'POST',body:{}});await refresh();v=data.volumes.find(v=>v.path===result.path)||data.volumes.find(v=>v.id===id);if(!v?.path&&result.path)v={...v,path:result.path};}
     if(!v?.path)return;
     if(dialog?.open)await browse(v.path);else window.AxonNavigation.go('/archivos?path='+encodeURIComponent(v.path));
   }
   function ensureDialog(){
     if(dialog)return;
     dialog=document.createElement('dialog');dialog.id='host-path-picker';dialog.className='host-path-picker';dialog.setAttribute('aria-labelledby','host-picker-title');
-    dialog.innerHTML=`<div class="host-picker-header"><h2 id="host-picker-title">Elegir carpeta</h2><button type="button" class="icon-btn" data-host-cancel aria-label="Cerrar selector">×</button></div><section data-host-disks aria-label="Discos disponibles"></section><form id="host-picker-location"><label for="host-picker-path">Ruta del servidor</label><div class="host-picker-location"><button type="button" class="btn-secondary" id="host-picker-up" aria-label="Carpeta superior">↑</button><input id="host-picker-path" autocomplete="off" spellcheck="false"><button class="btn-secondary" type="submit">Ir</button></div></form><p id="host-picker-status" role="status"></p><div id="host-picker-entries" class="host-picker-entries"></div><div class="host-picker-footer"><button type="button" class="btn-secondary" data-host-cancel>Cancelar</button><button type="button" class="btn-primary" id="host-picker-select">Elegir esta carpeta</button></div>`;
+    dialog.innerHTML=`<div class="host-picker-header"><h2 id="host-picker-title">Elegir carpeta</h2><button type="button" class="icon-btn" data-host-cancel aria-label="Cerrar selector">×</button></div><section data-host-disks aria-label="Discos disponibles"></section><form id="host-picker-location"><label for="host-picker-path">Ruta del servidor</label><div class="host-picker-location"><button type="button" class="btn-secondary" id="host-picker-up" aria-label="Carpeta superior">↑</button><input id="host-picker-path" autocomplete="off" spellcheck="false"><button class="btn-secondary" type="submit">Ir</button></div></form><div class="host-crumbs" id="host-picker-crumbs" aria-label="Ruta actual"></div><p id="host-picker-status" role="status"></p><div id="host-picker-entries" class="host-picker-entries"></div><div class="host-picker-footer"><button type="button" class="btn-secondary" data-host-cancel>Cancelar</button><button type="button" class="btn-primary" id="host-picker-select">Elegir esta carpeta</button></div>`;
     document.body.append(dialog);
-    dialog.addEventListener('close',()=>{generation++;const r=request;request=null;r?.resolve(chosen);chosen=null;});
+    dialog.addEventListener('close',()=>{generation++;const r=request;request=null;r?.resolve(chosen);chosen=null;const next=pickQueue.shift();if(next)next();});
     dialog.addEventListener('cancel',()=>{chosen=null;});
     dialog.querySelectorAll('[data-host-cancel]').forEach(b=>b.onclick=()=>dialog.close());
     dialog.querySelector('#host-picker-location').onsubmit=e=>{e.preventDefault();browse(dialog.querySelector('#host-picker-path').value);};
@@ -56,6 +59,9 @@
       const result=await api('/api/files?path='+encodeURIComponent(p||'~'),{fresh:true,signal:AbortSignal.timeout(35_000)});
       if(ticket!==generation||!dialog.open)return;
       folder=result.path;dialog.querySelector('#host-picker-path').value=folder;
+      const parts=folder.split('/').filter(Boolean);
+      dialog.querySelector('#host-picker-crumbs').innerHTML=`<button type="button" data-crumb="/" title="Raíz">/</button>`+parts.map((p,i)=>`<span>/</span><button type="button" data-crumb="${esc('/'+parts.slice(0,i+1).join('/'))}">${esc(p)}</button>`).join('');
+      dialog.querySelectorAll('#host-picker-crumbs [data-crumb]').forEach(b=>b.onclick=()=>browse(b.dataset.crumb));
       const entries=result.entries.filter(e=>e.type==='dir'||request?.mode==='file'&&e.type==='file'&&(!request.extensions||request.extensions.some(ext=>e.name.toLowerCase().endsWith(ext))));
       dialog.querySelector('#host-picker-entries').innerHTML=entries.map(e=>`<button type="button" data-host-entry="${esc(folder.replace(/\/$/,'')+'/'+e.name)}" data-kind="${esc(e.type)}"><span aria-hidden="true">${e.type==='dir'?'▸':'·'}</span>${esc(e.name)}</button>`).join('');
       const blocked=request?.writable&&result.volume?.readOnly;
@@ -63,8 +69,10 @@
       pickerStatus(blocked?'Este disco es de sólo lectura. Elegí un destino que permita escribir.':entries.length?'':request?.mode==='file'?'No hay archivos compatibles en esta carpeta.':'Esta carpeta está vacía.');
     }catch(e){if(ticket===generation)pickerStatus(e.message);}
   }
+  const pickQueue=[];
   async function pick(options={}){
-    ensureDialog();if(dialog.open)return null;
+    ensureDialog();
+    if(dialog.open||request){await new Promise(resolve=>pickQueue.push(resolve));return pick(options);}
     const promise=new Promise(resolve=>{request={...options,resolve};});chosen=null;folder='';
     dialog.querySelector('#host-picker-title').textContent=options.title||'Elegir carpeta';dialog.querySelector('#host-picker-select').hidden=options.mode==='file';dialog.showModal();
     render();refresh().catch(()=>{});browse(options.start||'~');return promise;
@@ -96,8 +104,8 @@
   document.getElementById('host-disks-open')?.addEventListener('click',async()=>{const p=await pick({title:'Explorar discos del servidor'});if(p)window.AxonNavigation.go('/archivos?path='+encodeURIComponent(p));});
   let queued=false;new MutationObserver(()=>{if(queued)return;queued=true;queueMicrotask(()=>{queued=false;bind();});}).observe(document.body,{childList:true,subtree:true});
   window.AxonStorage={pick,refresh,uniqueVolumes,get snapshot(){return data;}};
-  window.addEventListener('axon:navigate',()=>{bind();refresh().catch(()=>{});});
-  window.addEventListener('focus',()=>refresh().catch(()=>{}));
-  setInterval(()=>{if(!document.hidden)refresh().catch(()=>{});},12_000);
-  bind();refresh().catch(()=>{});
+  window.addEventListener('axon:navigate',()=>{bind();if(signedIn)refresh().catch(()=>{});});
+  window.addEventListener('focus',()=>{if(signedIn)refresh().catch(()=>{});});
+  setInterval(()=>{if(signedIn&&!document.hidden)refresh().catch(()=>{});},12_000);
+  bind();if(signedIn)refresh().catch(()=>{});
 })();

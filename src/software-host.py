@@ -632,6 +632,14 @@ def build_transaction(items):
     return tx
 
 
+def local_hook(req, row):
+    # Local recipes only run in place of user-scoped pnpm/bun globals; plan()
+    # must not advertise a hook that execute() would reject for other managers.
+    if row["manager"] in ["pnpm", "bun"] and row["scope"] == "user":
+        return req.get("hooks", {}).get(row["packageName"])
+    return None
+
+
 def plan(req):
     snapshot = scan({**req, "updates": True})
     found = {p["id"]: p for p in snapshot["installations"]}
@@ -651,11 +659,11 @@ def plan(req):
         items.append(row)
     groups = {}
     for row in items:
-        key = (row["manager"], row["scope"], row["user"], row["root"], row["id"] if row["manager"] in ["flatpak", "snap"] or req.get("hooks", {}).get(row["packageName"]) else "")
+        key = (row["manager"], row["scope"], row["user"], row["root"], row["id"] if row["manager"] in ["flatpak", "snap"] or local_hook(req, row) else "")
         groups.setdefault(key, []).append(row)
     transactions = [build_transaction(group) for group in groups.values()]
     for tx in transactions:
-        if len(tx["items"]) == 1 and req.get("hooks", {}).get(tx["items"][0]["packageName"]):
+        if len(tx["items"]) == 1 and local_hook(req, tx["items"][0]):
             tx["effects"] += " · Se ejecutará la receta local configurada para este paquete"
     return {"ok": True, "transactions": transactions, "createdAt": int(time.time() * 1000)}
 
@@ -711,7 +719,7 @@ def execute(req):
                 executable = tool(argv[0], ctx)
                 if not executable: raise ValueError("El gestor dejó de estar disponible")
                 argv[0] = executable
-            hook = req.get("hooks", {}).get(tx["items"][0]["packageName"]) if len(tx["items"]) == 1 else None
+            hook = local_hook(req, tx["items"][0]) if len(tx["items"]) == 1 else None
             if hook:
                 if tx["manager"] not in ["pnpm", "bun"] or tx["scope"] != "user": raise ValueError("Hook local fuera de su ámbito permitido")
                 print("Usando la receta local configurada para " + tx["items"][0]["name"], flush=True)

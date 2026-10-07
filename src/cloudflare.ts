@@ -10,6 +10,17 @@ const ZONE_ID = process.env.CLOUDFLARE_ZONE_ID;
 const ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID;
 const TUNNEL_ID = process.env.CLOUDFLARE_TUNNEL_ID;
 const CLOUDFLARED_CONFIG = process.env.CLOUDFLARED_CONFIG || '/etc/cloudflared/config.yml';
+const BASE_DOMAIN = process.env.BASE_DOMAIN || 'example.com';
+// Hostname of Axon's own tunnel route — never considered a stale domain route.
+const PANEL_HOSTNAME = `ports.${BASE_DOMAIN}`;
+const CF_TIMEOUT_MS = 10_000;
+
+// Everything that touches the Cloudflare API or the remote tunnel config
+// needs credentials + zone + tunnel ids — check once up front instead of
+// failing deep inside a mutation with a cryptic fetch error.
+export function cloudflareConfigured(): boolean {
+  return Boolean((CF_API_TOKEN || (CF_EMAIL && CF_API_KEY)) && ZONE_ID && ACCOUNT_ID && TUNNEL_ID);
+}
 
 interface CloudflareRecord {
   id: string;
@@ -57,6 +68,7 @@ export async function createDnsRecord(subdomain: string): Promise<{ success: boo
         content: `${TUNNEL_ID}.cfargotunnel.com`,
         proxied: true,
       }),
+      signal: AbortSignal.timeout(CF_TIMEOUT_MS),
     });
     const data = await response.json() as { success: boolean; result?: CloudflareRecord; errors?: { message: string }[] };
     if (!data.success) {
@@ -73,6 +85,7 @@ export async function deleteDnsRecord(recordId: string): Promise<{ success: bool
     const response = await fetch(`https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${recordId}`, {
       method: 'DELETE',
       headers: headers(),
+      signal: AbortSignal.timeout(CF_TIMEOUT_MS),
     });
     const data = await response.json() as { success: boolean; errors?: { message: string }[] };
     if (!data.success) {
@@ -88,7 +101,7 @@ export async function listDnsRecords(subdomain: string): Promise<CloudflareRecor
   try {
     const response = await fetch(
       `https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?name=${encodeURIComponent(subdomain)}`,
-      { headers: headers() }
+      { headers: headers(), signal: AbortSignal.timeout(CF_TIMEOUT_MS) }
     );
     const data = await response.json() as { success: boolean; result?: CloudflareRecord[] };
     if (!data.success) return [];
@@ -99,16 +112,24 @@ export async function listDnsRecords(subdomain: string): Promise<CloudflareRecor
 }
 
 export async function listAllDnsRecords(type?: string): Promise<CloudflareRecord[]> {
+  const out: CloudflareRecord[] = [];
   try {
-    const url = new URL(`https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records`);
-    url.searchParams.set('per_page', '100');
-    if (type) url.searchParams.set('type', type);
-    const response = await fetch(url.toString(), { headers: headers() });
-    const data = await response.json() as { success: boolean; result?: CloudflareRecord[]; result_info?: { total_pages?: number } };
-    if (!data.success) return [];
-    return data.result || [];
+    // Zones with >100 records need pagination — reading only page 1 left
+    // dnsRecordId unset on imports and orphaned DNS records on delete.
+    for (let page = 1; page <= 50; page++) {
+      const url = new URL(`https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records`);
+      url.searchParams.set('per_page', '100');
+      url.searchParams.set('page', String(page));
+      if (type) url.searchParams.set('type', type);
+      const response = await fetch(url.toString(), { headers: headers(), signal: AbortSignal.timeout(CF_TIMEOUT_MS) });
+      const data = await response.json() as { success: boolean; result?: CloudflareRecord[]; result_info?: { total_pages?: number } };
+      if (!data.success) return out;
+      out.push(...(data.result || []));
+      if (page >= (data.result_info?.total_pages ?? 1) || !(data.result || []).length) break;
+    }
+    return out;
   } catch {
-    return [];
+    return out;
   }
 }
 
@@ -131,7 +152,7 @@ export async function getRemoteTunnelConfig(): Promise<{ success: boolean; confi
   try {
     const response = await fetch(
       `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/cfd_tunnel/${TUNNEL_ID}/configurations`,
-      { headers: headers() }
+      { headers: headers(), signal: AbortSignal.timeout(CF_TIMEOUT_MS) }
     );
     const data = await response.json() as { success: boolean; result?: TunnelConfig; errors?: { message: string }[] };
     if (!data.success) {
@@ -151,6 +172,7 @@ async function updateRemoteTunnelConfig(ingress: TunnelIngress[]): Promise<{ suc
         method: 'PUT',
         headers: headers(),
         body: JSON.stringify({ config: { ingress } }),
+        signal: AbortSignal.timeout(CF_TIMEOUT_MS),
       }
     );
     const data = await response.json() as { success: boolean; errors?: { message: string }[]; result?: TunnelConfig };
@@ -171,12 +193,19 @@ export async function syncCloudflaredRoutes(domains: DomainMapping[]): Promise<{
     }
 
     const managedHostnames = new Set(domains.map((d) => d.fullDomain));
+    const managedSuffix = `.${BASE_DOMAIN}`;
     let ingress = remote.config.config.ingress || [];
 
-    // Remove stale managed routes
+    // Remove managed routes: current domain hostnames are re-added below
+    // (update path), and any OTHER route under the base domain is stale —
+    // it belonged to a since-deleted domain and would keep proxying to a
+    // dead localhost:port. Keep the panel's own route and anything outside
+    // the base domain (user-managed tunnels).
     ingress = ingress.filter((entry) => {
       if (!entry.hostname) return true;
-      return !managedHostnames.has(entry.hostname);
+      if (managedHostnames.has(entry.hostname)) return false;
+      if (entry.hostname !== PANEL_HOSTNAME && entry.hostname.endsWith(managedSuffix)) return false;
+      return true;
     });
 
     // Add/update managed routes before the catch-all

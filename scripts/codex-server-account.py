@@ -22,7 +22,13 @@ import subprocess
 import sys
 import time
 
-import websockets
+try:
+    import websockets
+except ImportError:
+    # A missing host module must not leave a raw traceback or a status file
+    # stuck in 'pending'; exit cleanly so the caller sees a plain failure.
+    print('Falta el módulo websockets en el Python del host', file=sys.stderr)
+    sys.exit(1)
 
 
 class Desktop:

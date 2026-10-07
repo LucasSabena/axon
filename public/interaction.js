@@ -3,6 +3,8 @@
   'use strict';
   let source = null;
   const busy = new WeakMap();
+  // crypto.randomUUID is secure-context only; plain-HTTP LAN deploys need a fallback.
+  const uid = () => crypto.randomUUID?.() ?? Math.random().toString(36).slice(2) + Date.now().toString(36);
   function track(button) {
     if (!button) return () => {};
     let state = busy.get(button);
@@ -89,7 +91,7 @@
       modal.setAttribute('role', 'dialog'); modal.setAttribute('aria-modal', 'true');
       const title = content.querySelector('h3');
       if (title) {
-        title.id ||= `dialog-title-${crypto.randomUUID()}`;
+        title.id ||= `dialog-title-${uid()}`;
         modal.setAttribute('aria-labelledby', title.id);
       }
       modal.style.zIndex = String(1100 + stack.length);

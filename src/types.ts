@@ -197,6 +197,7 @@ export interface Job {
   log: string;
   startedAt: string;
   endedAt?: string;
+  error?: string;
 }
 
 export interface KnownService {
@@ -209,6 +210,8 @@ export interface AppConfig {
     username: string;
     passwordHash: string;
     totpSecret?: string;
+    // SHA-256 hashes de los códigos de recuperación de un solo uso (2FA).
+    totpRecovery?: string[];
   };
   domains: DomainMapping[];
   // Domains the user deliberately deleted — import never brings them back.

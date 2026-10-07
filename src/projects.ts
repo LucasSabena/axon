@@ -1,6 +1,5 @@
 import { resolveHostPath, projectSearchRoots } from './host-storage';
-import { lstat, stat } from 'node:fs/promises';
-import { readFile, writeFile, readdir } from 'fs/promises';
+import { lstat, readFile, readdir, readlink } from 'node:fs/promises';
 import * as path from 'path';
 import {
   hostDirEntries,
@@ -10,7 +9,7 @@ import {
   hostSpawnDetached,
   hostExec,
 } from './host';
-import { killProcessTree, listPortProcesses } from './ports';
+import { killProcessTree, listPortProcesses, procStartTime } from './ports';
 import type { AppConfig, Project } from './types';
 
 // POSIX single-quote escaping: 'foo'bar' -> 'foo'"'"'bar'. JSON.stringify
@@ -187,7 +186,7 @@ function withHost(command: string, script: string): string {
 }
 
 function generateId(): string {
-  return Math.random().toString(36).slice(2, 12);
+  return crypto.randomUUID();
 }
 
 // Match process cwd to a project dir — ancestor-aware so monorepo packages match.
@@ -207,9 +206,12 @@ export async function refreshRunning(): Promise<Project[]> {
     if (match) {
       p.running = { pid: match.pid, ports: match.ports, startedAt: match.startedAt };
     } else if (p.running) {
-      // Process may exist but no listener yet — check pid alive
-      const alive = p.running.pid > 0 && (await hostExec(`kill -0 ${p.running.pid}`, { timeoutMs: 5000 })).ok;
-      if (!alive) p.running = undefined;
+      // Process may exist but no listener yet — check pid alive. kill -0 alone
+      // keeps a stale record alive after a host restart recycles the pid, so
+      // also require the live process to run inside the project directory.
+      const pid = p.running.pid;
+      const cwd = pid > 0 ? await readlink(`/proc/${pid}/cwd`).catch(() => '') : '';
+      if (!cwdMatches(cwd, p.cwd)) p.running = undefined;
     }
   }));
   return projects;
@@ -235,8 +237,10 @@ export async function startProject(project: Project): Promise<{ ok: boolean; err
     }
   }
 
-  await hostExec(`mkdir -p ${shq(HOST_LOG_DIR)}`, { user: 'user', timeoutMs: 10_000 });
-  const logFile = path.join(HOST_LOG_DIR, `${project.name.replace(/[^\w.-]+/g, '-')}-${Date.now()}.log`);
+  await hostExec(`mkdir -p ${shq(HOST_LOG_DIR)} && chmod 700 ${shq(HOST_LOG_DIR)}`, { user: 'user', timeoutMs: 10_000 });
+  // Keyed by project id, not name — two projects sharing a name (or one
+  // renamed) must never read each other's logs.
+  const logFile = path.join(HOST_LOG_DIR, `${String(project.id).replace(/[^\w.-]+/g, '-')}-${Date.now()}.log`);
   const res = await hostSpawnDetached(command, project.cwd, logFile, 'user');
   if (!res.ok) {
     return { ok: false, error: `No se pudo lanzar el proceso en el host: ${res.error}`, command };
@@ -262,9 +266,27 @@ export async function startProject(project: Project): Promise<{ ok: boolean; err
 export async function stopProject(project: Project): Promise<{ ok: boolean; error?: string }> {
   const processes = await listPortProcesses().catch(() => []);
   const proc = processes.find((p) => p.pid > 0 && cwdMatches(p.cwd, project.cwd));
-  const pid = proc?.pid || project.running?.pid;
+  let pid = proc?.pid;
+  let expectedStart: number | undefined;
+  if (!pid && project.running?.pid) {
+    // The persisted pid is only a hint: after a restart it may have been
+    // recycled by an unrelated (possibly system) process. Never signal a pid
+    // whose live cwd is outside the project directory — and pin the process
+    // incarnation so a recycle between this check and the kill is refused.
+    const candidate = project.running.pid;
+    if (candidate > 0) {
+      const [cwd, stat] = await Promise.all([
+        readlink(`/proc/${candidate}/cwd`).catch(() => ''),
+        readFile(`/proc/${candidate}/stat`, 'utf-8').catch(() => ''),
+      ]);
+      if (cwdMatches(cwd, project.cwd)) {
+        pid = candidate;
+        expectedStart = procStartTime(stat) || undefined;
+      }
+    }
+  }
   if (!pid) return { ok: false, error: 'El proyecto no está corriendo' };
-  const res = await killProcessTree(pid);
+  const res = await killProcessTree(pid, expectedStart);
   if (!res.ok) return { ok: false, error: res.error || 'No se pudo detener' };
   project.running = undefined;
   await saveProjects();
@@ -293,20 +315,34 @@ export async function installDeps(project: Project): Promise<{ ok: boolean; outp
 
 export async function projectLogs(project: Project, tail = 200): Promise<string[]> {
   try {
-    const prefix = project.name.replace(/[^\w.-]+/g, '-');
+    const lines = Number.isFinite(tail) ? Math.min(2000, Math.max(1, Math.trunc(tail))) : 200;
+    // Primary key is the project id; the name prefix is only a fallback for
+    // logs written before the id-keyed naming existed.
+    const prefixes = [
+      String(project.id).replace(/[^\w.-]+/g, '-'),
+      project.name.replace(/[^\w.-]+/g, '-'),
+    ];
     const dirs = [hostToContainer(HOST_LOG_DIR), LEGACY_LOG_DIR];
-    const files: string[] = [];
+    // Files are '<prefix>-<epoch ms>.log'; requiring the timestamp stops
+    // prefixes sharing a leading dash ('web' vs 'web-app') from mixing.
+    // byPrefix[0] = id-keyed (authoritative); [1] = legacy name-keyed —
+    // used only when the project has no id-keyed log at all, so homonymous
+    // projects never read each other's files.
+    const byPrefix: { path: string; at: number }[][] = [[], []];
     for (const d of dirs) {
       for (const f of await readdir(d).catch(() => [] as string[])) {
-        if (f.startsWith(prefix)) files.push(path.join(d, f));
+        const i = prefixes.findIndex((p) => f.startsWith(p + '-'));
+        const stamp = i >= 0 ? f.slice(prefixes[i].length + 1) : '';
+        if (/^\d+\.log$/.test(stamp)) byPrefix[i].push({ path: path.join(d, f), at: parseInt(stamp, 10) });
       }
     }
-    files.sort();
-    const latest = files[files.length - 1];
+    const files = byPrefix[0].length ? byPrefix[0] : byPrefix[1];
+    files.sort((a, b) => a.at - b.at);
+    const latest = files.at(-1)?.path;
     if (!latest) return [];
     // Read through the /hostfs mount directly — the log lives on the host.
     const content = await readFile(latest, 'utf-8');
-    return content.split('\n').slice(-tail);
+    return content.split('\n').slice(-lines);
   } catch {
     return [];
   }

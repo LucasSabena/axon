@@ -2,7 +2,7 @@ import { initHostStorage, resolveHostPath, hostVolumes, availableStorage } from 
 import { $ } from 'bun';
 import { Hono } from 'hono';
 import { browserWriteGuard, requestOriginAllowed, safePairTarget } from './browser-security';
-import { serveStatic } from 'hono/bun';
+import { serveStatic, getConnInfo } from 'hono/bun';
 import { compress } from 'hono/compress';
 import { readFile, writeFile, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
@@ -20,16 +20,19 @@ import {
 } from './auth';
 import { loadConfig, saveConfig } from './config';
 import { domainsForPorts, domainsForProject } from './domain-associations';
-import { validateSettings } from './settings-validation';
+import { validateSettings, isForbiddenWebhookHost, maskWebhookUrl } from './settings-validation';
 import { getServerStats, getServerHosts } from './stats';
-import { HOST_USER, setHostUser, hostExec, hostToContainer, hostSpawnInteractive } from './host';
+import { HOST_USER, setHostUser, hostExec, hostToContainer, hostSpawnInteractive, killHostProc } from './host';
 import {
   configurePorts,
   listPortProcesses,
   killPlan,
   killProcessTree,
   getProcessDetail,
+  maskCmd,
+  maskArgv,
 } from './ports';
+import { isCriticalUnit } from './systemd-units';
 import { getJob, listJobs, runJob, setJobCompletionHook } from './jobs';
 import {
   getPrograms,
@@ -59,6 +62,8 @@ import {
   containerStats,
   containerLogs,
   stopContainer,
+  dockerDaemonError,
+  isOwnContainer,
 } from './docker';
 import {
   createDnsRecord,
@@ -68,10 +73,11 @@ import {
   listAllDnsRecords,
   getRemoteTunnelConfig,
   purgeCachePrefixes,
+  cloudflareConfigured,
 } from './cloudflare';
 import type { AppConfig, DomainMapping, DomainStatus, Project } from './types';
 import { notify, setNotifyUrl, notifyConfigured } from './notify';
-import { generateTotpSecret, verifyTotp, totpUri } from './totp';
+import { generateTotpSecret, verifyTotp, totpUri, generateRecoveryCodes, hashRecoveryCode, consumeRecoveryCode } from './totp';
 import { loadHeartbeats, recordHeartbeat, lastState, allHeartbeats, uptimePct, pruneHeartbeats } from './heartbeats';
 import { registerFilesRoutes } from './files';
 import { registerNavigationRoutes } from './navigation';
@@ -140,6 +146,23 @@ initHostStorage(maintenanceQaRoot||undefined);
 initProjects(config, saveConfig);
 await loadHeartbeats();
 await loadEvents();
+{
+  // A persisted webhook predating the reserved-host guard would load unchecked;
+  // re-validate at boot so SSRF targets can't sneak in via config.json edits.
+  const nu = config.settings.notifyUrl;
+  if (nu) {
+    try {
+      const u = new URL(nu);
+      if (!['http:', 'https:'].includes(u.protocol) || isForbiddenWebhookHost(u.hostname)) {
+        console.warn('[notify] notifyUrl ignorada: apunta a una dirección reservada');
+        config.settings.notifyUrl = '';
+      }
+    } catch {
+      console.warn('[notify] notifyUrl ignorada: URL inválida');
+      config.settings.notifyUrl = '';
+    }
+  }
+}
 setNotifyUrl(config.settings.notifyUrl, config.settings.notifyProvider);
 setSessionHooks({ isRevoked, touch: touchSession });
 
@@ -239,11 +262,23 @@ const loginGuard = new Map<string, LoginGuardState>();
 const globalLoginFails: number[] = [];
 let globalLockUntil = 0;
 
+// Forwarded-IP headers are honored only when the TCP peer is a trusted proxy
+// (cloudflared / a reverse proxy on this host, or AXON_TRUSTED_PROXIES). The
+// server binds 0.0.0.0 — a direct LAN client could otherwise spoof any IP,
+// evading the per-IP lockout or locking the real admin's address out.
+const TRUSTED_PROXIES = new Set(
+  ['127.0.0.1', '::1', '::ffff:127.0.0.1',
+    ...(process.env.AXON_TRUSTED_PROXIES || '').split(',').map((s) => s.trim())].filter(Boolean)
+);
+
 function clientIp(c: any): string {
+  let peer = '';
+  try { peer = getConnInfo(c).remote.address || ''; } catch { /* non-Bun env (tests) */ }
+  if (!peer || !TRUSTED_PROXIES.has(peer)) return peer || 'unknown';
   return (
     c.req.header('cf-connecting-ip') ||
     c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ||
-    'unknown'
+    peer
   );
 }
 
@@ -305,14 +340,28 @@ function noteLoginFail(c: any, username: string): void {
   }
 }
 
-app.post('/api/login', async (c) => {
+// Shared lockout response — login and the credential-management endpoints
+// below draw from the same failure counters.
+function loginLocked(c: any): Response | null {
   const lockMs = loginLockRemaining(c);
-  if (lockMs > 0) {
-    const sec = Math.ceil(lockMs / 1000);
-    c.header('Retry-After', String(sec));
-    return fail(c, 429, `Demasiados intentos fallidos — probá en ${Math.max(1, Math.ceil(sec / 60))} min`);
-  }
-  const { username, password, code } = await c.req.json<{ username: string; password: string; code?: string }>().catch(() => ({ username: '', password: '', code: undefined as string | undefined }));
+  if (!lockMs) return null;
+  const sec = Math.ceil(lockMs / 1000);
+  c.header('Retry-After', String(sec));
+  return fail(c, 429, `Demasiados intentos fallidos — probá en ${Math.max(1, Math.ceil(sec / 60))} min`);
+}
+
+app.post('/api/login', async (c) => {
+  const locked = loginLocked(c);
+  if (locked) return locked;
+  // Public route: cap the body before parsing — c.req.json() would buffer
+  // the whole payload in memory.
+  if (Number(c.req.header('content-length') || 0) > 8192) return fail(c, 413, 'Solicitud demasiado grande');
+  const rawBody = await c.req.text();
+  if (rawBody.length > 8192) return fail(c, 413, 'Solicitud demasiado grande');
+  const parsed = (() => { try { const v = JSON.parse(rawBody); return v && typeof v === 'object' ? v : {}; } catch { return {}; } })() as { username?: unknown; password?: unknown; code?: unknown };
+  const username = typeof parsed.username === 'string' ? parsed.username : '';
+  const password = typeof parsed.password === 'string' ? parsed.password : '';
+  const code = typeof parsed.code === 'string' ? parsed.code : undefined;
   // Always run PBKDF2 — short-circuiting on a wrong username would leak via
   // timing which usernames exist.
   const passOk = await verifyPassword(password, config.auth.passwordHash);
@@ -321,13 +370,19 @@ app.post('/api/login', async (c) => {
     // Second factor — a wrong/missing code counts as a failed login too, so
     // an attacker holding the password can't grind 6-digit codes freely.
     valid = verifyTotp(config.auth.totpSecret, code || '');
+    if (!valid && consumeRecoveryCode(config.auth.totpRecovery, code || '')) {
+      valid = true;
+      await saveConfig(config);
+      recordEvent('auth', `Login con código de recuperación — quedan ${config.auth.totpRecovery!.length}`);
+      notify('Código de recuperación usado', `Quedan ${config.auth.totpRecovery!.length}. Si no fuiste vos, revisá tu 2FA en Configuración.`, 4).catch(() => {});
+    }
   }
   if (!valid) {
     noteLoginFail(c, username);
-    const msg = passOk && username === config.auth.username && config.auth.totpSecret
-      ? 'Código de verificación inválido'
-      : 'Credenciales inválidas';
-    return fail(c, 401, msg);
+    // Same message whether the password or the TOTP code was wrong — a
+    // distinct "bad code" error would confirm password guesses. The frontend
+    // learns totpEnabled from /api/me, not from this error.
+    return fail(c, 401, 'Credenciales inválidas');
   }
   loginGuard.delete(clientIp(c));
   recordEvent('auth', `Login exitoso desde ${clientIp(c)}`);
@@ -348,11 +403,13 @@ app.post('/api/logout', async (c) => {
 
 app.get('/api/me', async (c) => {
   const session = await getSession(c);
-  if (!session) return c.json({ authenticated: false, username: null, totpEnabled: !!config.auth.totpSecret });
+  // totpEnabled is auth state — leaking it pre-auth tells an attacker
+  // whether the account has a second factor before guessing anything.
+  if (!session) return c.json({ authenticated: false, username: null });
   // A revoked token must report as logged out, not half-authenticated.
   const token = c.req.header('cookie')?.match(/(?:^|;\s*)axon_session=([^;]+)/)?.[1];
   if (token && isRevoked(sessionIdForToken(token))) {
-    return c.json({ authenticated: false, username: null, totpEnabled: !!config.auth.totpSecret });
+    return c.json({ authenticated: false, username: null });
   }
   return c.json({ authenticated: true, username: session.username, totpEnabled: !!config.auth.totpSecret, scanIntervalMs: config.settings.scanIntervalMs, capabilities: ['optimizer', 'optimizer-idle-guard'] });
 });
@@ -436,40 +493,68 @@ app.use('/p/*', requireAuth);
 const totpPending = new Map<string, { secret: string; exp: number }>();
 const TOTP_PENDING_TTL_MS = 10 * 60 * 1000;
 
+// These endpoints share the login guard: a stolen session must not be able
+// to grind 6-digit codes or enroll an attacker authenticator.
 app.post('/api/auth/totp/setup', (c) => {
+  const locked = loginLocked(c);
+  if (locked) return locked;
   const user = String(c.get('user') || 'user');
   const secret = generateTotpSecret();
   totpPending.set(user, { secret, exp: Date.now() + TOTP_PENDING_TTL_MS });
   return c.json({ ok: true, secret, uri: totpUri(secret, user) });
 });
 
+// Re-auth gate for enrolling/removing 2FA — a session cookie alone is not
+// enough to change the second factor. Accepts the current password, or a
+// code from the existing secret when rotating devices.
+async function totpReauth(body: { code?: string; password?: string }): Promise<boolean> {
+  return (
+    (await verifyPassword(String(body.password || ''), config.auth.passwordHash)) ||
+    (config.auth.totpSecret ? verifyTotp(config.auth.totpSecret, String(body.code || '')) : false)
+  );
+}
+
 app.post('/api/auth/totp/enable', async (c) => {
+  const locked = loginLocked(c);
+  if (locked) return locked;
   const user = String(c.get('user') || 'user');
-  const { code } = await c.req.json<{ code?: string }>().catch(() => ({ code: '' }));
+  const body = await c.req.json<{ code?: string; password?: string }>().catch(() => ({} as { code?: string; password?: string }));
+  if (!(await totpReauth(body))) {
+    noteLoginFail(c, user);
+    return fail(c, 401, 'Reautenticación requerida — ingresá tu contraseña actual');
+  }
   const pending = totpPending.get(user);
   if (!pending || pending.exp < Date.now()) {
     totpPending.delete(user);
     return fail(c, 400, 'El setup venció — generá un QR nuevo');
   }
-  if (!verifyTotp(pending.secret, code || '')) return fail(c, 401, 'Código inválido');
+  if (!verifyTotp(pending.secret, String(body.code || ''))) {
+    noteLoginFail(c, user);
+    return fail(c, 401, 'Código inválido');
+  }
   config.auth.totpSecret = pending.secret;
+  const recovery = generateRecoveryCodes();
+  config.auth.totpRecovery = recovery.map(hashRecoveryCode);
   totpPending.delete(user);
   await saveConfig(config);
   recordEvent('auth', '2FA activado');
   notify('2FA activado', 'Los próximos logins van a pedir el código del autenticador.', 3).catch(() => {});
-  return c.json({ ok: true });
+  return c.json({ ok: true, recovery });
 });
 
 // Password change — there is no recovery flow, so the current password is
 // always required and every other session is revoked on success (a stolen
 // cookie can't outlive the rotation). CLI fallback: `axon reset-password`.
 app.post('/api/auth/password', async (c) => {
+  const locked = loginLocked(c);
+  if (locked) return locked;
   const body = await c.req.json<{ current?: string; password?: string }>().catch(() => ({} as { current?: string; password?: string }));
   const password = typeof body.password === 'string' ? body.password : '';
   if (password.length < 8 || password.length > 200) {
     return fail(c, 400, 'La contraseña nueva necesita al menos 8 caracteres.');
   }
   if (!(await verifyPassword(String(body.current || ''), config.auth.passwordHash))) {
+    noteLoginFail(c, String(c.get('user') || 'user'));
     recordEvent('auth', 'Cambio de contraseña rechazado — la actual no coincide');
     return fail(c, 401, 'La contraseña actual no es correcta.');
   }
@@ -484,11 +569,17 @@ app.post('/api/auth/password', async (c) => {
 });
 
 app.post('/api/auth/totp/disable', async (c) => {
+  const locked = loginLocked(c);
+  if (locked) return locked;
   const user = String(c.get('user') || 'user');
-  const { code } = await c.req.json<{ code?: string }>().catch(() => ({ code: '' }));
+  const body = await c.req.json<{ code?: string; password?: string }>().catch(() => ({} as { code?: string; password?: string }));
   if (!config.auth.totpSecret) return fail(c, 400, '2FA no está activado');
-  if (!verifyTotp(config.auth.totpSecret, code || '')) return fail(c, 401, 'Código inválido');
+  if (!(await totpReauth(body))) {
+    noteLoginFail(c, user);
+    return fail(c, 401, 'Código o contraseña inválidos');
+  }
   delete config.auth.totpSecret;
+  delete config.auth.totpRecovery;
   await saveConfig(config);
   recordEvent('auth', `2FA desactivado por ${user}`);
   notify('2FA desactivado', 'El login vuelve a pedir solo usuario y contraseña.', 4).catch(() => {});
@@ -511,14 +602,31 @@ app.get('/pair', async (c) => {
   const html = (msg: string) =>
     c.html(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><body style="background:#0b0e14;color:#e6e9ef;font-family:system-ui;display:grid;place-items:center;height:100vh;margin:0"><div style="text-align:center"><h2>${msg}</h2><p style="opacity:.6">Volvé al dashboard y generá uno nuevo.</p></div>`, 410);
   if (!t || !exp || Date.now() > exp) return html('Este link de vinculación venció o no es válido.');
+  // A top-level GET must never mint a session — an authed attacker could
+  // otherwise force-login a victim's browser with a bare <img>/link. The
+  // session is created by the explicit same-origin POST below. The token is
+  // consumed there, not here, so loading this page doesn't burn it.
+  // `next` lands verbatim in page JS (it only ever feeds safePairTarget).
+  const payload = JSON.stringify({ t, next: c.req.query('next') || '/' }).replace(/</g, '\\u003c');
+  c.header('X-Frame-Options', 'DENY');
+  return c.html(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><body style="background:#0b0e14;color:#e6e9ef;font-family:system-ui;display:grid;place-items:center;height:100vh;margin:0"><div style="text-align:center"><h2>Vincular este dispositivo</h2><p style="opacity:.6">Se va a iniciar sesión en AXON desde este navegador.</p><button id="go" style="font:inherit;padding:.7rem 1.6rem;border-radius:10px;border:0;background:#3b82f6;color:#fff;cursor:pointer">Vincular</button><p id="err" style="color:#f87171"></p></div><script>var P=${payload},b=document.getElementById('go'),e=document.getElementById('err');b.onclick=async function(){b.disabled=true;try{var r=await fetch('/pair',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(P)}),j=await r.json();if(j.ok){location.href=j.next||'/';return;}e.textContent=j.error||'No se pudo vincular';}catch(x){e.textContent='Sin conexión';}b.disabled=false};</script>`);
+});
+
+app.post('/pair', async (c) => {
+  // Same-origin only — a cross-site form/fetch must not mint a session into
+  // the victim's browser (forced-login CSRF works over POST too).
+  if (!requestOriginAllowed(c.req.raw)) return fail(c, 403, 'El origen de esta acción no está permitido.');
+  const body = await c.req.json<{ t?: string; next?: string }>().catch(() => ({} as { t?: string; next?: string }));
+  const t = String(body.t || '');
+  const exp = pairTokens.get(t);
+  if (!t || !exp || Date.now() > exp) return fail(c, 410, 'Este link de vinculación venció o no es válido.');
   pairTokens.delete(t);
   const token = await createSession('paired-device');
   setSessionCookie(c, token);
   recordSession(token, 'paired-device', c.req.header('user-agent') || '');
   // Optional in-app target after pairing (e.g. /p/4321/ for the embedded
   // browser) — same-origin paths only, never an open redirect.
-  const next = c.req.query('next') || '/';
-  return c.redirect(safePairTarget(next));
+  return c.json({ ok: true, next: safePairTarget(String(body.next || '/')) });
 });
 
 // ---------- Ports (core) ----------
@@ -558,19 +666,19 @@ app.get('/api/ports', async (c) => {
 
 app.get('/api/ports/:pid/plan', async (c) => {
   const pid = parseInt(c.req.param('pid'), 10);
-  const plan = await killPlan(pid);
+  const plan = await killPlan(pid, config.domains);
   if (!plan) return fail(c, 404, 'El proceso ya no existe');
   return c.json({ ok: true, plan });
 });
 
 app.post('/api/ports/:pid/kill', async (c) => {
   const pid = parseInt(c.req.param('pid'), 10);
-  const plan = await killPlan(pid);
+  const plan = await killPlan(pid, config.domains);
   if (!plan) return fail(c, 404, 'El proceso ya no existe');
   if (plan.blocked) return fail(c, 403, `No se puede cerrar: ${plan.blocked}`);
   const result = await killProcessTree(pid);
   if (!result.ok) return fail(c, 500, 'No se pudo cerrar el proceso', { detail: result.error });
-  return c.json({ ok: true, killed: result.killed });
+  return c.json({ ok: true, killed: result.killed, skipped: result.skipped });
 });
 
 // Stop a systemd unit that supervises a process — the only way to really
@@ -581,8 +689,15 @@ app.post('/api/systemd/stop', async (c) => {
   const unit = String(body.unit || '');
   const scope = body.scope === 'system' ? 'system' : 'user';
   const disable = body.disable === true;
-  if (!/^[A-Za-z0-9_.@:-]+\.(service|socket|timer|scope)$/.test(unit)) {
+  // First char must be alphanumeric — a leading '-' reaches systemctl as a
+  // getopt flag, not a unit name.
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.@:-]*\.(service|socket|timer|scope)$/.test(unit)) {
     return fail(c, 400, 'Nombre de unidad inválido');
+  }
+  // Stopping container/network/ssh infrastructure takes down the host, every
+  // container (Axon included) and/or the only way back in — refuse here.
+  if (isCriticalUnit(unit)) {
+    return fail(c, 403, 'Esa unidad es crítica para el sistema; no se puede detener desde Axon');
   }
   const action = disable ? 'disable --now' : 'stop';
   const cmd = scope === 'user'
@@ -602,22 +717,6 @@ app.get('/api/ports/:pid/detail', async (c) => {
   const detail = await getProcessDetail(pid);
   if (!detail) return fail(c, 404, 'El proceso ya no existe');
   return c.json({ ok: true, detail });
-});
-
-app.get('/api/ports/health', async (c) => {
-  const port = parseInt(c.req.query('port') || '', 10);
-  if (!port) return fail(c, 400, 'Falta port');
-  const proto = [443, 8443, 9443].includes(port) ? 'https' : 'http';
-  try {
-    const res = await fetch(`${proto}://127.0.0.1:${port}/`, {
-      signal: AbortSignal.timeout(2500),
-      redirect: 'manual',
-    });
-    return c.json({ ok: true, status: res.status, responds: true });
-  } catch (err: any) {
-    const code = err?.cause?.code || err?.code || '';
-    return c.json({ ok: true, responds: false, detail: code || String(err).slice(0, 200) });
-  }
 });
 
 // ---------- Programs / updater ----------
@@ -827,23 +926,58 @@ app.post('/api/projects/detect', async (c) => {
   return c.json({ ok: true, projects: await refreshRunning() });
 });
 
+const PROJECT_TYPES = new Set(['node', 'bun', 'python', 'rust', 'go', 'static', 'other']);
+const PROJECT_PMS = new Set(['npm', 'pnpm', 'yarn', 'bun']);
+
 app.post('/api/projects', async (c) => {
   const body = await c.req.json<Partial<Project>>().catch(() => ({} as Partial<Project>));
-  if (!body.name || !body.cwd) {
-    return fail(c, 400, 'Faltan campos: name, cwd');
+  if (typeof body.name !== 'string' || !body.name.trim() || body.name.length > 128) {
+    return fail(c, 400, 'Nombre de proyecto inválido');
   }
-  body.cwd=await resolveHostPath(body.cwd,{directory:true});
+  if (typeof body.cwd !== 'string' || !body.cwd) {
+    return fail(c, 400, 'Falta la carpeta del proyecto (cwd)');
+  }
+  if (body.command !== undefined && (typeof body.command !== 'string' || body.command.length > 2000)) {
+    return fail(c, 400, 'Comando inválido');
+  }
+  if (body.port !== undefined && (!Number.isInteger(body.port) || body.port < 1 || body.port > 65535)) {
+    return fail(c, 400, 'Puerto inválido (1-65535)');
+  }
+  if (body.type !== undefined && !PROJECT_TYPES.has(body.type)) {
+    return fail(c, 400, 'Tipo de proyecto inválido');
+  }
+  if (body.packageManager !== undefined && !PROJECT_PMS.has(body.packageManager)) {
+    return fail(c, 400, 'Gestor de paquetes inválido');
+  }
+  if (body.framework !== undefined && (typeof body.framework !== 'string' || body.framework.length > 64)) {
+    return fail(c, 400, 'Framework inválido');
+  }
+  try {
+    body.cwd = await resolveHostPath(body.cwd, { directory: true });
+  } catch (e) {
+    if (e instanceof MaintenanceError) return e.getResponse();
+    return fail(c, 400, 'No se pudo validar la carpeta del proyecto');
+  }
   const existing = body.id ? getProjectById(body.id) : undefined;
+  // Exempt ids that already exist: a legacy/manual id (hand-edited config or
+  // pre-validation API) must stay editable — the XSS vector is closed at
+  // render, and a *new* non-conforming id is still rejected.
+  if (body.id !== undefined && !existing && (typeof body.id !== 'string' || !/^[a-z0-9-]{1,64}$/.test(body.id))) {
+    return fail(c, 400, 'ID de proyecto inválido');
+  }
+  // Editing without a field must PRESERVE it — the UI posts the form as-is,
+  // so absent keys would otherwise wipe detected type/framework/pm.
   const project: Project = {
-    id: existing?.id || body.id || Math.random().toString(36).slice(2, 12),
-    name: body.name,
+    id: existing?.id || body.id || crypto.randomUUID(),
+    name: body.name.trim(),
     cwd: body.cwd,
-    command: body.command,
-    packageManager: body.packageManager,
-    type: body.type || 'other',
-    framework: body.framework,
-    port: body.port,
+    command: body.command ?? existing?.command,
+    packageManager: body.packageManager ?? existing?.packageManager,
+    type: body.type ?? existing?.type ?? 'other',
+    framework: body.framework ?? existing?.framework,
+    port: body.port ?? existing?.port,
     autoDetect: existing?.autoDetect ?? false,
+    running: existing?.running,
   };
   const others = getProjects().filter((p) => p.id !== project.id);
   others.push(project);
@@ -872,7 +1006,12 @@ app.post('/api/projects/:id/start', async (c) => {
 app.post('/api/projects/:id/install', async (c) => {
   const project = getProjectById(c.req.param('id'));
   if (!project) return fail(c, 404, 'Proyecto no encontrado');
-  await resolveHostPath(project.cwd,{directory:true});
+  try {
+    await resolveHostPath(project.cwd, { directory: true });
+  } catch (e) {
+    if (e instanceof MaintenanceError) return e.getResponse();
+    return fail(c, 400, 'No se pudo validar la carpeta del proyecto');
+  }
   const job = runJob(`install ${project.name}`, [{
     label: installCommand(project),
     cmd: `cd ${shq(project.cwd)} && ${installCommand(project)}`,
@@ -905,10 +1044,14 @@ app.get('/api/docker', async (c) => {
       (d) => d.processType === 'docker' && d.projectName === container.names.split(',')[0] && container.publicPorts.includes(d.port)
     );
   }
-  return c.json({ ok: true, containers });
+  // daemonError distinguishes "daemon caído" de "sin contenedores" —
+  // listContainers returns [] in both cases otherwise.
+  return c.json({ ok: true, containers, daemonError: dockerDaemonError() });
 });
 
 app.post('/api/docker/:id/stop', async (c) => {
+  const held = await composeOpsGuard();
+  if (held) return fail(c, 409, held);
   const result = await stopContainer(c.req.param('id'));
   if (!result.ok) return fail(c, 500, 'No se pudo detener el contenedor', { detail: result.error });
   return c.json({ ok: true });
@@ -927,11 +1070,31 @@ app.get('/api/docker/:id/detail', async (c) => {
 });
 
 app.get('/api/docker/:id/logs', async (c) => {
-  const lines = await containerLogs(c.req.param('id'));
+  const lines = await containerLogs(c.req.param('id'), parseInt(c.req.query('tail') || '200', 10));
   return c.json({ ok: true, lines });
 });
 
 // ---------- Domains (unchanged Cloudflare logic) ----------
+
+// Strict DNS label: lowercase alnum + interior hyphens, ≤63 chars. Never
+// silently "clean" user input — reject it so typos surface as errors.
+const SUBDOMAIN_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+function parseSubdomain(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const s = raw.trim().toLowerCase();
+  return SUBDOMAIN_RE.test(s) ? s : null;
+}
+function parseDomainPort(raw: unknown): number | null {
+  const n = typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : raw;
+  return typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null;
+}
+// `scheme` lets the caller state the protocol explicitly; without it we keep
+// the historical port heuristic (443/8443/9090/9443 → https).
+function domainTargetFor(port: number, scheme?: unknown): string {
+  const proto = scheme === 'http' || scheme === 'https' ? scheme
+    : [443, 8443, 9090, 9443].includes(port) ? 'https' : 'http';
+  return `${proto}://localhost:${port}`;
+}
 
 app.get('/api/domains', async (c) => c.json({ ok: true, domains: config.domains }));
 
@@ -1028,9 +1191,15 @@ async function probeDomain(
   } else {
     let localOk = false;
     try {
-      const r = await fetch(d.target.startsWith('http') ? d.target : `http://localhost:${d.port}`, {
-        redirect: 'manual', signal: AbortSignal.timeout(3000),
-      });
+      const url = d.target.startsWith('http') ? d.target : `http://localhost:${d.port}`;
+      // Local HTTPS services almost always run self-signed certs — without
+      // tolerating them the probe reports "no responde HTTP" for a service
+      // that is perfectly alive.
+      const r = await fetch(url, {
+        redirect: 'manual',
+        signal: AbortSignal.timeout(3000),
+        ...(url.startsWith('https:') ? { tls: { rejectUnauthorized: false } } : {}),
+      } as RequestInit);
       localOk = true;
       r.body?.cancel().catch(() => {});
     } catch { /* port listens but not HTTP */ }
@@ -1042,6 +1211,9 @@ async function probeDomain(
 }
 
 app.post('/api/domains/import', async (c) => {
+  if (!cloudflareConfigured()) {
+    return fail(c, 503, 'Cloudflare no está configurado — faltan credenciales o ids de zona/túnel');
+  }
   const remote = await getRemoteTunnelConfig();
   if (!remote.success || !remote.config) {
     return fail(c, 500, 'No se pudo obtener la config remota del túnel', { detail: remote.error });
@@ -1069,7 +1241,7 @@ app.post('/api/domains/import', async (c) => {
     const target = `${entry.service.startsWith('https://') ? 'https' : 'http'}://localhost:${port}`;
     const matching = containers.find((ct) => ct.publicPorts.includes(port));
     const domain: DomainMapping = {
-      id: Math.random().toString(36).slice(2, 12),
+      id: crypto.randomUUID(),
       subdomain,
       fullDomain: entry.hostname,
       target,
@@ -1088,11 +1260,27 @@ app.post('/api/domains/import', async (c) => {
 });
 
 app.post('/api/domains', async (c) => {
-  const { subdomain, port, processType, projectName } = await c.req.json<{
-    subdomain: string; port: number; processType: 'process' | 'docker'; projectName: string;
-  }>().catch(() => ({}) as { subdomain?: string; port?: number; processType?: 'process' | 'docker'; projectName?: string });
-  const clean = (subdomain || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
-  if (!clean) return fail(c, 400, 'Subdominio inválido');
+  if (!cloudflareConfigured()) {
+    return fail(c, 503, 'Cloudflare no está configurado — faltan credenciales o ids de zona/túnel');
+  }
+  const body = await c.req.json<{
+    subdomain?: string; port?: number; processType?: 'process' | 'docker'; projectName?: string; scheme?: string;
+  }>().catch(() => ({}) as { subdomain?: string; port?: number; processType?: 'process' | 'docker'; projectName?: string; scheme?: string });
+  const clean = parseSubdomain(body.subdomain);
+  if (!clean) {
+    return fail(c, 400, 'Subdominio inválido — solo letras minúsculas, números y guiones interiores (máx. 63 caracteres)');
+  }
+  const port = parseDomainPort(body.port);
+  if (!port) return fail(c, 400, 'Puerto inválido (entero entre 1 y 65535)');
+  if (body.processType !== 'process' && body.processType !== 'docker') {
+    return fail(c, 400, 'processType inválido ("process" o "docker")');
+  }
+  if (body.projectName !== undefined && (typeof body.projectName !== 'string' || body.projectName.length > 128)) {
+    return fail(c, 400, 'projectName inválido');
+  }
+  if (body.scheme !== undefined && body.scheme !== 'http' && body.scheme !== 'https') {
+    return fail(c, 400, 'scheme inválido ("http" o "https")');
+  }
   const fullDomain = `${clean}.${BASE_DOMAIN}`;
   if (config.domains.some((d) => d.fullDomain === fullDomain)) {
     return fail(c, 409, 'Ese dominio ya está asignado');
@@ -1100,19 +1288,18 @@ app.post('/api/domains', async (c) => {
   if ((await listDnsRecords(fullDomain)).length > 0) {
     return fail(c, 409, 'El registro DNS ya existe en Cloudflare');
   }
-  const isHttps = [443, 8443, 9090, 9443].includes(port);
-  const target = `${isHttps ? 'https' : 'http'}://localhost:${port}`;
+  const target = domainTargetFor(port, body.scheme);
   const dns = await createDnsRecord(fullDomain);
   if (!dns.success) return fail(c, 500, 'Falló crear el DNS en Cloudflare', { detail: dns.error });
 
   const domain: DomainMapping = {
-    id: Math.random().toString(36).slice(2, 12),
+    id: crypto.randomUUID(),
     subdomain: clean,
     fullDomain,
     target,
     port,
-    projectName,
-    processType,
+    projectName: body.projectName || '',
+    processType: body.processType,
     createdAt: new Date().toISOString(),
     dnsRecordId: dns.recordId,
   };
@@ -1135,40 +1322,88 @@ app.post('/api/domains', async (c) => {
 app.put('/api/domains/:id', async (c) => {
   const domain = config.domains.find((d) => d.id === c.req.param('id'));
   if (!domain) return fail(c, 404, 'Dominio no encontrado');
-  const { subdomain } = await c.req.json<{ subdomain: string }>().catch(() => ({}) as { subdomain?: string });
-  const clean = (subdomain || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
-  if (!clean) return fail(c, 400, 'Subdominio inválido');
+  const body = await c.req.json<{
+    subdomain?: string; port?: number; processType?: 'process' | 'docker'; projectName?: string; scheme?: string;
+  }>().catch(() => ({}) as { subdomain?: string; port?: number; processType?: 'process' | 'docker'; projectName?: string; scheme?: string });
+  if (body.subdomain !== undefined && parseSubdomain(body.subdomain) === null) {
+    return fail(c, 400, 'Subdominio inválido — solo letras minúsculas, números y guiones interiores (máx. 63 caracteres)');
+  }
+  const clean = body.subdomain !== undefined ? parseSubdomain(body.subdomain)! : domain.subdomain;
+  const parsedPort = body.port !== undefined ? parseDomainPort(body.port) : undefined;
+  if (body.port !== undefined && parsedPort === undefined) {
+    return fail(c, 400, 'Puerto inválido (entero entre 1 y 65535)');
+  }
+  if (body.processType !== undefined && body.processType !== 'process' && body.processType !== 'docker') {
+    return fail(c, 400, 'processType inválido ("process" o "docker")');
+  }
+  if (body.projectName !== undefined && (typeof body.projectName !== 'string' || body.projectName.length > 128)) {
+    return fail(c, 400, 'projectName inválido');
+  }
+  if (body.scheme !== undefined && body.scheme !== 'http' && body.scheme !== 'https') {
+    return fail(c, 400, 'scheme inválido ("http" o "https")');
+  }
   const newFullDomain = `${clean}.${BASE_DOMAIN}`;
-  if (newFullDomain === domain.fullDomain) return c.json({ ok: true, domain });
   if (config.domains.some((d) => d.id !== domain.id && d.fullDomain === newFullDomain)) {
     return fail(c, 409, 'Ese dominio ya está asignado');
   }
-  if ((await listDnsRecords(newFullDomain)).length > 0) {
-    return fail(c, 409, 'El registro DNS ya existe en Cloudflare');
+  // Any target-affecting field must rebuild the ingress URL — port alone,
+  // or an explicit scheme override.
+  const targetChanges = body.port !== undefined || body.scheme !== undefined;
+  const nextTarget = targetChanges ? domainTargetFor(parsedPort ?? domain.port, body.scheme) : domain.target;
+  const domainChanges = newFullDomain !== domain.fullDomain;
+  const metaChanges =
+    (body.processType !== undefined && body.processType !== domain.processType) ||
+    (body.projectName !== undefined && body.projectName !== domain.projectName) ||
+    (targetChanges && nextTarget !== domain.target);
+  if (!domainChanges && !metaChanges) return c.json({ ok: true, domain });
+  // projectName/processType only affect Axon-side association — the tunnel
+  // ingress cares about hostname + target. Skip the sync (and its rollback
+  // machinery) when nothing Cloudflare-facing moved.
+  const needsSync = domainChanges || nextTarget !== domain.target;
+  if (needsSync && !cloudflareConfigured()) {
+    return fail(c, 503, 'Cloudflare no está configurado — faltan credenciales o ids de zona/túnel');
   }
 
   const old = { ...domain };
-  const created = await createDnsRecord(newFullDomain);
-  if (!created.success) return fail(c, 500, 'Falló crear el DNS', { detail: created.error });
-  if (old.dnsRecordId) {
-    const deleted = await deleteDnsRecord(old.dnsRecordId);
-    if (!deleted.success) {
-      if (created.recordId) await deleteDnsRecord(created.recordId);
-      return fail(c, 500, 'Falló borrar el DNS viejo', { detail: deleted.error });
+  let created: { success: boolean; recordId?: string; error?: string } = { success: true };
+  if (domainChanges) {
+    if ((await listDnsRecords(newFullDomain)).length > 0) {
+      return fail(c, 409, 'El registro DNS ya existe en Cloudflare');
+    }
+    created = await createDnsRecord(newFullDomain);
+    if (!created.success) return fail(c, 500, 'Falló crear el DNS', { detail: created.error });
+    if (old.dnsRecordId) {
+      const deleted = await deleteDnsRecord(old.dnsRecordId);
+      if (!deleted.success) {
+        if (created.recordId) await deleteDnsRecord(created.recordId);
+        return fail(c, 500, 'Falló borrar el DNS viejo', { detail: deleted.error });
+      }
     }
   }
   domain.subdomain = clean;
   domain.fullDomain = newFullDomain;
-  domain.dnsRecordId = created.recordId;
+  if (domainChanges) domain.dnsRecordId = created.recordId;
+  if (parsedPort !== undefined) domain.port = parsedPort;
+  if (body.processType !== undefined) domain.processType = body.processType;
+  if (body.projectName !== undefined) domain.projectName = body.projectName;
+  if (targetChanges) domain.target = nextTarget;
   await saveConfig(config);
+  if (!needsSync) {
+    domainStatusCache = null;
+    return c.json({ ok: true, domain });
+  }
 
   const sync = await syncCloudflaredRoutes(config.domains);
   if (!sync.success) {
     domain.subdomain = old.subdomain;
     domain.fullDomain = old.fullDomain;
     domain.dnsRecordId = old.dnsRecordId;
+    domain.port = old.port;
+    domain.processType = old.processType;
+    domain.projectName = old.projectName;
+    domain.target = old.target;
     await saveConfig(config);
-    if (old.dnsRecordId) {
+    if (domainChanges && old.dnsRecordId) {
       const recreated = await createDnsRecord(old.fullDomain);
       if (recreated.success && recreated.recordId) {
         domain.dnsRecordId = recreated.recordId;
@@ -1236,13 +1471,16 @@ app.post('/api/domains/bulk-delete', async (c) => {
 
 app.get('/api/config', async (c) => {
   const { auth, ...rest } = config;
-  return c.json({ ok: true, config: { ...rest, auth: { username: auth.username, totpEnabled: !!auth.totpSecret } } });
+  // El webhook embebe tokens de Discord/Gotify — al cliente llega enmascarado;
+  // para reescribirlo hay que mandar la URL completa nueva.
+  const settings = { ...rest.settings, notifyUrl: maskWebhookUrl(rest.settings?.notifyUrl || '') };
+  return c.json({ ok: true, config: { ...rest, settings, auth: { username: auth.username, totpEnabled: !!auth.totpSecret } } });
 });
 
 let settingsWrite: Promise<unknown> = Promise.resolve();
 app.put('/api/config', async (c) => {
   let body: Partial<AppConfig['settings']>;
-  try { body = validateSettings(await c.req.json()); } catch (e) { return fail(c, 400, (e as Error).message); }
+  try { body = validateSettings(await c.req.json(), config.settings); } catch (e) { return fail(c, 400, (e as Error).message); }
   const operation = settingsWrite.catch(() => {}).then(async () => {
     const settings = { ...config.settings, ...body };
     await saveConfig({ ...config, settings });
@@ -1252,7 +1490,7 @@ app.put('/api/config', async (c) => {
     software.invalidate(); invalidateStoreCache();
     invalidateProgramsCache(); invalidateAgentsCache();
     setNotifyUrl(settings.notifyUrl, settings.notifyProvider);
-    return settings;
+    return { ...settings, notifyUrl: maskWebhookUrl(settings.notifyUrl || '') };
   });
   settingsWrite = operation;
   return c.json({ ok: true, settings: await operation });
@@ -1284,8 +1522,19 @@ app.all('/p/:port/*', async (c) => {
 
   const headers = new Headers();
   for (const [k, v] of c.req.raw.headers.entries()) {
-    if (!HOP_BY_HOP.has(k.toLowerCase()) && k.toLowerCase() !== 'host') headers.set(k, v);
+    const kl = k.toLowerCase();
+    if (HOP_BY_HOP.has(kl) || kl === 'host' || kl === 'authorization' || kl === 'cookie') continue;
+    headers.set(k, v);
   }
+  // Rebuild Cookie without axon_session — the 7-day admin token must never
+  // reach an arbitrary loopback service. The app's own cookies (scoped to
+  // Path=/p/N on the way out) still pass through.
+  const cookie = (c.req.header('cookie') || '')
+    .split(';')
+    .map((p) => p.trim())
+    .filter((p) => p && !/^axon_session\s*=/.test(p))
+    .join('; ');
+  if (cookie) headers.set('cookie', cookie);
   headers.set('host', `127.0.0.1:${port}`);
   headers.set('x-forwarded-prefix', `/p/${port}`);
 
@@ -1326,8 +1575,11 @@ app.all('/p/:port/*', async (c) => {
     resHeaders.set(k, v);
   }
   // Cookies: scope each proxied app's cookies to its own prefix so sessions
-  // don't leak into the dashboard API or sibling /p/N/ apps.
+  // don't leak into the dashboard API or sibling /p/N/ apps. A forged
+  // `axon_session` cookie would sort ahead of the real one on its prefix —
+  // drop it (self-DoS otherwise).
   for (const sc of upstream.headers.getSetCookie?.() ?? []) {
+    if (/^axon_session\s*=/i.test(sc)) continue;
     resHeaders.append('set-cookie', sc
       .replace(/;\s*domain=[^;]*/gi, '')
       .replace(/;\s*path=[^;]*/gi, `; Path=/p/${port}`)
@@ -1414,10 +1666,17 @@ app.post('/api/pair/create', async (c) => {
 // ---------- Heartbeat history ----------
 
 app.get('/api/domains/heartbeats', async (c) => {
+  // The store keeps ~1440 ticks (~36h) per domain; the UI only ever renders
+  // the last 48. Ship a window, not the whole history, per poll.
+  const max = Math.min(1440, Math.max(1, parseInt(c.req.query('ticks') || '288', 10) || 288));
   const beats = allHeartbeats();
+  const heartbeats: Record<string, typeof beats[string]> = {};
   const uptime: Record<string, number | null> = {};
-  for (const id of Object.keys(beats)) uptime[id] = uptimePct(id);
-  return c.json({ ok: true, heartbeats: beats, uptime });
+  for (const [id, arr] of Object.entries(beats)) {
+    heartbeats[id] = arr.slice(-max);
+    uptime[id] = uptimePct(id);
+  }
+  return c.json({ ok: true, heartbeats, uptime });
 });
 
 // ---------- Remote power ----------
@@ -1454,7 +1713,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=${cwd.replace(/%/g, '%%')}
+WorkingDirectory=${sdQuote(cwd)}
 ExecStart=${argv.map(sdQuote).join(' ')}
 Restart=on-failure
 RestartSec=5
@@ -1485,8 +1744,16 @@ app.post('/api/systemd/create-service', async (c) => {
   const cwd = cwdRes.ok ? cwdRes.stdout.trim() : '';
   const argv = cmdlineRaw.split('\0').filter(Boolean);
   if (!argv.length || !cwd) return fail(c, 500, 'No pude determinar el comando o el directorio del proceso');
+  // A newline in argv/cwd would inject extra unit directives past ExecStart.
+  if (argv.some((a) => /[\r\n]/.test(a)) || /[\r\n]/.test(cwd)) {
+    return fail(c, 400, 'El comando del proceso contiene caracteres que no pueden ir en una unidad systemd');
+  }
 
   const unit = buildUnit(name, argv, cwd);
+  // The written unit needs the real argv; the API echo masks credentials the
+  // same way `command` does — mask the elements BEFORE quoting, or the
+  // sdQuote quotes hide every '-' flag from the masker.
+  const shownUnit = unit.replace(/^ExecStart=.*$/m, () => `ExecStart=${maskArgv(argv).map(sdQuote).join(' ')}`);
 
   const b64 = Buffer.from(unit, 'utf-8').toString('base64');
   const dir = 'mkdir -p ~/.config/systemd/user';
@@ -1494,9 +1761,9 @@ app.post('/api/systemd/create-service', async (c) => {
   const enable = `systemctl --user daemon-reload && systemctl --user enable --now pm-${name}.service`;
   const res = await hostExec(`${write} && ${enable}`, { user: 'user', timeoutMs: 30_000 });
   if (!res.ok) {
-    return fail(c, 500, 'Falló crear/habilitar el servicio', { detail: (res.stderr || res.stdout).slice(0, 2000), unit });
+    return fail(c, 500, 'Falló crear/habilitar el servicio', { detail: (res.stderr || res.stdout).slice(0, 2000), unit: shownUnit });
   }
-  return c.json({ ok: true, service: `pm-${name}.service`, unit, cwd, command: argv.join(' ') });
+  return c.json({ ok: true, service: `pm-${name}.service`, unit: shownUnit, cwd, command: maskCmd(argv.join(' ')) });
 });
 
 // Preview of the unit that would be generated — no writes.
@@ -1511,9 +1778,13 @@ app.post('/api/systemd/preview-service', async (c) => {
   if (!cmdlineRaw) return fail(c, 404, `Proceso ${pid} no encontrado`);
   const argv = cmdlineRaw.split('\0').filter(Boolean);
   const cwd = cwdRes.ok ? cwdRes.stdout.trim() : '';
+  if (argv.some((a) => /[\r\n]/.test(a)) || /[\r\n]/.test(cwd)) {
+    return fail(c, 400, 'El comando del proceso contiene caracteres que no pueden ir en una unidad systemd');
+  }
   const name = String(body.name || '').toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 48);
-  const unit = buildUnit(name || 'servicio', argv, cwd || '/');
-  return c.json({ ok: true, unit, cwd, command: argv.join(' '), suggested: `pm-${name || 'servicio'}.service` });
+  const unit = buildUnit(name || 'servicio', argv, cwd || '/')
+    .replace(/^ExecStart=.*$/m, () => `ExecStart=${maskArgv(argv).map(sdQuote).join(' ')}`);
+  return c.json({ ok: true, unit, cwd, command: maskCmd(argv.join(' ')), suggested: `pm-${name || 'servicio'}.service` });
 });
 
 // ---------- Feature modules (self-contained, wired here) ----------
@@ -1559,8 +1830,30 @@ registerLibraryRoutes(app,fileTransfers);
 registerSessionRoutes(app);
 registerOnboardingRoutes(app, onboardingDeps);
 registerOpsRoutes(app);
-registerOptimizerRoutes(app, async () => config);
-registerDockerOpsRoutes(app);
+registerOptimizerRoutes(app, async () => config, () => composeOpsGuard());
+// Locks are retained by design for interrupted releases pending reconcile —
+// mutating mid-release could invalidate a pending rollback — so the block
+// still applies, but the message must reflect the actual state. A 'running'
+// record older than any plausible apply means the worker died and nobody
+// polled /api/compose/releases to settle it — reconcile now instead of
+// blocking docker ops forever on a dead record.
+const composeOpsGuard = async (): Promise<string | null> => {
+  const ops = maintenanceRepo.lockedOperations('compose-release');
+  for (const id of ops) {
+    const rec = maintenanceRepo.get<{ state?: string; runningAt?: number; actorId?: string; sessionId?: string }>('compose-release', id);
+    if (!rec || (rec.state !== 'running' && rec.state !== 'planned')) continue;
+    if (!maintenanceQaRoot && rec.state === 'running' && (!rec.runningAt || Date.now() - rec.runningAt > 10 * 60_000) && rec.actorId) {
+      await composeReleases.status(id, { actorId: rec.actorId, sessionId: rec.sessionId || '' }).catch(() => null);
+      const after = maintenanceRepo.get<{ state?: string }>('compose-release', id);
+      if (!after || (after.state !== 'running' && after.state !== 'planned')) continue;
+    }
+    return 'Hay una actualización de compose en curso; esperá a que termine';
+  }
+  return ops.length
+    ? 'Hay una actualización de compose interrumpida — reconciliá o revertí desde la sección Compose antes de operar'
+    : null;
+};
+registerDockerOpsRoutes(app, composeOpsGuard);
 registerAgentRoutes(app);
 registerAgentAccounts(app, maintenanceQaRoot ? async () => maintenanceQaRoot : fileHostHome, () => { invalidateProgramsCache(); invalidateAgentsCache(); });
 registerAgentUsage(app, maintenanceQaRoot ? async () => maintenanceQaRoot : fileHostHome);
@@ -1579,6 +1872,7 @@ registerMigrationRoutes(app,migrationService,installations,maintenanceQaRoot?und
 registerComposeRoutes(app, {
   drafts: composeDrafts,
   releases: maintenanceQaRoot?undefined:composeReleases,
+  busyGuard: composeOpsGuard,
   getNotes: () => config.composeNotes,
   setNote: async (key, note) => {
     config.composeNotes = { ...(config.composeNotes || {}), [key]: note };
@@ -1664,16 +1958,60 @@ app.onError((err, c) => {
     return c.json({ok:false,error:'La operación no se pudo completar. Revisá el historial antes de reintentar.'},503);
   }
   console.error('Unhandled error:', err);
-  return fail(c, 500, 'Error interno', { detail: String(err) });
+  // No detail to the client — String(err) can carry internal paths or
+  // command output, and pre-auth routes hit this handler too.
+  return fail(c, 500, 'Error interno');
 });
 
 // ---------- Embedded terminal ----------
 // /ws/term — authenticated WebSocket that bridges to a host tmux session via
 // `script` (provides the PTY). The tmux session 'axon-term' persists across
 // browser refreshes and reconnects.
+
+// Cerrar una pestaña mata su sesión tmux — sin esto quedan axon-term-*
+// huérfanas acumulándose. Solo nombres con el prefijo propio: no tocar
+// sesiones tmux ajenas al panel.
+app.delete('/api/term/:name', async (c) => {
+  const name = (c.req.param('name') || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32);
+  if (!name || !name.startsWith('axon-term')) return fail(c, 400, 'Sesión inválida');
+  const res = await hostExec(`tmux kill-session -t ${shq(name)}`, { user: 'user', timeoutMs: 8000 });
+  if (!res.ok) {
+    if (/can't find session|no server running/i.test(res.stderr || '')) return c.json({ ok: true });
+    return fail(c, 500, 'No se pudo cerrar la sesión de terminal');
+  }
+  recordEvent('system', `Terminal ${name} cerrada`);
+  return c.json({ ok: true });
+});
 interface WsProxyData { kind: 'proxy'; upstream: WebSocket; pendingClient: unknown[]; pendingServer: unknown[]; ws: Bun.ServerWebSocket<WsData> | null }
-interface WsTermData { kind: 'term'; proc?: ReturnType<typeof Bun.spawn>; session?: string; exec?: string; cols?: number; rows?: number }
+interface WsTermData { kind: 'term'; proc?: ReturnType<typeof Bun.spawn>; session?: string; exec?: string; cols?: number; rows?: number; marker?: string }
 type WsData = WsProxyData | WsTermData | LogsWsData;
+
+// Auth state for upgraded sockets — the token is verified at upgrade time,
+// but a revoked/expired session must not keep a live terminal/log stream.
+// A periodic re-check closes the socket within ~30s of revocation, and each
+// inbound frame re-checks the cheap denylist synchronously.
+interface WsCred { token: string; sid: string | null; timer?: ReturnType<typeof setInterval> }
+const wsCredentials = new WeakMap<WsData, WsCred>();
+const WS_REVALIDATE_MS = 30_000;
+
+function armWsRevalidation(ws: Bun.ServerWebSocket<WsData>): void {
+  const cred = wsCredentials.get(ws.data);
+  if (!cred) return;
+  cred.timer = setInterval(async () => {
+    try {
+      const dead = (cred.sid ? isRevoked(cred.sid) : false) || !(await verifySessionToken(cred.token));
+      if (dead) {
+        try { ws.close(4401, 'Sesión expirada o revocada'); } catch { /* closed */ }
+      }
+    } catch { /* transient verify failure — keep the socket */ }
+  }, WS_REVALIDATE_MS);
+  cred.timer.unref?.();
+}
+
+function wsStillAuthed(data: WsData): boolean {
+  const cred = wsCredentials.get(data);
+  return !cred || !cred.sid || !isRevoked(cred.sid);
+}
 
 function startTermSocket(ws: Bun.ServerWebSocket<WsData>): void {
   const t = ws.data as WsTermData;
@@ -1685,17 +2023,32 @@ function startTermSocket(ws: Bun.ServerWebSocket<WsData>): void {
   // local PTY (docker -t allocates the container-side one); COLUMNS/LINES are
   // a best-effort hint for the container's initial winsize.
   const cmd = hostTerminalCommand({ session, cols, rows, exec: t.exec });
-  const proc = hostSpawnInteractive(cmd, { user: 'user' });
+  // exec sessions get a unique env marker so close() can sweep the orphaned
+  // host-side chain (bash → script → docker exec) by /proc/*/environ — the
+  // same targeted trick as PMLOG in logs.ts.
+  const marker = t.exec ? `AXONTERM=${crypto.randomUUID()}` : '';
+  t.marker = marker || undefined;
+  const proc = hostSpawnInteractive(marker ? `export ${marker}; ${cmd}` : cmd, { user: 'user' });
   t.proc = proc;
   const pump = async (stream: ReadableStream<Uint8Array> | undefined) => {
     if (!stream) return;
     const r = stream.getReader();
+    let dropWarned = false;
     try {
       while (true) {
         const { done, value } = await r.read();
         if (done) break;
+        if (ws.readyState !== WebSocket.OPEN) break;
         try {
-          ws.send(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength) as ArrayBuffer);
+          // send() returns 0 under backpressure and -1 on a dead socket —
+          // ignoring it corrupts the xterm stream (partial frames). Drop the
+          // chunk and flag the gap once, so the PTY keeps draining.
+          const sent = ws.send(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength) as ArrayBuffer);
+          if (sent < 0) break;
+          if (sent === 0 && !dropWarned) {
+            dropWarned = true;
+            try { ws.send('\r\n\x1b[33m[axon] Conexión lenta: se descartó parte de la salida.\x1b[0m\r\n'); } catch { /* best-effort */ }
+          }
         } catch { break; }
       }
     } catch { /* closed */ }
@@ -1735,6 +2088,7 @@ export default {
       }
       upstream.binaryType = 'arraybuffer';
       const data: WsData = { kind: 'proxy', upstream, pendingClient: [], pendingServer: [], ws: null };
+      wsCredentials.set(data, { token, sid: sessionIdForToken(token) });
       let resolveOpen: ((ok: boolean) => void) | null = null;
       upstream.onopen = () => {
         for (const m of data.pendingClient.splice(0)) upstream.send(m as never);
@@ -1770,8 +2124,12 @@ export default {
       touchSession(sessionIdForToken(token));
       // ?exec=<container id|name> → interactive docker exec instead of tmux.
       const exec = url.searchParams.get('exec') || '';
-      if (exec && !/^[a-zA-Z0-9_.-]{1,128}$/.test(exec)) {
+      if (exec && !/^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$/.test(exec)) {
         return new Response('Contenedor inválido', { status: 400 });
+      }
+      // Same rule as the lifecycle endpoints: no shell inside Axon itself.
+      if (exec && await isOwnContainer(exec)) {
+        return new Response('Contenedor protegido', { status: 403 });
       }
       const data: WsData = {
         kind: 'term',
@@ -1780,6 +2138,10 @@ export default {
         cols: parseInt(url.searchParams.get('c') || '120', 10),
         rows: parseInt(url.searchParams.get('r') || '40', 10),
       };
+      wsCredentials.set(data, { token, sid: sessionIdForToken(token) });
+      // A root shell inside an arbitrary container is a high-impact action —
+      // leave it in the event feed.
+      if (exec) recordEvent('system', `Terminal docker exec → ${exec}`);
       if (server.upgrade(req, { data })) return;
       return new Response('WS upgrade failed', { status: 500 });
     }
@@ -1792,6 +2154,7 @@ export default {
       const p = parseLogsSrc(src);
       if (!p.ok) return new Response(`src inválido: ${p.error}`, { status: 400 });
       const data: WsData = { kind: 'logs', src };
+      wsCredentials.set(data, { token, sid: sessionIdForToken(token) });
       if (server.upgrade(req, { data })) return;
       return new Response('WS upgrade failed', { status: 500 });
     }
@@ -1799,6 +2162,7 @@ export default {
   },
   websocket: {
     open(ws: Bun.ServerWebSocket<WsData>) {
+      armWsRevalidation(ws);
       if (ws.data.kind === 'term') { startTermSocket(ws); return; }
       if (ws.data.kind === 'logs') { startLogsSocket(ws as Bun.ServerWebSocket<LogsWsData>); return; }
       // Handlers were attached in fetch() before upgrade — just link the
@@ -1810,6 +2174,12 @@ export default {
     },
     message(ws: Bun.ServerWebSocket<WsData>, msg: string | Buffer) {
       if (ws.data.kind === 'logs') return; // read-only stream
+      // Revocation lands between periodic re-checks — an interactive stream
+      // must die the moment the session is denied, not 30s later.
+      if (!wsStillAuthed(ws.data)) {
+        try { ws.close(4401, 'Sesión revocada'); } catch { /* closed */ }
+        return;
+      }
       if (ws.data.kind === 'term') {
         const t = ws.data;
         if (typeof msg === 'string' && msg[0] === '{') {
@@ -1827,9 +2197,9 @@ export default {
             if (j.t === 'i' && typeof j.d === 'string') {
               const stdin = t.proc?.stdin as { write(d: string): void; flush(): void } | undefined;
               if (stdin) { stdin.write(j.d); stdin.flush(); }
+              return;
             }
           } catch { /* not json — fall through to raw */ }
-          return;
         }
         const stdin = t.proc?.stdin as { write(d: string | Buffer): void; flush(): void } | undefined;
         try { stdin?.write(msg); stdin?.flush(); } catch { /* proc exited */ }
@@ -1837,19 +2207,46 @@ export default {
       }
       const up = ws.data.upstream;
       if (up.readyState === WebSocket.OPEN) up.send(msg as never);
-      else ws.data.pendingClient.push(msg);
+      else try { ws.close(1011); } catch { /* closed — don't buffer against a dead upstream */ }
     },
     close(ws: Bun.ServerWebSocket<WsData>) {
+      const cred = wsCredentials.get(ws.data);
+      if (cred?.timer) clearInterval(cred.timer);
       if (ws.data.kind === 'logs') { stopLogsSocket(ws.data); return; }
       if (ws.data.kind === 'term') {
         // Killing runuser orphans bash→script→tmux-client on the host; detach
         // the tmux client first so the whole chain exits cleanly, then kill.
-        // (exec sessions aren't tmux-backed — just kill the process.)
+        // The kill MUST wait for the detach to land — firing both at once
+        // races and can kill runuser before the detach reaches the host.
+        const killProc = () => {
+          const proc = (ws.data as WsTermData).proc;
+          if (proc) killHostProc(proc);
+        };
         if (!ws.data.exec) {
           const sess = ws.data.session || 'axon-term';
-          hostExec(`tmux detach-client -s ${sess} 2>/dev/null; true`, { user: 'user', timeoutMs: 3000 }).catch(() => {});
+          hostExec(`tmux detach-client -s ${sess} 2>/dev/null; true`, { user: 'user', timeoutMs: 3000 })
+            .catch(() => {})
+            .finally(killProc);
+          return;
         }
-        try { (ws.data.proc as { kill(s?: string): void } | undefined)?.kill('SIGKILL'); } catch { /* gone */ }
+        if (ws.data.marker) {
+          // exec sessions aren't tmux-backed — the orphaned host chain is
+          // bash→script→docker exec. Kill every host process still carrying
+          // this session's env marker; the literal is built inside the
+          // sweep's own shell so it can never match itself.
+          const uuid = ws.data.marker.slice(ws.data.marker.indexOf('=') + 1);
+          hostExec(
+            `M="AXONTERM="; M="\${M}${uuid}"; ` +
+            `pkill -9 -f "$M" 2>/dev/null; ` +
+            `for d in /proc/[0-9]*/environ; do ` +
+            `  if tr '\\0' '\\n' < "$d" 2>/dev/null | grep -qxF "$M"; then ` +
+            `    kill -9 "$(basename "$(dirname "$d")")" 2>/dev/null; ` +
+            `  fi; ` +
+            `done; true`,
+            { timeoutMs: 10_000 }
+          ).catch(() => {});
+        }
+        killProc();
         return;
       }
       try { ws.data.upstream.close(); } catch { /* already closed */ }

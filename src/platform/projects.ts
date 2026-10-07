@@ -41,7 +41,11 @@ export function relate(project: Project, processes: PortProcess[], containers: H
 }
 export async function hubContainers(): Promise<HubContainer[]> {
   const child = Bun.spawn(['docker','ps','-aq','--no-trunc'],{stdout:'pipe',stderr:'pipe'});
-  const [raw,,code] = await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]);
+  const listTimer = setTimeout(() => child.kill(),15000);
+  let listed: [string,string,number];
+  try { listed = await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]); }
+  finally { clearTimeout(listTimer); }
+  const [raw,,code] = listed;
   if (code) throw new Error('Docker no disponible');
   const ids = raw.trim().split('\n').filter(Boolean);
   if (!ids.length) return [];

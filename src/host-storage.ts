@@ -6,7 +6,10 @@ import { MaintenanceError } from './storage/types';
 
 export let hostVolumes = new FileVolumes(undefined,undefined,path.join(path.dirname(process.env.CONFIG_PATH||'/app/data/config.json'),'volume-mounts.json'));
 let fixtureRoot:string|undefined;
-export function initHostStorage(qa?:string,volumes?:FileVolumes){fixtureRoot=qa;hostVolumes=volumes||(qa?fixtureVolumes(qa):new FileVolumes(undefined,undefined,path.join(path.dirname(process.env.CONFIG_PATH||'/app/data/config.json'),'volume-mounts.json')));}
+let warnedRootUser=false;
+export function initHostStorage(qa?:string,volumes?:FileVolumes){fixtureRoot=qa;hostVolumes=volumes||(qa?fixtureVolumes(qa):new FileVolumes(undefined,undefined,path.join(path.dirname(process.env.CONFIG_PATH||'/app/data/config.json'),'volume-mounts.json')));
+ if(!qa&&HOST_USER==='root'&&!warnedRootUser){warnedRootUser=true;console.warn('[axon] HOST_USER no está definido: las escrituras de archivos correrán como root. Configurá HOST_USER con una cuenta del host sin privilegios.');}
+}
 const ROOTS=['/home','/etc','/var','/opt','/srv','/tmp','/mnt','/media','/run/media','/data','/boot','/usr'];
 let accountHome:{user:string;path:string}|undefined;
 export async function hostHome(){
@@ -35,7 +38,7 @@ export async function resolveHostPath(input:string,options:{roots?:string[];root
     catch(e:any){if(!['ENOENT','ENOTDIR'].includes(e?.code))throw new MaintenanceError('No se puede acceder a la carpeta',403);const parent=path.posix.dirname(probe);if(parent===probe)throw new MaintenanceError('No existe la ruta',400);tail.unshift(path.posix.basename(probe));probe=parent;continue;}
     const full=path.posix.join(real,...tail);
     if(!inside(full))throw new MaintenanceError('Ruta fuera de los directorios permitidos',403);
-    await hostVolumes.roots(full);
+    await hostVolumes.roots(full,options.fresh);
     if(options.directory&&!(await stat(hostToContainer(full)).catch(()=>null))?.isDirectory())throw new MaintenanceError('No existe la carpeta seleccionada',400);
     return full;
   }

@@ -8,7 +8,10 @@ export interface CloudProvider {
   validateRemotePath?(owner:string,source:string,path:string):Promise<void>|void;
   authorize(by:Actor,origin:string,upload?:boolean):string;
   callback(by:Actor,state:unknown,code:unknown,denied?:boolean):Promise<void>;
-  disconnect(owner:string):Promise<void>;
+  /** Real upstream health check: throws MaintenanceError when the account is unreachable. Returns quota when available. */
+  checkConnection?(owner:string):Promise<{used?:number;total?:number}|void>;
+  /** Providers that cannot revoke upstream return a notice for the user. */
+  disconnect(owner:string):Promise<{notice?:string}|void>;
   source(owner:string,id:string):unknown;
   list(owner:string,id:string,p:string,cursor?:string):Promise<{entries:CloudEntry[];cursor:string|null;breadcrumbs?:{name:string;path:string}[]}>;
   metadata(owner:string,id:string,p:string):Promise<CloudEntry>;

@@ -19,9 +19,14 @@ export async function fingerprintAssets(root: string): Promise<string> {
       const source = original.toString('utf8');
       let output = source;
       for (const match of source.matchAll(references)) {
-        const dependency = match[1].startsWith('/') ? match[1].slice(1)
-          : path.posix.normalize(path.posix.join(path.posix.dirname(filename), match[1]));
-        if (dependency.startsWith('../')) throw new Error(`Asset outside public: ${dependency}`);
+        // Normalize both branches first: a `/a/../../x` path escapes the
+        // naive `startsWith('../')` guard if only the relative branch is
+        // normalized.
+        const dependency = path.posix.normalize(
+          match[1].startsWith('/') ? match[1].slice(1)
+            : path.posix.join(path.posix.dirname(filename), match[1]));
+        if (dependency === '..' || dependency.startsWith('../') || path.posix.isAbsolute(dependency))
+          throw new Error(`Asset outside public: ${match[1]} in ${filename}`);
         const version = await visit(dependency);
         output = output.split(match[0]).join(`${match[1]}?v=${version}`);
       }

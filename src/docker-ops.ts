@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
-import { $ } from 'bun';
 import { hostExec } from './host';
 import { runJob } from './jobs';
+import { isOwnContainer } from './docker';
 
 // ---------- Docker ops: start / restart / pull+recreate / grouping ----------
 // Self-contained feature module — index.ts only calls registerDockerOpsRoutes(app).
@@ -13,24 +13,34 @@ function fail(c: any, status: number, error: string, extra?: Record<string, unkn
   return c.json({ ok: false, error, ...extra }, status);
 }
 
-const ID_RE = /^[a-zA-Z0-9_.-]+$/;
+const ID_RE = /^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$/;
 const shq = (s: string) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 
-// Run a docker subcommand: in-container CLI first, host fallback.
+// Run a docker subcommand: in-container CLI first (hard timeout so a wedged
+// daemon can't hang the request), host fallback.
 async function dockerCmd(cmd: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-  const res = await $`bash -c ${'docker ' + cmd}`.quiet().nothrow();
-  const stdout = res.stdout.toString();
-  const stderr = res.stderr.toString();
-  if (res.exitCode === 0) return { ok: true, stdout, stderr };
-  const hostRes = await hostExec(`docker ${cmd}`, { user: 'user', timeoutMs: 60_000 });
-  if (hostRes.ok) return { ok: true, stdout: hostRes.stdout, stderr: hostRes.stderr };
-  return { ok: false, stdout, stderr: `${stderr} | host: ${hostRes.stderr || hostRes.stdout || `exit ${hostRes.code}`}` };
+  const proc = Bun.spawn(['bash', '-c', `docker ${cmd}`], { stdout: 'pipe', stderr: 'pipe' });
+  const timer = setTimeout(() => {
+    try { proc.kill('SIGKILL'); } catch { /* already gone */ }
+  }, 15_000);
+  try {
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    if (code === 0) return { ok: true, stdout, stderr };
+    const hostRes = await hostExec(`docker ${cmd}`, { user: 'user', timeoutMs: 60_000 });
+    if (hostRes.ok) return { ok: true, stdout: hostRes.stdout, stderr: hostRes.stderr };
+    return { ok: false, stdout, stderr: `${stderr} | host: ${hostRes.stderr || hostRes.stdout || `exit ${hostRes.code}`}` };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function inspectContainer(id: string): Promise<any | null> {
-  const arr = await $`docker inspect ${id}`.json().catch(() => null) as any[] | null;
-  if (arr?.[0]) return arr[0];
-  const res = await hostExec(`docker inspect ${id}`, { user: 'user', timeoutMs: 15_000 });
+  const res = await dockerCmd(`inspect ${id}`);
+  if (!res.ok) return null;
   try { return JSON.parse(res.stdout)?.[0] || null; } catch { return null; }
 }
 
@@ -44,10 +54,20 @@ function composeMeta(info: any) {
   };
 }
 
-export function registerDockerOpsRoutes(app: Hono): void {
+// busyGuard reports a running compose release: mutating containers while a
+// checkpoint/apply is in flight interleaves with its `docker compose` calls.
+export function registerDockerOpsRoutes(app: Hono, busyGuard?: () => Promise<string | null> | string | null): void {
+  const busy = async (c: Parameters<typeof fail>[0]) => {
+    const msg = await busyGuard?.();
+    return msg ? fail(c, 409, msg) : null;
+  };
+
   app.post('/api/docker/:id/start', async (c) => {
     const id = c.req.param('id');
     if (!ID_RE.test(id)) return fail(c, 400, 'ID de contenedor inválido');
+    const held = await busy(c);
+    if (held) return held;
+    if (await isOwnContainer(id)) return fail(c, 403, 'Operación rechazada: este contenedor es la propia instancia de Axon');
     const res = await dockerCmd(`start ${id}`);
     if (!res.ok) return fail(c, 500, 'No se pudo iniciar el contenedor', { detail: (res.stderr || res.stdout).slice(0, 2000) });
     return c.json({ ok: true });
@@ -56,6 +76,9 @@ export function registerDockerOpsRoutes(app: Hono): void {
   app.post('/api/docker/:id/restart', async (c) => {
     const id = c.req.param('id');
     if (!ID_RE.test(id)) return fail(c, 400, 'ID de contenedor inválido');
+    const held = await busy(c);
+    if (held) return held;
+    if (await isOwnContainer(id)) return fail(c, 403, 'Operación rechazada: este contenedor es la propia instancia de Axon');
     const res = await dockerCmd(`restart ${id}`);
     if (!res.ok) return fail(c, 500, 'No se pudo reiniciar el contenedor', { detail: (res.stderr || res.stdout).slice(0, 2000) });
     return c.json({ ok: true });
@@ -67,8 +90,11 @@ export function registerDockerOpsRoutes(app: Hono): void {
   app.post('/api/docker/:id/update', async (c) => {
     const id = c.req.param('id');
     if (!ID_RE.test(id)) return fail(c, 400, 'ID de contenedor inválido');
+    const held = await busy(c);
+    if (held) return held;
     const info = await inspectContainer(id);
     if (!info) return fail(c, 404, 'Contenedor no encontrado');
+    if (await isOwnContainer(id)) return fail(c, 403, 'Operación rechazada: este contenedor es la propia instancia de Axon');
 
     const name = String(info.Name || id).replace(/^\//, '');
     const image = info.Config?.Image || info.Image || '';
@@ -80,18 +106,46 @@ export function registerDockerOpsRoutes(app: Hono): void {
       });
     }
 
-    const files = (configFiles || 'compose.yml').split(',').map((f) => f.trim()).filter(Boolean);
+    // Label values are attacker-controllable (`docker run --label`). Quoting
+    // alone is not enough: a value like `--remove-orphans` still reaches the
+    // docker arg parser. Reject anything that isn't a plain identifier/path,
+    // and pass `--` before the positional service name.
+    const LABEL_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
+    if (!LABEL_RE.test(project) || !LABEL_RE.test(service)) {
+      return fail(c, 400, 'Labels compose inválidas', { detail: 'project/service contienen caracteres no permitidos.' });
+    }
+    if (!/^\.{0,2}\/|^\//.test(workingDir) || workingDir.includes('\0') || workingDir.split('/').includes('..')) {
+      return fail(c, 400, 'working_dir inválido');
+    }
+    if (!image || !/^[a-zA-Z0-9][a-zA-Z0-9.:/@_-]*$/.test(image)) {
+      return fail(c, 400, 'Imagen inválida');
+    }
+
+    const rawFiles = (configFiles || 'compose.yml').split(',').map((f) => f.trim()).filter(Boolean);
+    // A `-f` value that looks like a flag could still confuse the parser, and a
+    // forged label must not point compose at an arbitrary non-yaml host file.
+    // Each file must resolve inside the compose working dir: an absolute path
+    // elsewhere on the host (e.g. /etc/x.yml) is rejected as surely forged.
+    const wdNorm = workingDir.endsWith('/') ? workingDir.slice(0, -1) : workingDir;
+    const files = rawFiles.filter((f) => {
+      if (!/^[^\s-]/.test(f) || /[\0-\x1f]/.test(f) || !/\.(ya?ml)$/i.test(f) || f.split('/').includes('..')) return false;
+      // An absolute -f path is only acceptable under an absolute workingDir —
+      // with a relative workingDir it escapes containment entirely.
+      if (f.startsWith('/') && (!workingDir.startsWith('/') || !f.startsWith(`${wdNorm}/`))) return false;
+      return true;
+    });
+    if (files.length !== rawFiles.length) return fail(c, 400, 'config_files inválido');
     const fArgs = files.map((f) => `-f ${shq(f)}`).join(' ');
     const steps = [
       {
         label: `docker pull ${image}`,
-        cmd: `docker pull ${shq(image)}`,
+        cmd: `docker pull -- ${shq(image)}`,
         user: 'root' as const,
         group: name,
       },
       {
         label: `compose up ${service}`,
-        cmd: `cd ${shq(workingDir)} && docker compose -p ${shq(project)} ${fArgs} up -d --force-recreate ${shq(service)}`,
+        cmd: `cd -- ${shq(workingDir)} && docker compose -p ${shq(project)} ${fArgs} up -d --force-recreate -- ${shq(service)}`,
         user: 'root' as const,
         group: name,
       },

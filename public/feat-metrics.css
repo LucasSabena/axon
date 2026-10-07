@@ -2,7 +2,7 @@
 
 #tab-metrics .metrics-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
   gap: 12px;
 }
 
@@ -30,6 +30,19 @@
 }
 
 #tab-metrics .metric-unit { color: var(--text-faint); font-weight: 500; }
+
+#tab-metrics .metric-title select {
+  text-transform: none;
+  letter-spacing: normal;
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  max-width: 100%;
+}
 
 #tab-metrics .metric-now {
   font-family: var(--font-mono);
@@ -66,6 +79,12 @@
 #tab-metrics .dot-tx { background: var(--warn); }
 
 #tab-metrics .metrics-procs-header { margin-top: 1.5rem; }
+
+#tab-metrics .metric-procs-note {
+  font-size: 0.72rem;
+  font-weight: 400;
+  color: var(--text-faint);
+}
 
 #tab-metrics .proc-name { font-family: var(--font-mono); font-size: 0.8rem; }
 #tab-metrics .proc-pid { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-dim); }

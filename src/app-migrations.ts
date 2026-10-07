@@ -18,9 +18,12 @@ export class Migrations {
   constructor(readonly repo:MaintenanceRepository,private inventory:()=>Promise<Installation[]> ){}
   list(){return Object.entries(MIGRATIONS).map(([app,def])=>({...def,app,record:this.repo.get<MigrationRecord>('migration',app)||null}));}
   async compare(app:AppId){
-    const all=await this.inventory();const matches=all.filter(i=>i.container&&(i.name.toLowerCase()===app||i.container.service.toLowerCase()===app||i.container.image.toLowerCase().includes('/'+app+':')));
+    const all=await this.inventory();const matches=all.filter(i=>i.container&&(i.name.toLowerCase()===app||i.container.service.toLowerCase()===app||i.container.image.toLowerCase().includes('/'+app+':')||(i.container.image.split('/').pop()||'').split(':')[0].toLowerCase()===app));
     const previous=this.repo.get<MigrationRecord>('migration',app);
-    const revision=hash(matches);const record:MigrationRecord={app,at:new Date().toISOString(),state:previous?.revision===revision?previous.state:'compared',importReceipt:previous?.revision===revision?previous.importReceipt:undefined,retirementReceipt:previous?.retirementReceipt,revision,installations:matches,gaps:[...MIGRATIONS[app].gaps,...(!matches.length?['No se identificó una instalación inequívoca. Ausencia no demuestra retirada.']:[])],evidence:previous?.revision===revision?previous.evidence:[],diskSavingsBytes:null};
+    // Volatile fields (container state) must not churn the revision: evidence
+    // and verified/retired progress are keyed to it.
+    const revision=hash(matches.map(i=>({id:i.id,name:i.name,backend:i.backend,scope:i.scope,container:i.container&&{id:i.container.id,image:i.container.image,mounts:i.container.mounts,configFiles:i.container.configFiles,project:i.container.project,service:i.container.service}})));
+    const record:MigrationRecord={app,at:new Date().toISOString(),state:previous?.revision===revision?previous.state:'compared',importReceipt:previous?.revision===revision?previous.importReceipt:undefined,retirementReceipt:previous?.retirementReceipt,revision,installations:matches,gaps:[...MIGRATIONS[app].gaps,...(!matches.length?['No se identificó una instalación inequívoca. Ausencia no demuestra retirada.']:[])],evidence:previous?.revision===revision?previous.evidence:[],diskSavingsBytes:null};
     if(previous?.retirementReceipt&&!matches.length&&this.repo.get<{status:{state:string}}>('compose-release',previous.retirementReceipt)?.status.state==='verified')record.state='data-pending';
     this.repo.put('migration',app,record);return record;
   }

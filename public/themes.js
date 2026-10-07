@@ -19,6 +19,7 @@ function apply() {
   root.classList.toggle('wa-dark', effective === 'dark'); root.classList.toggle('wa-light', effective === 'light');
   root.dataset.theme = theme.id; root.dataset.colorMode = effective; root.style.colorScheme = effective;
   for (const [key,value] of Object.entries(theme.tokens)) root.style.setProperty('--'+key,value);
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme.tokens['bg-canvas'] || '#080c10');
   document.querySelectorAll('.brand-logo,.brand-logo-full').forEach(img=>{img.src=effective==='light'?'/marca/isologotipo-light.svg':'/marca/isologotipo.svg';});
   root.dataset.density = localStorage.getItem('axon:density') || 'theme';
   localStorage.setItem('pm-theme',theme.id);

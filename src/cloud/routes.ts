@@ -1,7 +1,7 @@
 import type { Hono } from 'hono';
 import { PlatformStore } from '../platform/store';
 import { actor, body, only, protect, requestOrigin, textField } from '../storage/http';
-import { MaintenanceError } from '../storage/types';
+import { MaintenanceError, type Actor } from '../storage/types';
 import { Dropbox, cloudPath } from './dropbox';
 import { CloudVault } from './vault';
 import { CloudDownloads } from './downloads';
@@ -37,11 +37,21 @@ function registerProviderRoutes(app:Hono,store:PlatformStore,id:ProviderId,dropb
   app.post(PREFIX+'/configure',async c=>{const b=await body(c);only(b,id==='dropbox'?['clientId']:['clientId','clientSecret']);if(id==='dropbox')(dropbox as Dropbox).configure(actor(c).actorId,b.clientId);else(dropbox as Drive).configure(actor(c).actorId,b.clientId,b.clientSecret);return c.json({ok:true});});
   app.post(PREFIX+'/connect',async c=>{const b=await body(c);only(b,id==='dropbox'?['upload']:[]);if(b.upload!==undefined&&typeof b.upload!=='boolean')throw new MaintenanceError('Permiso de subida inválido',400);return c.json({ok:true,url:dropbox.authorize(actor(c),requestOrigin(c),b.upload===true)});});
   app.get(PREFIX+'/oauth/callback',async c=>{
-    const by=actor(c);let result='connected';
-    try{await dropbox.callback(by,c.req.query('state'),c.req.query('code'),!!c.req.query('error'));if(c.req.query('error'))result='cancelled';}catch{result='failed';}
-    return c.redirect('/configuracion?section=connections&provider='+id+'&connection='+result,303);
+    // The session may have expired during the upstream roundtrip — a 401 here
+    // would strand the user on a bare error page instead of the login flow.
+    let by:Actor;try{by=actor(c);}catch{return c.redirect('/',303);}
+    let result='connected',reason='';
+    try{await dropbox.callback(by,c.req.query('state'),c.req.query('code'),!!c.req.query('error'));if(c.req.query('error'))result='cancelled';}
+    catch(e){result='failed';reason=e instanceof MaintenanceError?({400:'expirada',409:'conflicto',429:'limite',502:'plataforma',503:'plataforma'} as Record<number,string>)[e.status]||'error':'error';}
+    return c.redirect('/configuracion?section=connections&provider='+id+'&connection='+result+(reason?'&reason='+reason:''),303);
   });
-  app.post(PREFIX+'/disconnect',async c=>{only(await body(c),[]);const owner=actor(c).actorId;downloads.cancelOwner(owner);await dropbox.disconnect(owner);return c.json({ok:true});});
+  app.get(PREFIX+'/health',async c=>{
+    const owner=actor(c).actorId;
+    if(!dropbox.status(owner).connected)throw new MaintenanceError('La cuenta no está conectada',409);
+    try{const info=await dropbox.checkConnection?.(owner);return c.json({ok:true,healthy:true,...(info&&typeof info==='object'?info:{})});}
+    catch(e){return c.json({ok:true,healthy:false,error:e instanceof MaintenanceError?e.message:'No se pudo verificar la conexión'});}
+  });
+  app.post(PREFIX+'/disconnect',async c=>{only(await body(c),[]);const owner=actor(c).actorId;downloads.cancelOwner(owner);const result=await dropbox.disconnect(owner);const notice=result&&typeof result==='object'?result.notice:undefined;return c.json({ok:true,...(notice?{notice}:{})});});
   if(id==='dropbox'){
     app.post(PREFIX+'/shared',async c=>{const b=await body(c);only(b,['url']);return c.json({ok:true,...await (dropbox as Dropbox).addShared(actor(c).actorId,b.url)});});
     app.post(PREFIX+'/shared/:id/remove',async c=>{only(await body(c),[]);(dropbox as Dropbox).removeShared(actor(c).actorId,c.req.param('id'));return c.json({ok:true});});
@@ -66,4 +76,5 @@ function registerProviderRoutes(app:Hono,store:PlatformStore,id:ProviderId,dropb
     const id=await downloads.start(actor(c).actorId,textField(b.location,100),b.paths as string[],textField(b.directory,4096),b.volumeToken);return c.json({ok:true,id},202);
   });
   app.post(PREFIX+'/downloads/:id/cancel',async c=>{only(await body(c),[]);downloads.cancel(actor(c).actorId,c.req.param('id'));return c.json({ok:true});});
+  app.post(PREFIX+'/downloads/:id/retry',async c=>{only(await body(c),[]);await downloads.retry(actor(c).actorId,c.req.param('id'));return c.json({ok:true});});
 }

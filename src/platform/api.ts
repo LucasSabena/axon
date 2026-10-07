@@ -5,6 +5,7 @@ import type { ProjectHub } from './projects';
 import type { Diagnostics } from './diagnostics';
 import type { CloudAgents } from '../cloud/agents';
 import { registerCloudMachineRoutes, callCloudTool, cloudError } from '../cloud/agent-api';
+import { MaintenanceError } from '../storage/types';
 import { ApiLimiter, ApiThrottle, apiLane, leasedResponse } from './api-limits';
 import { AGENT_INSTRUCTIONS, agentTools, agentCapabilities, permittedProjectTools, permittedCloudTools } from './api-discovery';
 
@@ -33,12 +34,26 @@ async function machineResources(hub:ProjectHub,id:string) {
   const {command,...project}=resources.project;
   return {...resources,project};
 }
+/** Identifiable platform/maintenance errors keep their message and status; anything else is a generic 503, not a mislabeled cloud failure. */
+const apiError=(e:unknown):PlatformError=>e instanceof PlatformError?e:e instanceof MaintenanceError?new PlatformError(e.message,e.status):new PlatformError('No se pudo completar la operación',503);
+/** Shared query-param validation for the audit endpoints (UI + machine API). */
+function auditFilters(c:any) {
+  const f:Record<string,string>={};
+  for (const key of ['status','actor','action','q'] as const) {
+    const v=c.req.query(key);
+    if (v===undefined) continue;
+    if (typeof v!=='string'||v.length>120) throw new PlatformError('Filtro inválido');
+    if (v) f[key]=v;
+  }
+  if (f.status&&!['running','ok','failed','interrupted'].includes(f.status)) throw new PlatformError('Estado de filtro inválido');
+  return f;
+}
 export function machineApi(deps: PlatformApiDependencies) {
   const {store,hub,diagnostics} = deps, app = new Hono<ApiEnv>();
   const limiter = new ApiLimiter();
   app.onError((e,c) => {
     if(e instanceof ApiThrottle){c.header('Retry-After',String(e.retryAfter));c.header('X-Axon-Limit-Lane',e.lane);return c.json({ok:false,error:e.message,code:'axon-api-limit',lane:e.lane,reason:e.reason,retryAfter:e.retryAfter},429);}
-    return c.json({ok:false,error:cloudError(e).message},cloudError(e).status as any);
+    const mapped=apiError(e);return c.json({ok:false,error:mapped.message},mapped.status as any);
   });
   app.use('*',async(c,next) => {
     c.header('Cache-Control','private, no-store');
@@ -48,7 +63,12 @@ export function machineApi(deps: PlatformApiDependencies) {
     if (!identity) throw new PlatformError('Token inválido, revocado o vencido',401);
     c.set('identity',identity);
     const route=c.req.path.replace(/^\/api\/v1(?=\/|$)/,'');
-    let rpc:any;if(c.req.method==='POST'&&route==='/mcp'){rpc=await input(c);c.set('rpcRequest',rpc);}
+    let rpc:any;
+    if(c.req.method==='POST'&&route==='/mcp'){
+      // Charge the read budget even when the JSON-RPC body cannot be parsed.
+      try{rpc=await input(c);}catch(e){limiter.acquire(identity.id,'read')();throw e;}
+      c.set('rpcRequest',rpc);
+    }
     const lane=apiLane(c.req.method,route,rpc),release=limiter.acquire(identity.id,lane);
     c.header('X-Axon-Limit-Lane',lane);c.header('X-Axon-Limit-Per-Minute',String(limiter.limits[lane].perMinute));
     let leased=false;
@@ -71,7 +91,7 @@ export function machineApi(deps: PlatformApiDependencies) {
     store.append({actor:identity.owner,credentialId:identity.id,action:'api.logs.read',resource:c.req.param('id'),projectId:c.req.param('id'),status:'ok'});
     return c.json({ok:true,lines});
   });
-  app.get('/projects/:id/audit',c => { check(c,c.req.param('id'),'audit:read');return c.json({ok:true,...store.audit(c.req.param('id'),Number(c.req.query('before')) || undefined)}); });
+  app.get('/projects/:id/audit',c => { check(c,c.req.param('id'),'audit:read');return c.json({ok:true,...store.audit(c.req.param('id'),Number(c.req.query('before')) || undefined,50,auditFilters(c))}); });
   app.get('/projects/:id/backups',async c => {
     check(c,c.req.param('id'),'backups:read');if (!deps.backups) throw new PlatformError('Backups no disponibles',503);
     return c.json({ok:true,backups:await deps.backups.list(c.req.param('id'))});
@@ -141,7 +161,7 @@ export function registerPlatformRoutes(app:Hono,deps:PlatformApiDependencies) {
   for (const prefix of ['/api/access/*','/api/audit','/api/project-hub/*','/api/project-hub-inventory']) app.use(prefix,async(c,next)=>{c.header('Cache-Control','private, no-store');await next();});
   const handle = (fn:(c:any) => Promise<any> | any) => async(c:any) => {
     try { return await fn(c); }
-    catch (e) { return c.json({ok:false,error:cloudError(e).message},cloudError(e).status); }
+    catch (e) { const mapped=apiError(e);return c.json({ok:false,error:mapped.message},mapped.status); }
   };
   app.get('/api/project-hub-inventory',handle(async c => c.json({ok:true,containers:(await hub.sources.containers()).map(({id,name,state}) => ({id,name,state})),domains:hub.sources.domains().map(({id,fullDomain}) => ({id,fullDomain}))})));
   app.get('/api/project-hub/:id',handle(async c => c.json({ok:true,...await hub.overview(c.req.param('id'))})));
@@ -149,7 +169,32 @@ export function registerPlatformRoutes(app:Hono,deps:PlatformApiDependencies) {
   app.put('/api/project-hub/:id/bindings',handle(async c => c.json({ok:true,bindings:await hub.bind(c.req.param('id'),await input(c),c.get('user'))})));
   app.post('/api/project-hub/:id/diagnose',handle(async c => { const body = await input(c);if (Object.keys(body).length) throw new PlatformError('El diagnóstico no acepta parámetros');return c.json({ok:true,diagnostic:await diagnostics.run(c.req.param('id'),c.get('user'))}); }));
   app.get('/api/project-hub/:id/diagnostic',handle(c => { hub.project(c.req.param('id'));return c.json({ok:true,diagnostic:store.get('diagnostic',c.req.param('id')) || null}); }));
-  app.get('/api/audit',handle(c => c.json({ok:true,...store.audit(c.req.query('project'),Number(c.req.query('before')) || undefined)})));
+  app.get('/api/audit',handle(c => c.json({ok:true,...store.audit(c.req.query('project'),Number(c.req.query('before')) || undefined,Number(c.req.query('limit'))||50,auditFilters(c))})));
+  // Export the filtered history (up to 5.000 rows paged through the cursor).
+  // Same filters as /api/audit plus format=json|csv.
+  app.get('/api/audit/export',handle(c => {
+    const filters=auditFilters(c),project=c.req.query('project'),csv=c.req.query('format')==='csv';
+    const entries:any[]=[];let before:number|undefined;
+    for (let i=0;i<50;i++) {
+      const page=store.audit(project,before,100,filters);
+      entries.push(...page.entries);
+      if (!page.next||page.entries.length<100) break;
+      before=page.next;
+    }
+    const day=new Date().toISOString().slice(0,10);
+    if (csv) {
+      // Prefix formula-leading cells: spreadsheet apps would otherwise
+      // evaluate =, +, - or @ from action/resource/detail values.
+      const cell=(v:unknown)=>{let s=String(v??'');if (/^[=+\-@\t]/.test(s)) s="'"+s;return '"'+s.replace(/"/g,'""')+'"';};
+      const rows=[['fecha','actor','accion','recurso','proyecto','estado','http','duracion_ms','detalle'].join(',')];
+      for (const e of entries) rows.push([new Date(e.at).toISOString(),e.actor,e.action,e.resource,e.projectId||'',e.status,e.httpStatus||'',e.durationMs||'',e.detail||''].map(cell).join(','));
+      c.header('Content-Type','text/csv; charset=utf-8');
+      c.header('Content-Disposition',`attachment; filename="axon-historial-${day}.csv"`);
+      return c.body(rows.join('\n'));
+    }
+    c.header('Content-Disposition',`attachment; filename="axon-historial-${day}.json"`);
+    return c.json({version:1,exportedAt:new Date().toISOString(),entries});
+  }));
   app.get('/api/access/tokens',c => c.json({ok:true,tokens:store.tokens().filter(t=>t.owner===c.get('user')),scopes:SCOPES,cloudScopes:CLOUD_SCOPES,cloudConnections:deps.cloud?.available(c.get('user'))||[],cloudLocalUrl:deps.cloudLocalUrl,projects:hub.sources.projects().map(({id,name}) => ({id,name}))}));
   app.post('/api/access/tokens',handle(async c => {
     const value = await input(c);if (Object.keys(value).some(k => !['name','days','grants','cloudGrants'].includes(k))) throw new PlatformError('Campo no permitido');

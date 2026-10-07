@@ -20,10 +20,18 @@ export async function notify(title: string, body: string, priority = 3, strict =
     const isGotify = provider === 'gotify' || provider === 'auto' && /gotify/.test(hostname);
     let init: RequestInit;
     if (isDiscord) {
+      // Notification text includes user-controlled values (visitor names, file
+      // names…) — neutralize mass/role/user pings and break out of the bold
+      // wrapper so a crafted title can't inject markdown.
+      const noPing = (s: string) =>
+        s
+          .replace(/@everyone/gi, '@\u200beveryone')
+          .replace(/@here/gi, '@\u200bhere')
+          .replace(/<@&?(\d+)>/g, '<@\u200b$1>');
       init = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: `**${title}**\n${body}` }),
+        body: JSON.stringify({ content: `**${noPing(title).replace(/\*/g, '\\*')}**\n${noPing(body)}` }),
       };
     } else if (isGotify) {
       init = {

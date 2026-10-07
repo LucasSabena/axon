@@ -18,7 +18,9 @@ function closeDrawer(){
   const sidebar=document.querySelector('.sidebar');if(sidebar)sidebar.inert=mobile;
 }
 const writeSaved = () => { try { localStorage.setItem('axon:locations:v1', JSON.stringify(saved)); } catch { /* full or disabled storage */ } };
-const fresh = (route, index = 0, view = null) => ({ ...route, v: 1, index, view, scroll: 0, chain: current?.chain || crypto.randomUUID() });
+// crypto.randomUUID is secure-context only; plain-HTTP LAN deploys need a fallback.
+const uid = () => crypto.randomUUID?.() ?? Math.random().toString(36).slice(2) + Date.now().toString(36);
+const fresh = (route, index = 0, view = null) => ({ ...route, v: 1, index, view, scroll: 0, chain: current?.chain || uid() });
 
 function decorate() {
   document.querySelectorAll('.sidebar-nav .tab-btn, #sidebar-settings').forEach((button) => {
@@ -76,7 +78,9 @@ async function apply(state) {
   finally { internal = false; }
   window.activateAxonSection?.(state.section, false);
   closeDrawer();
-  if(old?.section!==state.section && main()){main().tabIndex=-1;main().focus({preventScroll:true});}
+  // En la carga inicial (old undefined) NO mover el foco: el skip-link debe
+  // seguir siendo el primer Tab. Sólo al navegar entre secciones.
+  if(old && old.section!==state.section && main()){main().tabIndex=-1;main().focus({preventScroll:true});}
   controls();
   try {
     await pages()[state.section]?.restore?.(state.params, state.view);
@@ -172,7 +176,13 @@ window.addEventListener('beforeunload', (e) => {
   checkpoint();
   if (pages()[current?.section]?.dirty?.()) { e.preventDefault(); e.returnValue = ''; }
 });
-main()?.addEventListener('scroll', checkpoint, { passive: true });
+// Scroll fires dozens of times per second; capture once the gesture settles so
+// replaceState/localStorage writes stay well under Safari's history quota.
+let scrollTimer = null;
+main()?.addEventListener('scroll', () => {
+  if (scrollTimer) return;
+  scrollTimer = setTimeout(() => { scrollTimer = null; checkpoint(); }, 250);
+}, { passive: true });
 
 async function start() {
   if (!domReady || ready || document.querySelector('#main-screen')?.classList.contains('hidden')) return;
@@ -188,6 +198,16 @@ async function start() {
   maxIndex = Math.max(state.index,historyMax[state.chain] || 0);
   history.replaceState({ axon: state }, '', route.url);
   await apply(state);
+  // Avatar + menú de cuenta reflejan el usuario real (era una "A" fija).
+  try {
+    const me = await api('/api/me');
+    const name = typeof me?.username === 'string' && me.username;
+    if (name) {
+      const avatar = document.querySelector('.account-avatar');
+      if (avatar) avatar.textContent = name[0].toUpperCase();
+      document.querySelector('.account-trigger')?.setAttribute('aria-label', `Cuenta de ${name}`);
+    }
+  } catch { /* api ausente o sesión corta — queda la letra por defecto */ }
 }
 
 window.AxonNavigation = { go, update, close, checkpoint, url: routeUrl, sections: SECTIONS,

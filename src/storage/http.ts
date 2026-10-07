@@ -6,7 +6,15 @@ export function actor(c:Context): Actor {
   if(!c.get('user')||!cookie)throw new MaintenanceError('Necesitás una sesión autenticada',401);
   return {actorId:c.get('user'),sessionId:createHash('sha256').update(cookie).digest('hex')};
 }
-export function requestOrigin(c:Context):string { const configured=process.env.AXON_PUBLIC_ORIGIN; if(configured){const u=new URL(configured);if(!['https:','http:'].includes(u.protocol)||u.username||u.password||u.pathname!=='/'||u.search||u.hash)throw new MaintenanceError('Origen público mal configurado',503);return u.origin;}return new URL(c.req.url).origin;}
+let warnedOrigin=false;
+export function requestOrigin(c:Context):string {
+  const configured=process.env.AXON_PUBLIC_ORIGIN;
+  if(configured){const u=new URL(configured);if(!['https:','http:'].includes(u.protocol)||u.username||u.password||u.pathname!=='/'||u.search||u.hash)throw new MaintenanceError('Origen público mal configurado',503);return u.origin;}
+  // Without AXON_PUBLIC_ORIGIN the Host header is the only origin reference; a
+  // reverse proxy that rewrites Host will make every POST fail the Origin check.
+  if(!warnedOrigin){warnedOrigin=true;console.warn('[storage] AXON_PUBLIC_ORIGIN no está configurado: Origin se valida contra el encabezado Host de cada solicitud. Detrás de un proxy inverso que reescriba Host, los POST serán rechazados; configurá AXON_PUBLIC_ORIGIN con el origen público exacto.');}
+  return new URL(c.req.url).origin;
+}
 export function protect(app:Hono,prefix:string) {
   app.use(prefix+'/*',async(c,next)=>{
     c.header('Cache-Control','private, no-store');
@@ -19,7 +27,7 @@ export function protect(app:Hono,prefix:string) {
         if(Number(c.req.header('content-length')||0)>300000)throw new MaintenanceError('Solicitud demasiado grande',413);
       }
       await next();
-    }catch(e){if(e instanceof MaintenanceError)return e.getResponse();const status=e instanceof MaintenanceError?e.status:503;return c.json({ok:false,error:e instanceof MaintenanceError?e.message:'La operación no se pudo completar. No se confirmó ningún resultado.'},status as 400);}
+    }catch(e){if(e instanceof MaintenanceError)return e.getResponse();return c.json({ok:false,error:'La operación no se pudo completar. No se confirmó ningún resultado.'},503);}
   });
 }
 export async function body(c:Context): Promise<Record<string,unknown>> {

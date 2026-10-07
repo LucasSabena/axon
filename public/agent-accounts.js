@@ -1,29 +1,61 @@
 /* Multi-account controls. Tokens stay on the host; only labels/status reach UI. */
 (() => {
   'use strict';
-  let generation = 0, timer;
+  let generation = 0, timer, signedIn = true;
+  // The file is imported under bun test (no DOM) — register only in a browser.
+  typeof document !== 'undefined' && document.addEventListener('axon:session-expired', () => { signedIn = false; clearTimeout(timer); });
+  const shq = s => `'${String(s).replace(/'/g, `'\\''`)}'`;
   window.AxonAgentAccounts = {
     async mount(host, agent) {
       clearTimeout(timer);
+      host.dataset.panelAgent = agent;
       const gen = ++generation;
-      let data, signature = '', editing = false;
-      const alive = () => host.isConnected && gen === generation;
+      let data, signature = '', editing = false, waitingVisible = false;
+      const alive = () => host.isConnected && gen === generation && signedIn;
       host.innerHTML = '<p class="listener-note" role="status">Cargando cuentas…</p>';
+      // Every poll spawns a full python worker (~900/hour at 4s). Poll fast only
+      // while a login is in progress; sleep entirely with the tab hidden.
+      const pollMs = () => (data?.profiles?.some((p) => p.loginBusy) ? 5_000 : 30_000);
+      const onVisible = () => {
+        if (document.hidden) return;
+        document.removeEventListener('visibilitychange', onVisible);
+        waitingVisible = false;
+        if (alive()) void load();
+      };
+      function schedule() {
+        clearTimeout(timer);
+        if (!alive()) return;
+        timer = setTimeout(() => {
+          if (document.hidden) {
+            if (!waitingVisible) { waitingVisible = true; document.addEventListener('visibilitychange', onVisible); }
+            return;
+          }
+          void load();
+        }, pollMs());
+      }
       async function load(force = false) {
         try {
           const next = await api(`/api/agent-accounts/${agent}`);
           if (!alive()) return;
           data = next;
+          host.querySelector('[data-account-stale]')?.remove();
           const sig = JSON.stringify(data);
           if (!editing && (force || sig !== signature)) { signature = sig; render(); }
         } catch (err) {
           if (!alive()) return;
           if (!data) { host.innerHTML = `<p class="agd-note" role="alert">${esc(err.message)}</p><button class="btn-secondary" data-account-retry>Reintentar</button>`; host.querySelector('button').onclick = () => load(true); }
+          else if (!host.querySelector('[data-account-stale]')) {
+            // keep the last snapshot — flag it instead of failing silently
+            const note = document.createElement('p');
+            note.dataset.accountStale = '1';
+            note.className = 'ag-usage-stale';
+            note.setAttribute('role', 'status');
+            note.textContent = `No se pudo actualizar (${new Date().toLocaleTimeString()}) — se reintenta solo`;
+            host.querySelector('.ag-accounts-heading')?.after(note);
+          }
         }
-        clearTimeout(timer);
-        if (alive()) timer = setTimeout(() => { if (document.hidden) { loadLater(); return; } void load(); }, 4000);
+        schedule();
       }
-      function loadLater() { timer = setTimeout(() => void load(), 4000); }
       async function mutate(action, body, button) {
         try {
           if (action === 'enable-server') await api(`/api/agent-accounts/${agent}/install`, { method: 'POST', body: {} });
@@ -34,6 +66,7 @@
             data = result; signature = JSON.stringify(data); editing = false;
             if (alive()) render();
             if (action === 'activate' || action === 'enable-server') { toast(`Cuenta seleccionada${data.scope === 'server' ? ' para el servidor' : ' para la terminal'}: ${data.profiles.find(p => p.active)?.label}`, 'ok'); document.dispatchEvent(new Event('axon:accounts-changed')); }
+            if (action === 'delete') toast('Cuenta eliminada', 'ok');
             if (!action) toast('Cuenta creada. Conectala para poder usarla.', 'ok');
           }
           if (action === 'login') void load(true);
@@ -55,6 +88,7 @@
             <div class="ag-account-row ${p.active ? 'ag-account-active' : ''}" data-account-id="${esc(p.id)}">
               <div class="ag-account-identity"><span class="health-dot ${p.connected ? 'health-ok' : 'health-bad'}"></span><div><strong>${esc(p.label)}</strong>${p.active ? '<span class="badge badge-other">Predeterminada</span>' : ''}<small>${esc(p.email || p.method || (p.loginBusy ? 'Login en curso…' : 'Sin conectar'))}</small></div></div>
               <div class="ag-account-actions"><button class="icon-btn" data-account-rename title="Cambiar nombre" aria-label="Cambiar nombre de ${esc(p.label)}">${icon('pencil')}</button>
+                ${!p.active && !p.native ? `<button class="icon-btn" data-account-delete title="Eliminar cuenta" aria-label="Eliminar cuenta ${esc(p.label)}">${icon('trash-2')}</button>` : ''}
                 ${p.connected ? `<button class="btn-action" data-account-open>${icon('terminal')} Abrir</button><button class="icon-btn" data-account-login ${p.loginBusy ? 'disabled' : ''} aria-label="Volver a conectar ${esc(p.label)}" title="Volver a conectar">${icon(p.loginBusy ? 'loader' : 'log-in')}</button>` : `<button class="btn-action" data-account-login ${p.loginBusy ? 'disabled' : ''}>${icon(p.loginBusy ? 'loader' : 'log-in')} ${p.loginBusy ? 'Conectando…' : 'Conectar'}</button>`}
                 ${!p.active && p.connected ? '<button class="btn-primary" data-account-activate>Usar esta cuenta</button>' : ''}
               </div>
@@ -72,7 +106,11 @@
           await mutate(form.dataset.id ? 'rename' : '', form.dataset.id ? { id: form.dataset.id, label } : { label }, e.submitter);
         };
         host.querySelector('[data-account-install]')?.addEventListener('click', e => mutate('install', {}, e.currentTarget));
-        host.querySelector('[data-account-server]')?.addEventListener('click', e => mutate('enable-server', {}, e.currentTarget));
+        host.querySelector('[data-account-server]')?.addEventListener('click', async e => {
+          const active = data.profiles.find(p => p.active)?.label;
+          if (!(await confirmDialog('Aplicar cuenta al servidor', `Se cambia la cuenta que usan el servidor y la app de escritorio conectada por SSH${active ? ` a "${active}"` : ''}. Las tareas en curso pueden demorar el cambio.`, 'Aplicar'))) return;
+          mutate('enable-server', {}, e.currentTarget);
+        });
         host.querySelector('[data-account-shell-copy]')?.addEventListener('click', () => AxonTerminalTools.copy('. "$HOME/.config/axon/agent-accounts-shell.sh"'));
         host.querySelectorAll('[data-account-id]').forEach(row => {
           const id = row.dataset.accountId, p = data.profiles.find(p => p.id === id);
@@ -81,11 +119,15 @@
           row.querySelector('[data-account-open]')?.addEventListener('click', async e => {
             const server = agent === 'codex' && data.scope === 'server';
             if (server && !p.active) { await mutate('activate', { id }, e.currentTarget); if(data.active !== id)return; }
-            const command = `"$HOME/.local/bin/axon-agent" ${server ? 'run codex' : `run-profile ${agent} ${id}`}`;
+            const command = `"$HOME/.local/bin/axon-agent" ${server ? 'run codex' : `run-profile ${shq(agent)} ${shq(id)}`}`;
             if (!data.launcherInstalled) { toast('Habilitá el selector en SSH primero', 'error'); return; }
             openTermCmd(command, { label: `${agent === 'codex' ? 'Codex' : 'Claude'} · ${p.label}` });
           });
           row.querySelector('[data-account-rename]').onclick = () => { editing = true; form.dataset.id = id; form.querySelector('input').value = p.label; form.querySelector('[type=submit]').textContent = 'Guardar nombre'; form.classList.remove('hidden'); form.querySelector('input').focus(); };
+          row.querySelector('[data-account-delete]')?.addEventListener('click', async e => {
+            if (!(await confirmDialog('Eliminar cuenta', `Se elimina "${p.label}" y sus credenciales guardadas del servidor. Los chats de esa cuenta no se tocan.`, 'Eliminar'))) return;
+            await mutate('delete', { id }, e.currentTarget);
+          });
         });
         void window.AxonAgentUsage.mount(host, agent);
       }

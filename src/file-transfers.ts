@@ -85,7 +85,13 @@ export class FileTransfers {
         this.repo.put('transfer',id,{...next,referencesUpdated:true},status.state);
       } catch {status.referencesPending=true;status.message=(status.message||'')+' Biblioteca necesita actualizar sus referencias; volvé a consultar el trabajo.';return status;}
     }
-    if(['verified','restored','failed','skipped'].includes(status.state))this.repo.releaseReconciled(id);
+    if(['verified','restored','failed','skipped'].includes(status.state)){
+      this.repo.releaseReconciled(id);
+      // Reclaim the worker task dir too — terminal receipts are disposable
+      // (cleanup keeps dirs still carrying partialPath/recoveryPath/
+      // pendingDelete evidence and re-checks 'launched' before unlinking).
+      this.runner({action:'cleanup',home:await this.home(),id}).catch(()=>{});
+    }
     return status;
   }
   // Only host receipts can release an effects lock. A browser closing, elapsed
@@ -103,7 +109,9 @@ export class FileTransfers {
   async cancel(id:string,actor:Actor){
     const op=this.repo.get<TransferRecord>('transfer',id);
     if(!op||op.actorId!==actor.actorId)throw new MaintenanceError('Transferencia no encontrada',404);
-    await this.runner({action:'cancel',home:await this.home(),id});return this.status(id,actor);
+    const result=await this.runner({action:'cancel',home:await this.home(),id});
+    if(!result.ok)throw new MaintenanceError(result.error||'No se pudo confirmar la cancelación; comprobá el estado antes de reintentar.',503);
+    return this.status(id,actor);
   }
   async recover(id:string,actor:Actor){
     const r=this.repo.get<TransferRecord>('transfer',id);if(!r||r.actorId!==actor.actorId)throw new MaintenanceError('Transferencia no encontrada',404);
@@ -124,7 +132,9 @@ export class FileTransfers {
 }
 export function publicTransferPlan(plan:TransferPlan){const {actorId,sessionId,owner,...rest}=plan;return rest;}
 export function legacyTransferProgress(status:TransferStatus){
-  const done=!status.referencesPending&&['verified','restored','failed','skipped','interrupted'].includes(status.state),total=BigInt(status.logicalBytes||'0'),copied=BigInt(status.copiedBytes||'0');
+  // A corrupt stored receipt must not take the endpoint down with a BigInt throw.
+  const bytes=(v:unknown)=>{try{const n=BigInt(typeof v==='string'||typeof v==='number'||typeof v==='bigint'?v:'0');return n>0n?n:0n;}catch{return 0n;}};
+  const done=!status.referencesPending&&['verified','restored','failed','skipped','interrupted'].includes(status.state),total=bytes(status.logicalBytes),copied=bytes(status.copiedBytes);
   return {ok:true,...status,done,pct:status.state==='verified'&&!status.referencesPending?100:total>0n?Number(copied*100n/total>99n?99n:copied*100n/total):0,error:done&&status.state!=='verified'?(status.message||'Operación pendiente de revisión'):null};
 }
 

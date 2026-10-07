@@ -1,7 +1,8 @@
 import { availableStorage } from './host-storage';
 import type { FileVolume } from './file-volumes';
-import { $ } from 'bun';
 import { HOST_FS } from './host';
+
+const shq = (s: string) => `'${s.replace(/'/g, `'"'"'`)}'`;
 
 export interface ServerStats {
   cpuPercent: number;
@@ -17,6 +18,9 @@ export interface ServerStats {
   temperatures?: Record<string, number>;
   ip?: string;
   hosts?: ServerHost[];
+  // Collectors whose read failed and fell back to 0 — a 0% is "unknown",
+  // not "recovered", so alert checks must preserve rather than clear.
+  failedCollectors?: string[];
 }
 
 export interface ServerHost {
@@ -30,22 +34,60 @@ function parseMeminfo(content: string, key: string): number {
   return match ? parseInt(match[1], 10) : 0;
 }
 
+// Stat collectors must never stall the alert tick or the metrics sampler —
+// a hung df/sensors/ip resolves to a fallback instead of blocking forever.
+function bounded<T>(promise: Promise<T>, ms: number, fallback: T, onTimeout?: () => void): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  return Promise.race([
+    promise,
+    new Promise<T>((resolve) => {
+      timer = setTimeout(() => { try { onTimeout?.(); } catch { /* already gone */ } resolve(fallback); }, ms);
+      (timer as { unref?: () => void }).unref?.();
+    }),
+  ]).finally(() => clearTimeout(timer!));
+}
+
+// Shell variant: losing the race also kills the spawned process, so a hung
+// `df` on a stale mount doesn't leak one process per tick. Bun.spawn (not the
+// $ template) because ShellPromise exposes no kill().
+function boundedShell(command: string, ms: number): Promise<string> {
+  const proc = Bun.spawn(['sh', '-c', command], { stdout: 'pipe', stderr: 'ignore' });
+  return bounded(new Response(proc.stdout).text().catch(() => ''), ms, '', () => {
+    try { proc.kill('SIGKILL'); } catch { /* already gone */ }
+  });
+}
+
+// Concurrent callers (alert tick, metrics sampler, HTTP) share one in-flight
+// sample so the CPU baseline is only ever mutated by a single reader.
+let statsFlight: Promise<ServerStats> | null = null;
+
 export async function getServerStats(): Promise<ServerStats> {
+  if (!statsFlight) {
+    statsFlight = readServerStats().finally(() => { statsFlight = null; });
+  }
+  return statsFlight;
+}
+
+async function readServerStats(): Promise<ServerStats> {
   try {
     const [meminfo, stat, df, uptime, sensors] = await Promise.all([
-      $`cat /proc/meminfo`.text().catch(() => ''),
-      $`cat /proc/stat`.text().catch(() => ''),
-      $`df -B1 ${HOST_FS || '/'}`.text().catch(() => ''),
-      $`cat /proc/loadavg`.text().catch(() => ''),
-      $`sensors -j 2>/dev/null || echo '{}'`.text().catch(() => '{}'),
+      boundedShell('cat /proc/meminfo', 5000),
+      boundedShell('cat /proc/stat', 5000),
+      boundedShell(`df -B1 -P -- ${shq(HOST_FS || '/')}`, 5000),
+      boundedShell('cat /proc/loadavg', 5000),
+      // Single-command only: `sh -c` exec's it, so the timeout kill reaches
+      // `sensors` itself — a `|| echo '{}'` compound would orphan a hung one.
+      boundedShell(`sensors -j`, 5000),
     ]);
 
     const memoryTotalKb = parseMeminfo(meminfo, 'MemTotal');
+    // A missing MemAvailable is a read failure, not 100% usage.
+    const hasMemAvailable = /^MemAvailable:/m.test(meminfo);
     const memoryAvailableKb = parseMeminfo(meminfo, 'MemAvailable');
-    const memoryUsedKb = memoryTotalKb - memoryAvailableKb;
+    const memoryUsedKb = hasMemAvailable ? memoryTotalKb - memoryAvailableKb : 0;
     const memoryTotalMb = Math.round(memoryTotalKb / 1024);
     const memoryUsedMb = Math.round(memoryUsedKb / 1024);
-    const memoryPercent = memoryTotalKb ? Math.round((memoryUsedKb / memoryTotalKb) * 100) : 0;
+    const memoryPercent = hasMemAvailable && memoryTotalKb ? Math.round((memoryUsedKb / memoryTotalKb) * 100) : 0;
 
     // First call after boot has no baseline — prime it, wait, and re-sample
     // so the response already carries a real percentage instead of 0.
@@ -53,7 +95,7 @@ export async function getServerStats(): Promise<ServerStats> {
     if (!lastCpuStats) {
       calculateCpuPercent(stat);
       await new Promise((r) => setTimeout(r, 350));
-      cpuStat = await $`cat /proc/stat`.text().catch(() => stat);
+      cpuStat = (await boundedShell('cat /proc/stat', 5000)) || stat;
     }
     const cpuPercent = calculateCpuPercent(cpuStat);
 
@@ -66,6 +108,11 @@ export async function getServerStats(): Promise<ServerStats> {
     const diskUsedGb = Math.round(diskUsedBytes / (1024 * 1024 * 1024));
     const diskPercent = diskTotalBytes ? Math.round((diskUsedBytes / diskTotalBytes) * 100) : 0;
 
+    const failedCollectors: string[] = [];
+    if (!hasMemAvailable) failedCollectors.push('mem');
+    if (!diskTotalBytes) failedCollectors.push('disk');
+    if (!stat.trim()) failedCollectors.push('cpu');
+
     const loadAverage = uptime
       .split(/\s+/)
       .slice(0, 3)
@@ -74,8 +121,8 @@ export async function getServerStats(): Promise<ServerStats> {
 
     const temperatures = parseSensors(sensors);
 
-    const storage=await availableStorage().catch(()=>null);
-    const hosts = await getServerHosts();
+    const storage=await bounded(availableStorage().catch(()=>null),15_000,null);
+    const hosts = await bounded(getServerHosts(),10_000,[]);
     const serverIp = hosts[0]?.host || '';
 
     return {
@@ -92,6 +139,7 @@ export async function getServerStats(): Promise<ServerStats> {
       temperatures,
       ip: serverIp,
       hosts,
+      failedCollectors,
     };
   } catch (error) {
     console.error('Failed to get server stats:', error);
@@ -104,6 +152,7 @@ export async function getServerStats(): Promise<ServerStats> {
       diskTotalGb: 0,
       diskPercent: 0,
       loadAverage: [],
+      failedCollectors: ['cpu', 'mem', 'disk'],
     };
   }
 }
@@ -150,11 +199,13 @@ export async function getServerHosts(): Promise<ServerHost[]> {
     }
   };
 
-  const routeOutput = await $`ip route get 1.1.1.1`.text().catch(() => '');
+  // boundedShell (not bounded($`…`)) — the $ template exposes no kill(), so a
+  // hung `ip` would leak one spawned process per call.
+  const routeOutput = await boundedShell('ip route get 1.1.1.1', 5000);
   const routeMatch = routeOutput.match(/src\s+(\d+\.\d+\.\d+\.\d+)/);
   if (routeMatch) add(routeMatch[1], 'route');
 
-  const addrOutput = await $`ip -4 -o addr show scope global`.text().catch(() => '');
+  const addrOutput = await boundedShell('ip -4 -o addr show scope global', 5000);
   for (const line of addrOutput.split('\n').filter(Boolean)) {
     const match = line.match(/^\d+:\s+([^:\s]+).*?\sinet\s+(\d+\.\d+\.\d+\.\d+)\/\d+/);
     if (!match) continue;
@@ -184,9 +235,12 @@ function calculateCpuPercent(statContent: string): number {
   }
 
   const totalDiff = total - lastCpuStats.total;
+  // A wrapped or stalled counter isn't a usable window — keep the previous
+  // baseline instead of emitting a bogus 0/100% sample.
+  if (totalDiff <= 0) return 0;
   // Time waiting for disk and time stolen by a hypervisor are not CPU work.
   const idleDiff = idle - lastCpuStats.idle + iowait - lastCpuStats.iowait + steal - lastCpuStats.steal;
-  const percent = totalDiff ? Math.round(((totalDiff - idleDiff) / totalDiff) * 100) : 0;
+  const percent = Math.round(((totalDiff - idleDiff) / totalDiff) * 100);
 
   lastCpuStats = { user, nice, system, idle, iowait, irq, softirq, steal, total, time: now };
   return Math.max(0, Math.min(100, percent));
@@ -199,11 +253,24 @@ function parseSensors(sensorsJson: string): Record<string, number> | undefined {
     for (const [chip, values] of Object.entries(data)) {
       if (typeof values !== 'object' || values === null) continue;
       for (const [key, value] of Object.entries(values as Record<string, unknown>)) {
-        if (key.includes('input') && typeof value === 'number') {
+        // Only temperature inputs — fan*_input (RPM), in*_input (V),
+        // power*_input (W) and curr*_input (A) must not surface as °C.
+        if (/^temp\d+_input$/.test(key) && typeof value === 'number') {
           const labelKey = key.replace('input', 'label');
           const label = (values as Record<string, unknown>)[labelKey];
           const name = typeof label === 'string' && label ? `${chip}/${label}` : `${chip}/${key}`;
           temps[name] = Math.round(value * 10) / 10;
+        } else if (typeof value === 'object' && value !== null) {
+          // `sensors -j` nests feature labels one level deeper:
+          // chip → { Adapter, 'Core 0': { temp1_input: 42, ... } }
+          const feature = value as Record<string, unknown>;
+          for (const [subKey, subValue] of Object.entries(feature)) {
+            if (/^temp\d+_input$/.test(subKey) && typeof subValue === 'number') {
+              const label = feature[subKey.replace('input', 'label')];
+              const name = typeof label === 'string' && label ? `${chip}/${label}` : `${chip}/${key}`;
+              temps[name] = Math.round(subValue * 10) / 10;
+            }
+          }
         }
       }
     }

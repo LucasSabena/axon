@@ -1,21 +1,48 @@
 import type { Hono } from 'hono';
 import { readFile } from 'node:fs/promises';
-import { hostSpawnInteractive } from './host';
+import { hostSpawnInteractive, killHostProc } from './host';
 import { runJob } from './jobs';
 import { protect, body as readBody, only } from './storage/http';
 
 const quote = (s: string) => `'${s.replace(/'/g, `'"'"'`)}'`;
-let source: Promise<string>;
-let serverSource: Promise<string>;
-function workerSource() { return source ||= readFile(new URL('../scripts/agent-accounts.py', import.meta.url), 'utf8'); }
+// A path/command shape only — quoting at the call sites already neutralizes
+// injection, so a hostile value degrades to command-not-found. Whitespace or
+// args ('python3 -I') would break every worker AND the shebang; surface it
+// once at load instead of a confusing per-request 503.
+if (process.env.AXON_AGENT_PYTHON && !/^[A-Za-z0-9_/.-]+$/.test(process.env.AXON_AGENT_PYTHON)) {
+  console.warn('[agents] AXON_AGENT_PYTHON tiene un formato inválido (solo ruta o nombre de binario, sin espacios ni argumentos). Los workers pueden fallar.');
+}
+const PYTHON = process.env.AXON_AGENT_PYTHON || 'python3';
+// The installed launchers run via their shebang — env python3 may resolve to
+// a different interpreter than the one AXON_AGENT_PYTHON picked for workers.
+// A shebang cannot carry a whitespace-containing interpreter — the kernel
+// splits at the first space. Workers still honor AXON_AGENT_PYTHON via shell
+// quoting; only the installed launchers fall back to PATH python3.
+const SHEBANG = /\s/.test(PYTHON)
+  ? '#!/usr/bin/env python3'
+  : PYTHON.startsWith('/') ? `#!${PYTHON}` : `#!/usr/bin/env ${PYTHON}`;
+const withShebang = (code: string) => SHEBANG === '#!/usr/bin/env python3' ? code : code.replace(/^#!.*\n/, `${SHEBANG}\n`);
+let source: Promise<string> | undefined;
+let serverSource: Promise<string> | undefined;
+// A rejected read must not poison the cache — the next call retries.
+function workerSource() {
+  if (!source) source = readFile(new URL('../scripts/agent-accounts.py', import.meta.url), 'utf8')
+    .catch((e) => { source = undefined; throw e; });
+  return source;
+}
+function codexServerSource() {
+  if (!serverSource) serverSource = readFile(new URL('../scripts/codex-server-account.py', import.meta.url), 'utf8')
+    .catch((e) => { serverSource = undefined; throw e; });
+  return serverSource;
+}
 
 export async function accountWorker(home: string, request: Record<string, unknown>) {
   const code = await workerSource();
-  const serverCode = await (serverSource ||= readFile(new URL('../scripts/codex-server-account.py', import.meta.url), 'utf8'));
-  const child = hostSpawnInteractive(`python3 -c ${quote(code)}`, { user: 'user' });
-  (child.stdin as Bun.FileSink).write(JSON.stringify({ ...request, home, source: code, serverSource: serverCode }));
+  const serverCode = await codexServerSource();
+  const child = hostSpawnInteractive(`${quote(PYTHON)} -c ${quote(code)}`, { user: 'user' });
+  (child.stdin as Bun.FileSink).write(JSON.stringify({ ...request, home, source: withShebang(code), serverSource: withShebang(serverCode) }));
   (child.stdin as Bun.FileSink).end();
-  const timer = setTimeout(() => child.kill(), 20_000);
+  const timer = setTimeout(() => killHostProc(child), 20_000);
   try {
     const [output, , status] = await Promise.all([new Response(child.stdout as ReadableStream).text(), new Response(child.stderr as ReadableStream).text(), child.exited]);
     if (status) throw new Error('No se pudo acceder al registro de cuentas');
@@ -38,9 +65,9 @@ export function registerAgentAccounts(app: Hono, home: () => Promise<string>, ch
     const b = await readBody(c); only(b, ['label']);
     return run(c, { action: 'create', agent: c.req.param('agent'), label: b.label });
   });
-  for (const action of ['activate', 'rename', 'install', 'enable-server']) {
+  for (const action of ['activate', 'rename', 'install', 'enable-server', 'delete']) {
     app.post(`/api/agent-accounts/:agent/${action}`, async c => {
-      const b = await readBody(c); only(b, action === 'rename' ? ['id', 'label'] : action === 'activate' ? ['id'] : []);
+      const b = await readBody(c); only(b, action === 'rename' ? ['id', 'label'] : ['activate', 'delete'].includes(action) ? ['id'] : []);
       return run(c, { action, agent: c.req.param('agent'), id: b.id, label: b.label });
     });
   }

@@ -1,19 +1,22 @@
 import type { Hono } from 'hono';
 import { readFile } from 'node:fs/promises';
-import { hostSpawnInteractive } from './host';
+import { hostSpawnInteractive, killHostProc } from './host';
 import { body, only, protect } from './storage/http';
 
 const quote = (s: string) => `'${s.replace(/'/g, `'"'"'`)}'`;
-let sources: Promise<string[]>;
+const PYTHON = process.env.AXON_AGENT_PYTHON || 'python3';
+let sources: Promise<string[]> | undefined;
 export async function usageWorker(home: string, agent: string, refresh = false, extra: Record<string, unknown> = {}) {
-  const [code, accountsSource] = await (sources ||= Promise.all([
+  // A rejected read must not poison the cache — the next call retries.
+  if (!sources) sources = Promise.all([
     readFile(new URL('../scripts/agent-usage.py', import.meta.url), 'utf8'),
     readFile(new URL('../scripts/agent-accounts.py', import.meta.url), 'utf8'),
-  ]));
-  const child = hostSpawnInteractive(`python3 -c ${quote(code)}`, { user: 'user' });
+  ]).catch((e) => { sources = undefined; throw e; });
+  const [code, accountsSource] = await sources;
+  const child = hostSpawnInteractive(`${quote(PYTHON)} -c ${quote(code)}`, { user: 'user' });
   (child.stdin as Bun.FileSink).write(JSON.stringify({ ...extra, home, agent, refresh, accountsSource }));
   (child.stdin as Bun.FileSink).end();
-  const timeout = setTimeout(() => child.kill(), 30_000);
+  const timeout = setTimeout(() => killHostProc(child), 30_000);
   try {
     const [output, , status] = await Promise.all([
       new Response(child.stdout as ReadableStream).text(), new Response(child.stderr as ReadableStream).text(), child.exited,

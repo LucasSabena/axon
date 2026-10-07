@@ -1,5 +1,5 @@
 import type { Context, Hono } from 'hono';
-import { mkdir, writeFile } from 'fs/promises';
+import { chmod, mkdir, writeFile } from 'fs/promises';
 import { readFileSync } from 'fs';
 import * as path from 'path';
 
@@ -32,7 +32,9 @@ const REVOKED_CAP = 2000;
 const SAVE_DEBOUNCE_MS = 4000;
 
 const issued = new Map<string, IssuedSession>();
-const revoked = new Set<string>();
+// jti → epoch ms after which the underlying token is dead anyway. Keeping the
+// expiry lets us prune the denylist without ever evicting a live revocation.
+const revoked = new Map<string, number>();
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let writeQueue: Promise<void> = Promise.resolve();
 
@@ -51,8 +53,14 @@ function loadSync(): void {
         });
       }
     }
-    for (const j of obj?.revoked || []) {
-      if (typeof j === 'string' && j) revoked.add(j);
+    const now = Date.now();
+    for (const r of obj?.revoked || []) {
+      // Current files store { jti, exp }; legacy files had plain jti strings.
+      if (typeof r === 'string' && r) {
+        revoked.set(r, (issued.get(r)?.created ?? now) + ISSUED_MAX_AGE_MS);
+      } else if (r && typeof r.jti === 'string' && r.jti && Number.isFinite(r.exp) && r.exp > now) {
+        revoked.set(r.jti, r.exp);
+      }
     }
   } catch { /* missing/corrupt — start fresh */ }
 }
@@ -64,12 +72,15 @@ function saveSoon(): void {
     saveTimer = null;
     writeQueue = writeQueue.then(async () => {
       try {
-        await mkdir(path.dirname(FILE), { recursive: true });
+        await mkdir(path.dirname(FILE), { recursive: true, mode: 0o700 });
         await writeFile(
           FILE,
-          JSON.stringify({ issued: [...issued.values()], revoked: [...revoked] }, null, 1),
-          'utf-8'
+          JSON.stringify({ issued: [...issued.values()], revoked: [...revoked.entries()].map(([jti, exp]) => ({ jti, exp })) }, null, 1),
+          { encoding: 'utf-8', mode: 0o600 }
         );
+        // writeFile's mode only applies on creation — keep an older
+        // world-readable sessions.json private too.
+        await chmod(FILE, 0o600).catch(() => {});
       } catch { /* disk errors are non-fatal */ }
     });
   }, SAVE_DEBOUNCE_MS);
@@ -151,23 +162,46 @@ export function touchSession(jtiOrToken: string): void {
   saveSoon();
 }
 
+// A deny entry only matters while its token could still verify: issued
+// entries carry the mint time, anything else gets the full max age.
+function revokedExpiry(jti: string): number {
+  return (issued.get(jti)?.created ?? Date.now()) + ISSUED_MAX_AGE_MS;
+}
+
+// Drop deny entries whose token can't be valid anymore. A revocation for a
+// jti absent from `issued` is NOT automatically stale — legacy tokens never
+// entered the registry but can still be live.
+function pruneRevoked(): void {
+  const now = Date.now();
+  for (const [jti, exp] of revoked) if (exp <= now) revoked.delete(jti);
+}
+
+function revokedHas(jti: string): boolean {
+  const exp = revoked.get(jti);
+  if (exp === undefined) return false;
+  if (exp <= Date.now()) {
+    revoked.delete(jti); // token can't be valid anymore — lazily prune
+    return false;
+  }
+  return true;
+}
+
 export function revokeSession(jtiOrToken: string): void {
   const jti = normalizeId(jtiOrToken);
   if (!jti) return;
   if (revoked.size >= REVOKED_CAP) {
-    // Evict entries for already-expired sessions first — dropping the oldest
-    // live revocation would silently un-revoke a still-valid token.
-    const stale = [...revoked].find((j) => !issued.has(j));
-    const first = stale ?? revoked.values().next().value;
-    if (first) revoked.delete(first);
+    // Only expired-token revocations may leave — evicting a live one would
+    // silently un-revoke a still-valid session. If nothing is stale the set
+    // grows past the cap; correctness beats the memory bound.
+    pruneRevoked();
   }
-  revoked.add(jti);
+  revoked.set(jti, revokedExpiry(jti));
   saveSoon();
 }
 
 export function isRevoked(jtiOrToken: string): boolean {
   const jti = normalizeId(jtiOrToken);
-  return !!jti && revoked.has(jti);
+  return !!jti && revokedHas(jti);
 }
 
 // Drop entries older than the token lifetime — loadSync does this at boot,
@@ -187,9 +221,10 @@ function pruneIssued(): void {
 // issued sorted by lastSeen desc; revoked as a plain list. No token material.
 export function listSessions(): { issued: IssuedSession[]; revoked: string[] } {
   pruneIssued();
+  pruneRevoked();
   return {
     issued: [...issued.values()].sort((a, b) => b.lastSeen - a.lastSeen),
-    revoked: [...revoked],
+    revoked: [...revoked.keys()],
   };
 }
 
@@ -209,7 +244,7 @@ export function registerSessionRoutes(app: Hono): void {
         ua: s.ua,
         created: s.created,
         lastSeen: s.lastSeen,
-        revoked: revoked.has(s.jti),
+        revoked: revokedHas(s.jti),
         current: s.jti === current,
       })),
     });
@@ -225,7 +260,7 @@ export function registerSessionRoutes(app: Hono): void {
     pruneIssued();
     let n = 0;
     for (const s of issued.values()) {
-      if (s.jti !== current && !revoked.has(s.jti)) {
+      if (s.jti !== current && !revokedHas(s.jti)) {
         revokeSession(s.jti);
         n++;
       }
@@ -240,7 +275,7 @@ export function registerSessionRoutes(app: Hono): void {
     if (p.length < 6) return fail(c, 400, 'Identificador de sesión demasiado corto');
     const target = [...issued.keys()].find((j) => j === p || j.startsWith(p));
     if (!target) {
-      if ([...revoked].some((j) => j === p || j.startsWith(p))) return c.json({ ok: true });
+      if ([...revoked.keys()].some((j) => j === p || j.startsWith(p))) return c.json({ ok: true });
       return fail(c, 404, 'Sesión no encontrada');
     }
     revokeSession(target);

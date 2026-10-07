@@ -8,7 +8,8 @@
   'use strict';
 
   const MAC_RE = /^([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$/;
-  let opsLastData = null;
+  const IPV4_RE = /^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
+  let opsLastData = null, opsTicket = 0, opsLastAlerts = [], opsThresholds = {};
 
   // ---------- DOM injection ----------
 
@@ -59,6 +60,10 @@
         </div>
       </div>
       <div class="ops-grid" id="ops-grid">
+        <div class="ops-card ops-card-wide" id="ops-card-alerts">
+          <div class="ops-card-head">${icon('bell-ring')}<h3>Alertas activas</h3><span class="ops-pill hidden" id="ops-alerts-pill"></span></div>
+          <div class="ops-card-body" id="ops-alerts"><p class="ops-loading">Cargando…</p></div>
+        </div>
         <div class="ops-card" id="ops-card-units">
           <div class="ops-card-head">${icon('server')}<h3>Unidades fallidas</h3><span class="ops-pill hidden" id="ops-units-pill"></span></div>
           <div class="ops-card-body" id="ops-units"><p class="ops-loading">Cargando…</p></div>
@@ -107,6 +112,52 @@
     if (el) el.innerHTML = html;
   }
 
+  // El badge del nav se alimenta de /api/alerts (las unidades fallidas ya son
+  // una alerta `systemd:`), así muestra problemas incluso sin abrir la pestaña.
+  function updateBadge() {
+    const nc = $('#nav-count-ops');
+    if (!nc) return;
+    const n = opsLastAlerts.length;
+    nc.classList.toggle('hidden', n === 0);
+    nc.textContent = n ? `${n} alerta${n === 1 ? '' : 's'}` : '';
+  }
+
+  function renderAlerts(payload) {
+    const alerts = Array.isArray(payload?.alerts) ? payload.alerts : [];
+    opsLastAlerts = alerts;
+    updateBadge();
+    const pill = $('#ops-alerts-pill');
+    if (pill) { pill.classList.toggle('hidden', alerts.length === 0); pill.textContent = alerts.length; }
+    if (payload?.thresholds) opsThresholds = payload.thresholds;
+    const th = opsThresholds;
+    const list = alerts.length ? `<ul class="ops-alerts">${alerts.map((a) => `
+      <li class="ops-alert">
+        <span class="ops-sev ops-sev-${esc(a.severity === 'critical' ? 'critical' : 'warning')}">${a.severity === 'critical' ? 'Crítica' : 'Aviso'}</span>
+        <span class="ops-alert-text"><strong>${esc(a.title)}</strong><small>${esc(a.detail || '')}</small></span>
+        <small class="ops-src">${esc(relTime(a.since))}</small>
+      </li>`).join('')}</ul>`
+      : `<p class="ops-ok-line">${icon('check-circle-2')} Sin alertas activas — los umbrales disparan avisos automáticos</p>`;
+    setBody('#ops-alerts', `${list}
+      <details class="ops-thresholds"><summary>${icon('sliders-horizontal')} Umbrales de alerta</summary>
+        <form id="ops-thresholds-form" class="ops-form">
+          <label>Disco <input type="number" id="ops-th-disk" min="1" max="100" value="${Number(th.diskPct) || 85}">%</label>
+          <label>CPU <input type="number" id="ops-th-cpu" min="1" max="100" value="${Number(th.cpuPct) || 90}">%</label>
+          <label>durante <input type="number" id="ops-th-cpumin" min="1" max="1440" value="${Number(th.cpuMinutes) || 10}">min</label>
+          <label>RAM <input type="number" id="ops-th-mem" min="1" max="100" value="${Number(th.memPct) || 90}">%</label>
+          <button type="submit" class="btn-action ops-mini">${icon('check')} Guardar</button>
+          <button type="button" id="ops-alerts-check" class="btn-secondary ops-mini">${icon('refresh-cw')} Revisar ahora</button>
+        </form>
+      </details>`);
+  }
+
+  function relTime(t) {
+    const s = Math.max(0, Math.floor((Date.now() - Number(t || 0)) / 1000));
+    if (s < 60) return 'ahora';
+    if (s < 3600) return `hace ${Math.floor(s / 60)}m`;
+    if (s < 86400) return `hace ${Math.floor(s / 3600)}h`;
+    return `hace ${Math.floor(s / 86400)}d`;
+  }
+
   function renderUnits(units) {
     const pill = $('#ops-units-pill');
     if (isErr(units)) { setBody('#ops-units', errHtml(units)); pill?.classList.add('hidden'); return; }
@@ -115,8 +166,6 @@
       pill.classList.toggle('hidden', list.length === 0);
       pill.textContent = list.length;
     }
-    const nc = $('#nav-count-ops');
-    if (nc) { nc.classList.toggle('hidden', list.length === 0); nc.textContent = list.length ? `${list.length} fallida${list.length === 1 ? '' : 's'}` : ''; }
     if (!list.length) {
       setBody('#ops-units', `<p class="ops-ok-line">${icon('check-circle-2')} Todo bien — sin unidades fallidas</p>`);
       return;
@@ -127,29 +176,32 @@
         <span class="ops-scope">${esc(u.scope)}</span>
         <span class="ops-unit-acts">
           <button class="btn-action ops-mini ops-unit-restart" data-unit="${esc(u.unit)}" data-scope="${esc(u.scope)}" title="Reiniciar">${icon('rotate-cw')} Reiniciar</button>
-          <button class="btn-secondary ops-mini ops-unit-logs" data-unit="${esc(u.unit)}" data-scope="${esc(u.scope)}" title="Ver logs en terminal">${icon('file-text')} Logs</button>
+          <a class="btn-secondary ops-mini ops-unit-logs" href="/logs?src=${encodeURIComponent(u.scope === 'system' ? `journal:sys:${u.unit}` : `journal:${u.unit}`)}" title="Ver en Logs">${icon('file-text')} Logs</a>
         </span>
       </li>`).join('')}</ul>`);
   }
 
   function renderSsh(ssh) {
     if (isErr(ssh)) { setBody('#ops-ssh', errHtml(ssh)); return; }
-    const n = ssh.failed24h;
+    const n = ssh.failed24h == null ? ssh.failed24h : Number(ssh.failed24h);
     if (n === null || n === undefined) { setBody('#ops-ssh', `<p class="ops-err">${icon('alert-triangle')} No disponible</p>`); return; }
     const cls = n > 10 ? 'ops-bad' : n > 0 ? 'ops-warn-t' : 'ops-good';
     setBody('#ops-ssh', `
       <div class="ops-big ${cls}">${n}</div>
-      <p class="ops-sub">intentos fallidos en 24h${ssh.source ? ` <span class="ops-src">· ${esc(ssh.source)}</span>` : ''}</p>
+      <p class="ops-sub">${ssh.window === 'last50' ? 'intentos fallidos (últimas 50 sesiones)' : 'intentos fallidos en 24h'}${ssh.source ? ` <span class="ops-src">· ${esc(ssh.source)}</span>` : ''}</p>
       ${n > 10 ? `<p class="ops-err">${icon('shield-alert')} Muchos intentos — revisá fail2ban o el puerto SSH expuesto</p>` : ''}`);
   }
 
   function renderUpdates(u) {
     if (isErr(u)) { setBody('#ops-updates', errHtml(u)); return; }
-    const sec = u.security > 0 ? `<span class="ops-chip ops-chip-bad">${u.security} de seguridad</span>` : '';
+    const total = Number(u.total) || 0;
+    const sec = Number(u.security) > 0 ? `<span class="ops-chip ops-chip-bad">${Number(u.security)} de seguridad</span>` : '';
+    const names = Array.isArray(u.names) && u.names.length ? `<div class="ops-chips">${u.names.slice(0, 8).map((n) => `<span class="ops-chip">${esc(n)}</span>`).join('')}</div>` : '';
     setBody('#ops-updates', `
-      <div class="ops-big ${u.total > 0 ? 'ops-warn-t' : 'ops-good'}">${u.total}</div>
-      <p class="ops-sub">paquetes actualizables ${sec}</p>
-      ${u.total > 0 ? `<button class="btn-primary btn-inline" id="ops-updates-go">${icon('arrow-up-circle')} Actualizar ahora</button>` : `<p class="ops-ok-line">${icon('check-circle-2')} Sistema al día</p>`}`);
+      <div class="ops-big ${total > 0 ? 'ops-warn-t' : 'ops-good'}">${total}</div>
+      <p class="ops-sub">paquetes actualizables ${sec} <span class="ops-src">· según la última sincronización de apt</span></p>
+      ${names}
+      ${total > 0 ? `<button class="btn-primary btn-inline" id="ops-updates-go">${icon('arrow-up-circle')} Actualizar ahora</button>` : `<p class="ops-ok-line">${icon('check-circle-2')} Sistema al día</p>`}`);
   }
 
   function renderCerts(certs) {
@@ -161,8 +213,10 @@
         return `<span class="ops-chip ops-chip-err" title="${esc(ct.error || 'Sin certificado')}">${esc(ct.domain)}: —</span>`;
       }
       const cls = ct.warn === 'bad' ? 'ops-chip-bad' : ct.warn === 'warn' ? 'ops-chip-warn' : 'ops-chip-ok';
-      return `<span class="ops-chip ${cls}" title="${esc(ct.notAfter || '')}">${esc(ct.domain)}: ${ct.daysLeft}d</span>`;
-    }).join('')}</div>`);
+      return `<span class="ops-chip ${cls}" title="${esc(ct.notAfter || '')}">${esc(ct.domain)}: ${Number(ct.daysLeft)}d</span>`;
+    }).join('')}</div>
+    ${list.some((ct) => ct.warn === 'warn' || ct.warn === 'bad' || ct.warn === 'error')
+      ? `<p class="ops-sub"><a class="ops-link" href="/dominios">Administrar dominios y certificados →</a></p>` : ''}`);
   }
 
   function renderSystem(sys, tunnel) {
@@ -188,20 +242,20 @@
     setBody('#ops-system', parts.join(''));
   }
 
-  function bar(pct, warnAt = 85) {
+  function bar(pct, warnAt = 85, label = 'Uso') {
     const v = Math.max(0, Math.min(100, pct ?? 0));
     const cls = pct == null ? '' : v >= warnAt ? 'ops-bar-bad' : v >= warnAt - 15 ? 'ops-bar-warn' : 'ops-bar-ok';
-    return `<div class="ops-bar"><span class="${cls}" style="width:${v}%"></span></div>`;
+    return `<div class="ops-bar" role="progressbar" aria-valuenow="${v}" aria-valuemin="0" aria-valuemax="100" aria-label="${esc(label)} ${v}%"><span class="${cls}" style="width:${v}%"></span></div>`;
   }
 
   function renderResources(r) {
     if (isErr(r)) { setBody('#ops-resources', errHtml(r)); return; }
     const disks = (r.disks || []).map((d) => `
-      <div class="ops-kv"><span class="mono">${esc(d.mount)}</span><strong>${d.pcent}%</strong></div>${bar(d.pcent)}`).join('');
+      <div class="ops-kv"><span class="mono">${esc(d.mount)}</span><strong>${Number(d.pcent) || 0}%</strong></div>${bar(Number(d.pcent) || 0, 85, `Disco ${d.mount}`)}`).join('');
     const mem = r.memPct !== null && r.memPct !== undefined ? `
-      <div class="ops-kv"><span>RAM</span><strong>${r.memPct}%${r.memUsedMb ? ` <span class="ops-src">${r.memUsedMb}/${r.memTotalMb} MB</span>` : ''}</strong></div>${bar(r.memPct)}` : '';
+      <div class="ops-kv"><span>RAM</span><strong>${Number(r.memPct) || 0}%${r.memUsedMb ? ` <span class="ops-src">${Number(r.memUsedMb) || 0}/${Number(r.memTotalMb) || 0} MB</span>` : ''}</strong></div>${bar(Number(r.memPct) || 0, 85, 'RAM')}` : '';
     const temps = (r.temps || []).length ? `
-      <div class="ops-temps">${r.temps.map((t) => `<span class="ops-chip ${t.c >= 75 ? 'ops-chip-bad' : t.c >= 60 ? 'ops-chip-warn' : 'ops-chip-ok'}" title="${esc(t.label)}">${esc(t.label)}: ${t.c}°</span>`).join('')}</div>` : '';
+      <div class="ops-temps">${r.temps.map((t) => { const c = Number(t.c) || 0; return `<span class="ops-chip ${c >= 75 ? 'ops-chip-bad' : c >= 60 ? 'ops-chip-warn' : 'ops-chip-ok'}" title="${esc(t.label)}">${esc(t.label)}: ${c}°</span>`; }).join('')}</div>` : '';
     setBody('#ops-resources', disks + mem + temps || `<p class="ops-sub">Sin datos</p>`);
   }
 
@@ -213,9 +267,9 @@
     const rows = devices.map((d) => `
       <tr>
         <td><strong>${esc(d.name)}</strong></td>
-        <td class="mono">${esc(d.mac)}</td>
+        <td class="mono">${esc(d.mac)}${d.broadcast ? `<br><span class="ops-src">${esc(d.broadcast)}</span>` : ''}</td>
         <td><div class="actions">
-          <button class="btn-action ops-mini ops-wol-wake" data-mac="${esc(d.mac)}" data-name="${esc(d.name)}">${icon('zap')} Despertar</button>
+          <button class="btn-action ops-mini ops-wol-wake" data-mac="${esc(d.mac)}" data-name="${esc(d.name)}" data-broadcast="${esc(d.broadcast || '')}">${icon('zap')} Despertar</button>
           <button class="btn-danger ops-mini ops-wol-del" data-mac="${esc(d.mac)}">${icon('trash-2')}</button>
         </div></td>
       </tr>`).join('');
@@ -228,18 +282,20 @@
       <form id="ops-wol-form" class="ops-form">
         <input type="text" id="ops-wol-name" placeholder="Nombre (ej. PC escritorio)" required maxlength="60">
         <input type="text" id="ops-wol-mac" class="mono" placeholder="aa:bb:cc:dd:ee:ff" required>
+        <input type="text" id="ops-wol-broadcast" class="mono" placeholder="Broadcast (opcional)" title="Dirección broadcast de la red destino; vacío = 255.255.255.255">
         <button type="submit" class="btn-action ops-mini">${icon('plus')} Agregar</button>
       </form>
       <form id="ops-wol-quick" class="ops-form">
         <input type="text" id="ops-wol-quickmac" class="mono" placeholder="MAC para despertar sin guardar">
+        <input type="text" id="ops-wol-quickbcast" class="mono" placeholder="Broadcast (opcional)">
         <button type="submit" class="btn-secondary ops-mini">${icon('zap')} Despertar</button>
       </form>
       ${history}`);
   }
 
-  async function sendWake(mac, name) {
+  async function sendWake(mac, name, broadcast) {
     try {
-      const res = await api('/api/ops/wol', { method: 'POST', body: { mac, name } });
+      const res = await api('/api/ops/wol', { method: 'POST', body: { mac, name, broadcast } });
       toast(`Paquete WoL enviado a ${name || mac}`, 'ok', res.method ? `vía ${res.method}` : '', 4000);
     } catch (err) { errToast(err); }
   }
@@ -249,7 +305,7 @@
   function renderPower(data) {
     const p = data.power;
     const pending = p ? `
-      <p class="ops-err">${icon('alarm-clock')} <strong>${esc(p.action === 'reboot' ? 'Reinicio' : 'Apagado')}</strong> programado en ~${p.minutes} min
+      <p class="ops-err">${icon('alarm-clock')} <strong>${esc(p.action === 'reboot' ? 'Reinicio' : 'Apagado')}</strong> programado en ~${Number(p.minutes) || 0} min
         <span class="ops-sub">(${new Date(p.fireAt).toLocaleTimeString()})</span></p>` :
       data.hostPending ? `<p class="ops-err">${icon('alarm-clock')} Hay un shutdown pendiente en el host</p>` : '';
     setBody('#ops-power', `
@@ -264,20 +320,25 @@
         <span class="ops-sub">min</span>
         <button type="submit" class="btn-danger ops-mini">${icon('timer')} Programar</button>
       </form>
-      <button id="ops-power-cancel" class="btn-secondary ops-mini">${icon('timer-off')} Cancelar apagado</button>`);
+      ${p || data.hostPending ? `<button id="ops-power-cancel" class="btn-secondary ops-mini">${icon('timer-off')} Cancelar apagado</button>` : ''}`);
   }
 
   // ---------- Load ----------
 
   async function loadOps() {
     ensureDom();
+    const seq = ++opsTicket;
     const stamp = $('#ops-updated');
     if (stamp) stamp.textContent = 'Cargando…';
-    const [ops, wol, power] = await Promise.allSettled([
+    const [ops, wol, power, alerts] = await Promise.allSettled([
       api('/api/ops'),
       api('/api/ops/wol/devices'),
       api('/api/ops/power'),
+      api('/api/alerts'),
     ]);
+    if (seq !== opsTicket) return; // una carga más nueva ya ganó
+    if (alerts.status === 'fulfilled') renderAlerts(alerts.value);
+    else setBody('#ops-alerts', errHtml({ error: alerts.reason?.message || 'No disponible' }));
     if (ops.status === 'fulfilled') {
       opsLastData = ops.value;
       const s = ops.value.sections || {};
@@ -309,8 +370,29 @@
       if (!btn) return;
 
       if (btn.id === 'ops-updates-go') {
-        gotoTab('programs');
-        setTimeout(() => document.getElementById('update-all-btn')?.click(), 400);
+        try {
+          if (window.AxonNavigation?.ready) {
+            if (await window.AxonNavigation.go('/programas') === false) return;
+          } else {
+            gotoTab('programs');
+          }
+          await window.AxonSoftware?.load();
+          // review() is the real entry point — no fragile synthetic click.
+          const ids = (window.AxonSoftware?.snapshot?.()?.installations || [])
+            .filter((p) => p.canUpdate).map((p) => p.id).slice(0, 200);
+          if (ids.length && window.AxonSoftware?.review) await window.AxonSoftware.review(ids);
+          else document.getElementById('update-all-btn')?.click();
+        } catch (err) { errToast(err); }
+        return;
+      }
+
+      if (btn.id === 'ops-alerts-check') {
+        btn.disabled = true;
+        try {
+          const r = await api('/api/alerts/check', { method: 'POST' });
+          renderAlerts({ alerts: r.alerts });
+          toast('Revisión de alertas completada', 'ok');
+        } catch (err) { errToast(err); } finally { btn.disabled = false; }
         return;
       }
 
@@ -326,28 +408,28 @@
       }
 
       if (btn.classList.contains('ops-unit-restart')) {
+        const unit = btn.dataset.unit || '';
+        const risky = /cloudflared|tailscale|sshd?\.|network|wireguard|openvpn|tunnel|docker\.service/i.test(unit);
+        const ok = await confirmDialog(
+          'Reiniciar unidad',
+          risky
+            ? `${unit} puede sostener tu conexión o el túnel con este servidor. El reinicio sigue igual, pero el panel podría quedar inaccesible unos minutos.`
+            : `Se va a reiniciar ${unit} (${btn.dataset.scope}).`,
+          'Reiniciar'
+        );
+        if (!ok) return;
         btn.disabled = true;
         try {
-          await api('/api/ops/unit/restart', { method: 'POST', body: { unit: btn.dataset.unit, scope: btn.dataset.scope } });
-          toast(`${btn.dataset.unit} reiniciada`, 'ok');
+          await api('/api/ops/unit/restart', { method: 'POST', body: { unit, scope: btn.dataset.scope } });
+          toast(`${unit} reiniciada`, 'ok');
           loadOps();
         } catch (err) { errToast(err); btn.disabled = false; }
         return;
       }
 
-      if (btn.classList.contains('ops-unit-logs')) {
-        const scopeFlag = btn.dataset.scope === 'system' ? '' : '--user ';
-        if (typeof openTermCmd === 'function') {
-          openTermCmd(`journalctl ${scopeFlag}-u ${btn.dataset.unit} -n 80 --no-pager`);
-        } else {
-          gotoTab('terminal');
-        }
-        return;
-      }
-
       if (btn.classList.contains('ops-wol-wake')) {
         btn.disabled = true;
-        await sendWake(btn.dataset.mac, btn.dataset.name);
+        await sendWake(btn.dataset.mac, btn.dataset.name, btn.dataset.broadcast || undefined);
         btn.disabled = false;
         loadOps();
         return;
@@ -371,16 +453,30 @@
         const name = $('#ops-wol-name').value.trim();
         const mac = $('#ops-wol-mac').value.trim().replace(/-/g, ':').toLowerCase();
         if (!MAC_RE.test(mac)) { toast('MAC inválida — formato aa:bb:cc:dd:ee:ff', 'warn'); return; }
+        const bcast = ($('#ops-wol-broadcast')?.value || '').trim();
+        if (bcast && !IPV4_RE.test(bcast)) { toast('Broadcast inválido — formato IPv4 (ej. 192.168.1.255)', 'warn'); return; }
         try {
-          await api('/api/ops/wol/devices', { method: 'POST', body: { name, mac } });
+          await api('/api/ops/wol/devices', { method: 'POST', body: { name, mac, broadcast: bcast || undefined } });
           toast('Dispositivo guardado', 'ok');
           loadOps();
         } catch (err) { errToast(err); }
       } else if (e.target.id === 'ops-wol-quick') {
         const mac = $('#ops-wol-quickmac').value.trim().replace(/-/g, ':').toLowerCase();
         if (!MAC_RE.test(mac)) { toast('MAC inválida — formato aa:bb:cc:dd:ee:ff', 'warn'); return; }
-        await sendWake(mac);
+        const bcast = ($('#ops-wol-quickbcast')?.value || '').trim();
+        if (bcast && !IPV4_RE.test(bcast)) { toast('Broadcast inválido — formato IPv4 (ej. 192.168.1.255)', 'warn'); return; }
+        await sendWake(mac, undefined, bcast || undefined);
         loadOps();
+      } else if (e.target.id === 'ops-thresholds-form') {
+        const num = (id) => { const n = parseInt($(id)?.value || '', 10); return Number.isNaN(n) ? undefined : n; };
+        try {
+          const r = await api('/api/alerts/thresholds', { method: 'PUT', body: {
+            diskPct: num('#ops-th-disk'), cpuPct: num('#ops-th-cpu'),
+            cpuMinutes: num('#ops-th-cpumin'), memPct: num('#ops-th-mem'),
+          } });
+          toast('Umbrales guardados — se aplican en el próximo ciclo (1 min)', 'ok');
+          renderAlerts({ alerts: opsLastAlerts, thresholds: r.thresholds });
+        } catch (err) { errToast(err); }
       } else if (e.target.id === 'ops-power-form') {
         const action = $('#ops-power-action').value;
         const mins = Math.max(1, parseInt($('#ops-power-mins').value, 10) || 0);
@@ -400,6 +496,28 @@
     });
   }
 
+  // Precarga + auto-refresh del badge: una unidad caída de noche queda
+  // visible en el nav sin abrir la pestaña. Cada 60s; silencioso ante 401.
+  // Si la pestaña está activa también recarga las tarjetas — salvo que haya
+  // un campo con foco, para no pisar lo que el usuario está escribiendo.
+  function startPolling() {
+    const tick = async () => {
+      try {
+        const r = await api('/api/alerts');
+        opsLastAlerts = Array.isArray(r?.alerts) ? r.alerts : [];
+        updateBadge();
+        const pill = $('#ops-alerts-pill');
+        if (pill) { pill.classList.toggle('hidden', opsLastAlerts.length === 0); pill.textContent = opsLastAlerts.length; }
+      } catch { /* sin sesión todavía — reintenta en el próximo tick */ }
+      const active = document.querySelector('.tab-btn[data-tab="ops"]')?.classList.contains('active');
+      const ae = document.activeElement;
+      const typing = !!ae && !!$('#tab-ops')?.contains(ae) && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName);
+      if (active && !typing) loadOps();
+    };
+    tick();
+    setInterval(tick, 60_000);
+  }
+
   // ---------- Boot ----------
 
   function init() {
@@ -407,6 +525,7 @@
       ensureDom();
       if (typeof loaders === 'object' && loaders) loaders.ops = loadOps;
       refreshIcons();
+      startPolling();
     } catch (err) {
       console.error('feat-ops init failed:', err);
     }

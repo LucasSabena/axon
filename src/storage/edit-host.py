@@ -1,5 +1,5 @@
 """Bounded file edit with inode/content revision and atomic no-overwrite publication."""
-import os,sys,json,stat,hashlib,uuid,ctypes,fcntl
+import os,sys,json,stat,hashlib,uuid,ctypes,fcntl,time
 r=json.loads(sys.argv[1]);D=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW;fd=None;stage=None;capture=None
 class Conflict(Exception):pass
 def revision(data,s,parent):
@@ -29,8 +29,32 @@ try:
  # All AXON writers serialize on the stable directory inode. A second worker
  # must not capture a just-published file while the first reads its receipt.
  # External writers still use the revision/no-overwrite checks below.
- fcntl.flock(fd,fcntl.LOCK_EX)
+ # Bounded wait: a stuck editor must not block every later save forever.
+ deadline=time.monotonic()+30
+ while True:
+  try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB);break
+  except BlockingIOError:
+   if time.monotonic()>=deadline:raise
+   time.sleep(0.2)
  name=os.path.basename(p);parent=os.fstat(fd);old=None;s=None
+ # A crash between the capture and publish renames leaves the original hidden in
+ # '.axon-edit-*.previous' with the visible name absent: restore the newest such
+ # capture. Stale edit leftovers are garbage-collected after a week.
+ try:os.stat(name,dir_fd=fd,follow_symlinks=False);present=True
+ except FileNotFoundError:present=False
+ captures=[];now=time.time()
+ for entry in os.listdir(fd):
+  if not entry.startswith('.axon-edit-'):continue
+  try:es=os.stat(entry,dir_fd=fd,follow_symlinks=False)
+  except FileNotFoundError:continue
+  if entry.endswith('.previous') and not present:captures.append((es.st_mtime_ns,entry))
+  elif now-es.st_mtime>604800:
+   try:os.unlink(entry,dir_fd=fd)
+   except OSError:pass
+ if captures:
+  captures.sort()
+  try:rename(captures[-1][1],name);present=True
+  except Conflict:pass
  try:old,s=read(name)
  except FileNotFoundError:
   if r['revision']!='missing':raise Conflict()

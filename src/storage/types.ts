@@ -31,12 +31,12 @@ export class MaintenanceError extends Error {
   getResponse(): Response { return Response.json({ok:false,error:this.message},{status:this.status,headers:{'Cache-Control':'private, no-store'}}); }
 }
 export interface PendingOperation {
-  id:string;kind:'transfer'|'file-operation'|'plan';state:string;action?:string;
+  id:string;kind:'transfer'|'file-operation'|'plan'|'scan';state:string;action?:string;
   from?:string;to?:string;message?:string;logicalBytes?:string;copiedBytes?:string;
 }
 export class PendingOperationError extends MaintenanceError {
   constructor(readonly pending?:PendingOperation){
-    const action=pending?.action==='move'?'movimiento':pending?.action==='copy'?'copia':pending?.action==='purge'?'borrado definitivo':'trabajo';
+    const action=pending?.action==='move'?'movimiento':pending?.action==='copy'?'copia':pending?.action==='purge'?'borrado definitivo':pending?.kind==='scan'?'análisis':'trabajo';
     const name=pending?.from?.split('/').pop();
     super(pending?`Hay un ${action} ${pending.state==='running'?'en curso':'pendiente de comprobar'}${name?`: ${name}`:''}. Comprobá su resultado antes de volver a intentar esta acción.`:'El recurso está ocupado por otro trabajo. Comprobá las operaciones pendientes antes de volver a intentarlo.');
   }

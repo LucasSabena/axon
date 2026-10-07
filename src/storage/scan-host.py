@@ -86,7 +86,7 @@ try:
  with os.scandir(fd) as entries:
   for e in entries:
    if len(rows)>=1000 or limited():complete=False;errors.append('Cobertura parcial: límite del análisis');break
-   if e.name=='.manifest.json' and root['adapterId']=='trash-legacy':continue
+   if root['adapterId']=='trash-legacy' and (e.name=='.manifest.json' or e.name.startswith('.manifest-')):continue
    p=root_path.rstrip('/')+'/'+e.name
    try:s=os.stat(e.name,dir_fd=fd,follow_symlinks=False)
    except OSError: errors.append('Un elemento cambió o no se pudo leer');complete=False;continue

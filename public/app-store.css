@@ -1,0 +1,11 @@
+/* Tienda de aplicaciones — estilos propios (el resto vive en polish.css). */
+.store-empty{grid-column:1/-1;padding:32px 16px;text-align:center;color:var(--text-dim)}
+.store-empty a{color:var(--accent)}
+.store-badge{display:inline-flex;align-items:center;align-self:flex-start;padding:2px 8px;border-radius:99px;background:var(--accent-soft);color:var(--accent);font-size:.68rem;font-weight:600}
+.store-categories .chip small{color:var(--text-dim);margin-left:4px;font-weight:400}
+.store-dropzone:disabled,.store-dropzone.disabled{opacity:.55;cursor:not-allowed}
+.store-dropzone:disabled:hover,.store-dropzone.disabled:hover{border-color:var(--border);background:var(--bg-panel)}
+.store-staged{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 14px;margin:10px 0;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:.8rem;color:var(--text-dim)}
+.store-staged svg{width:16px;height:16px;color:var(--accent);flex-shrink:0}
+.store-toolbar input[type=checkbox]{accent-color:var(--accent);width:15px;height:15px}
+.store-facts code{font-family:var(--font-mono);font-size:.85em}

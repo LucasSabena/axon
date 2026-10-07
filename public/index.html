@@ -7,29 +7,29 @@
   <meta name="theme-color" content="#080c10">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" type="image/svg+xml" href="/marca/favicon.svg">
-  <link rel="apple-touch-icon" href="/marca/app%20icon.svg">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>AXON</title>
-  <link rel="stylesheet" href="/app.css?v=8c2eb1ee0364">
-  <link rel="axon-feature" data-axon-style="/feat-files.css?v=fe57b96c1ed2">
+  <link rel="stylesheet" href="/app.css?v=0e578d145290">
+  <link rel="axon-feature" data-axon-style="/feat-files.css?v=d1911056aaba">
   <link rel="axon-feature" data-axon-style="/feat-dropbox.css?v=fda01f602aac">
-  <link rel="axon-feature" data-axon-style="/feat-scripts.css?v=ab0005571a94">
-  <link rel="axon-feature" data-axon-style="/feat-metrics.css?v=f13a73b573bc">
-  <link rel="axon-feature" data-axon-style="/feat-drop.css?v=b5d7bf6f588e">
-  <link rel="axon-feature" data-axon-style="/feat-ops.css?v=a7379242a5b2">
-  <link rel="axon-feature" data-axon-style="/feat-notify.css?v=bce6078e91f0">
-  <link rel="axon-feature" data-axon-style="/feat-compose.css?v=6f871c921466">
+  <link rel="axon-feature" data-axon-style="/feat-scripts.css?v=2da1ea482319">
+  <link rel="axon-feature" data-axon-style="/feat-metrics.css?v=d7e6f14552bc">
+  <link rel="axon-feature" data-axon-style="/feat-drop.css?v=6e4c627f7631">
+  <link rel="axon-feature" data-axon-style="/feat-ops.css?v=fe67fc81e5d7">
+  <link rel="axon-feature" data-axon-style="/feat-notify.css?v=2c0d3df804df">
+  <link rel="axon-feature" data-axon-style="/feat-compose.css?v=3395e0f2f372">
   <link rel="axon-feature" data-axon-style="/feat-agents.css?v=03143ea26d1e">
   <link rel="axon-feature" data-axon-style="/agent-context.css?v=41d2320e73be">
-  <link rel="axon-feature" data-axon-style="/feat-library.css?v=7481e71e1c95">
+  <link rel="axon-feature" data-axon-style="/feat-library.css?v=ae52177ccfd3">
   <link rel="axon-feature" data-axon-style="/navigation.css?v=5f9ea34490fd">
   <link rel="axon-feature" data-axon-style="/dashboard.css?v=9c0cbcfa963d">
   <link rel="axon-feature" data-axon-style="/polish.css?v=3886aca50e96">
   <link rel="axon-feature" data-axon-style="/maintenance.css?v=c01ec4727f7f">
   <link rel="axon-feature" data-axon-style="/backups.css?v=6f6c4143ee69">
-  <link rel="axon-feature" data-axon-style="/platform.css?v=d22264619241">
+  <link rel="axon-feature" data-axon-style="/platform.css?v=86453659f274">
   <link rel="axon-feature" data-axon-style="/vendor/webawesome/styles/themes/default.css?v=e19fff39b8c9">
   <link rel="stylesheet" href="/design-system.css?v=2f3d13b40e07">
   <link rel="stylesheet" href="/login.css?v=3eab62086046">
@@ -71,12 +71,12 @@
           <p class="login-intro" id="login-help">Usá el usuario configurado en tu servidor.</p>
           <form id="login-form" aria-describedby="login-help">
             <label for="username">Usuario</label>
-            <input type="text" id="username" name="username" placeholder="Tu usuario" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+            <input type="text" id="username" name="username" placeholder="Tu usuario" autocomplete="username" autocapitalize="none" spellcheck="false" autofocus required>
             <label for="password">Contraseña</label>
             <div class="password-field"><input type="password" id="password" name="password" placeholder="Tu contraseña" autocomplete="current-password" required><button type="button" id="password-toggle" class="icon-btn" aria-label="Mostrar contraseña" aria-controls="password" aria-pressed="false"><i data-lucide="eye" aria-hidden="true"></i></button></div>
             <label for="login-code" id="login-code-label" class="hidden">Código de tu autenticador</label>
             <input type="text" id="login-code" name="code" class="hidden" placeholder="000000" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" aria-describedby="login-code-help">
-            <p id="login-code-help" class="login-code-help hidden">Ingresá los 6 dígitos de tu app de autenticación.</p>
+            <p id="login-code-help" class="login-code-help hidden">Si tu cuenta tiene verificación en dos pasos, ingresá los 6 dígitos de tu app (o un código de recuperación).</p>
             <button type="submit" id="login-submit" class="btn-primary"><span id="login-submit-label">Ingresar</span><i data-lucide="arrow-right" class="login-submit-arrow" aria-hidden="true"></i><span class="login-submit-spinner" aria-hidden="true"></span></button>
             <p id="login-status" class="login-sr-only" role="status" aria-live="polite"></p>
             <div id="login-error" class="error" role="alert" aria-live="polite"></div>
@@ -89,14 +89,15 @@
     </div>
 
     <div id="main-screen" class="hidden">
+      <a class="skip-link" href="#main-content">Saltar al contenido</a>
       <div class="app-shell">
-        <aside class="sidebar">
+        <aside class="sidebar" id="app-sidebar">
           <div class="sidebar-brand">
             <img src="/marca/isologotipo.svg" alt="AXON" class="brand-logo-full">
             <img src="/marca/Isotipo.svg" alt="AXON" class="brand-logo-icon">
           </div>
 
-          <nav class="sidebar-nav">
+          <nav class="sidebar-nav" aria-label="Secciones">
             <button class="nav-item tab-btn" data-tab="dashboard"><i data-lucide="house" class="lucide-icon"></i><span class="nav-label">Inicio</span></button>
             <div class="nav-section-label"><span>Monitor</span></div>
             <button class="nav-item tab-btn active" data-tab="ports">
@@ -152,7 +153,7 @@
           <div class="sidebar-footer">
             <span class="sidebar-caption">Tu espacio de trabajo</span>
             <div class="sidebar-toggle-row">
-              <button class="sidebar-toggle" id="sidebar-collapse" title="Colapsar">
+              <button class="sidebar-toggle" id="sidebar-collapse" title="Colapsar" aria-label="Colapsar barra lateral">
                 <i data-lucide="panel-left-close" class="lucide-icon"></i>
               </button>
             </div>
@@ -161,7 +162,7 @@
 
         <div class="main-area">
           <header class="topbar">
-            <button id="mobile-menu-btn" class="icon-btn mobile-only" aria-label="Menú"><i data-lucide="menu"></i></button>
+            <button id="mobile-menu-btn" class="icon-btn mobile-only" aria-label="Menú" aria-controls="app-sidebar" aria-expanded="false"><i data-lucide="menu"></i></button>
             <button class="cmdk-trigger" id="cmdk-open">
               <i data-lucide="search" class="lucide-icon"></i> Buscar o ejecutar…
               <kbd>⌘K</kbd>
@@ -191,7 +192,7 @@
             </div>
           </header>
 
-          <main class="content">
+          <main class="content" id="main-content" tabindex="-1">
             <!-- PORTS -->
             <section id="tab-ports" class="tab-content active">
               <div class="section-header">
@@ -313,6 +314,7 @@
                 <h2>Contenedores Docker</h2>
                 <span class="last-updated" id="docker-updated"></span>
               </div>
+              <div id="docker-daemon-error" class="platform-error hidden" role="alert"></div>
               <div class="table-wrapper">
                 <table id="docker-table">
                   <thead>
@@ -406,14 +408,14 @@
 
   <!-- Command palette -->
   <div id="cmdk-overlay" class="cmdk-overlay hidden">
-    <div class="cmdk">
-      <input type="text" id="cmdk-input" class="cmdk-input" placeholder="Buscar proceso, puerto, acción…" autocomplete="off" spellcheck="false">
-      <div id="cmdk-list" class="cmdk-list"></div>
+    <div class="cmdk" role="dialog" aria-modal="true" aria-label="Buscar o ejecutar">
+      <input type="text" id="cmdk-input" class="cmdk-input" placeholder="Buscar proceso, puerto, acción…" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-controls="cmdk-list">
+      <div id="cmdk-list" class="cmdk-list" role="listbox" aria-label="Resultados"></div>
     </div>
   </div>
 
   <!-- Kill confirmation -->
-  <div id="kill-modal" class="modal hidden">
+  <div id="kill-modal" class="modal hidden" role="dialog" aria-modal="true">
     <div class="modal-content">
       <h3>Cerrar proceso</h3>
       <div id="kill-plan-body"></div>
@@ -427,7 +429,7 @@
   </div>
 
   <!-- Domain modal -->
-  <div id="domain-modal" class="modal hidden">
+  <div id="domain-modal" class="modal hidden" role="dialog" aria-modal="true">
     <div class="modal-content">
       <h3>Asignar subdominio</h3>
       <p id="domain-modal-info"></p>
@@ -451,7 +453,7 @@
   </div>
 
   <!-- Detail modal -->
-  <div id="detail-modal" class="modal hidden">
+  <div id="detail-modal" class="modal hidden" role="dialog" aria-labelledby="detail-title" aria-modal="true">
     <div class="modal-content detail-modal-content">
       <div class="detail-header">
         <div>
@@ -493,7 +495,7 @@
   </div>
 
   <!-- Job log modal (updates, installs) -->
-  <div id="job-modal" class="modal hidden">
+  <div id="job-modal" class="modal hidden" role="dialog" aria-labelledby="job-title" aria-modal="true">
     <div class="modal-content logs-modal-content">
       <div class="logs-modal-header">
         <div>
@@ -513,7 +515,7 @@
   </div>
 
   <!-- Project logs modal -->
-  <div id="logs-modal" class="modal hidden">
+  <div id="logs-modal" class="modal hidden" role="dialog" aria-labelledby="logs-modal-title" aria-modal="true">
     <div class="modal-content logs-modal-content">
       <div class="logs-modal-header">
         <div>
@@ -529,7 +531,7 @@
   </div>
 
   <!-- Project edit modal -->
-  <div id="project-edit-modal" class="modal hidden">
+  <div id="project-edit-modal" class="modal hidden" role="dialog" aria-labelledby="project-edit-title" aria-modal="true">
     <div class="modal-content">
       <h3 id="project-edit-title">Editar proyecto</h3>
       <form id="project-edit-form">
@@ -549,7 +551,7 @@
   </div>
 
   <!-- Settings modal -->
-  <div id="settings-modal" class="modal hidden">
+  <div id="settings-modal" class="modal hidden" role="dialog" aria-modal="true">
     <div class="modal-content">
       <h3>Configuración</h3>
       <form id="settings-form">
@@ -605,11 +607,11 @@
   </wa-dialog>
 
   <!-- QR pairing modal -->
-  <div id="pair-modal" class="modal hidden">
+  <div id="pair-modal" class="modal hidden" role="dialog" aria-modal="true">
     <div class="modal-content pair-modal-content">
       <h3>Vincular dispositivo</h3>
       <p class="listener-note">Escaneá el QR con el teléfono u otra compu — inicia sesión sin tipear la contraseña. Vence en 5 minutos y sirve una sola vez.</p>
-      <div id="pair-qr"></div>
+      <div id="pair-qr" role="status" aria-live="polite"></div>
       <div id="pair-url" class="pair-url"></div>
       <div class="modal-actions">
         <button id="pair-close" class="btn-secondary">Cerrar</button>
@@ -618,17 +620,23 @@
   </div>
 
   <!-- TOTP (2FA) modal — setup shows QR + manual key; disable only asks the code -->
-  <div id="totp-modal" class="modal hidden">
+  <div id="totp-modal" class="modal hidden" role="dialog" aria-labelledby="totp-title" aria-modal="true">
     <div class="modal-content pair-modal-content">
       <h3 id="totp-title">Activar verificación en dos pasos</h3>
       <p class="listener-note" id="totp-desc">Escaneá el QR con tu app autenticadora (Google Authenticator, Aegis, 1Password…) e ingresá el código de 6 dígitos para confirmar.</p>
-      <div id="totp-qr"></div>
+      <div id="totp-qr" role="status" aria-live="polite"></div>
       <div id="totp-secret-wrap">
         <span class="listener-note">Clave manual:</span>
         <div id="totp-secret" class="pair-url"></div>
       </div>
       <input type="text" id="totp-code" placeholder="Código de 6 dígitos" autocomplete="one-time-code" inputmode="numeric" maxlength="6">
+      <input type="password" id="totp-password" placeholder="Contraseña actual" autocomplete="current-password">
       <div id="totp-error" class="error"></div>
+      <div id="totp-recovery" class="hidden">
+        <p class="listener-note"><strong>Guardá estos códigos de recuperación</strong> — si perdés el autenticador son la única forma de entrar. Cada uno sirve una sola vez y no se vuelven a mostrar.</p>
+        <div id="totp-recovery-codes" class="recovery-codes"></div>
+        <button type="button" id="totp-recovery-copy" class="btn-secondary">Copiar códigos</button>
+      </div>
       <div class="modal-actions">
         <button id="totp-cancel" class="btn-secondary">Cancelar</button>
         <button id="totp-confirm" class="btn-primary">Confirmar</button>
@@ -638,7 +646,7 @@
 
   <!-- Password change modal — local account, no recovery: the current
        password is always required and other sessions get revoked -->
-  <div id="password-modal" class="modal hidden">
+  <div id="password-modal" class="modal hidden" role="dialog" aria-modal="true">
     <div class="modal-content pair-modal-content">
       <h3>Cambiar contraseña</h3>
       <p class="listener-note">La cuenta es local a este servidor — no hay recuperación por mail. Al cambiarla se cierran las demás sesiones y dispositivos vinculados.</p>
@@ -654,7 +662,7 @@
   </div>
 
   <!-- Make-service modal -->
-  <div id="service-modal" class="modal hidden">
+  <div id="service-modal" class="modal hidden" role="dialog" aria-modal="true">
     <div class="modal-content">
       <h3>Convertir en servicio</h3>
       <p class="listener-note">Genera una unidad systemd de usuario que reinicia el proceso automáticamente.</p>
@@ -679,51 +687,51 @@
   <script defer src="/vendor/lucide.min.js?v=344d31835187"></script>
   <script defer src="/assets.js?v=4b3b47dc2cf3"></script>
   <script defer src="/request-client.js?v=9e06d92f3fee"></script>
-  <script defer src="/interaction.js?v=1ec3321185e4"></script>
-  <script defer src="/themes.js?v=e4b0488469e9"></script>
-  <script defer src="/login.js?v=5d86afbc57e9"></script>
-  <link rel="axon-feature" data-axon-style="/agent-accounts.css?v=5fc13ad7526f">
-  <link rel="axon-feature" data-axon-style="/agent-usage.css?v=e5b7cbc5b5db">
-  <link rel="axon-feature" data-axon-style="/agent-consumption.css?v=8a0451936c0f">
+  <script defer src="/interaction.js?v=c48c62d0af37"></script>
+  <script defer src="/themes.js?v=4d0f2999b0b7"></script>
+  <script defer src="/login.js?v=e2272554d7cb"></script>
+  <link rel="axon-feature" data-axon-style="/agent-accounts.css?v=6243df72e07b">
+  <link rel="axon-feature" data-axon-style="/agent-usage.css?v=d305c519568b">
+  <link rel="axon-feature" data-axon-style="/agent-consumption.css?v=28263d992053">
   <script type="text/axon-feature" data-src="/terminal-tools.js?v=dfff049a9a58"></script>
-  <link rel="stylesheet" href="/software.css?v=aa231f6eb768">
-  <script defer src="/software.js?v=a1f07389f852"></script>
-  <script defer src="/app.js?v=d966e28f6e3a"></script>
+  <link rel="stylesheet" href="/software.css?v=0f09c8cfae5b">
+  <script defer src="/app.js?v=a32a24c5e39b"></script>
+  <script defer src="/software.js?v=ac441cc9eeac"></script>
   <script defer src="/onboarding.js?v=8e8516b302ef"></script>
   <link rel="stylesheet" href="/host-storage.css?v=f6a41912b754">
-  <script defer src="/host-storage.js?v=aa6cbdc9ae5d"></script>
+  <script defer src="/host-storage.js?v=a5c65d59389f"></script>
   <link rel="stylesheet" href="/transfer-review.css?v=98bc9c35eadc">
-  <script defer src="/transfer-review.js?v=c3660b2e92ce"></script>
-  <script type="text/axon-feature" data-src="/feat-files.js?v=654bc634f358"></script>
-  <script type="text/axon-feature" data-src="/feat-dropbox.js?v=fefbb2bafdfb"></script>
-  <script type="text/axon-feature" data-src="/feat-scripts.js?v=940634079aa1"></script>
-  <script type="text/axon-feature" data-src="/feat-logs.js?v=d840b157703e"></script>
-  <script type="text/axon-feature" data-src="/feat-metrics.js?v=e4a2c01e4e3d"></script>
-  <script type="text/axon-feature" data-src="/feat-drop.js?v=99ee78b1b0c1"></script>
-  <script type="text/axon-feature" data-src="/feat-ops.js?v=02ca922b0bf7"></script>
+  <script defer src="/transfer-review.js?v=205ff33f3b6d"></script>
+  <script type="text/axon-feature" data-src="/feat-files.js?v=3c0398260e26"></script>
+  <script type="text/axon-feature" data-src="/feat-dropbox.js?v=c2aa192f3992"></script>
+  <script type="text/axon-feature" data-src="/feat-scripts.js?v=735267350c01"></script>
+  <script type="text/axon-feature" data-src="/feat-logs.js?v=8b7a506006d5"></script>
+  <script type="text/axon-feature" data-src="/feat-metrics.js?v=09f85736d7be"></script>
+  <script type="text/axon-feature" data-src="/feat-drop.js?v=21eb48409110"></script>
+  <script type="text/axon-feature" data-src="/feat-ops.js?v=50a9ab1480f7"></script>
   <link rel="axon-feature" data-axon-style="/optimizer.css?v=128ae12f8225">
-  <script type="text/axon-feature" data-src="/optimizer.js?v=5df9c5e41879"></script>
-  <script type="text/axon-feature" data-src="/feat-notify.js?v=82542edeb1ae"></script>
-  <script type="text/axon-feature" data-src="/feat-compose.js?v=6bff3b32367a"></script>
-  <script type="text/axon-feature" data-src="/agent-context.js?v=e4ca47eee189"></script>
-  <script type="text/axon-feature" data-src="/agent-usage.js?v=396909dfd87e"></script>
-  <script type="text/axon-feature" data-src="/agent-consumption.js?v=2eea796742b5"></script>
-  <script type="text/axon-feature" data-src="/agent-accounts.js?v=e83a6b57d1b9"></script>
-  <script type="text/axon-feature" data-src="/feat-agents.js?v=cda7a8eb9563"></script>
-  <script type="text/axon-feature" data-src="/feat-library.js?v=0bfb9f381e80"></script>
-  <script type="text/axon-feature" data-src="/dashboard.js?v=0e46d02e9f75"></script>
-  <script type="text/axon-feature" data-src="/storage.js?v=c4284df86692"></script>
-  <script type="text/axon-feature" data-src="/home-links.js?v=232c75cba96d"></script>
-  <script type="text/axon-feature" data-src="/app-migrations.js?v=8afd3fef3a2a"></script>
-  <script type="text/axon-feature" data-src="/app-store.js?v=d8e9ea9f5d12"></script>
-  <script type="text/axon-feature" data-src="/connections.js?v=6b388ec8dd23"></script>
-  <script type="text/axon-feature" data-src="/settings.js?v=cdd8cb6cda12"></script>
-  <script type="text/axon-feature" data-src="/view-controls.js?v=a65cc71fb1b8"></script>
-  <script type="text/axon-feature" data-src="/platform.js?v=e659e6646da7"></script>
-  <script type="text/axon-feature" data-src="/backups.js?v=6f88ea9536bf"></script>
-  <script type="text/axon-feature" data-src="/platform-operations.js?v=95d2b4d80124"></script>
-  <script type="text/axon-feature" data-src="/shell.js?v=9032f2c848e8"></script>
-  <script type="text/axon-feature" data-module="true" data-src="/navigation.js?v=28e95931d809"></script>
+  <script type="text/axon-feature" data-src="/optimizer.js?v=03da34a0ff62"></script>
+  <script type="text/axon-feature" data-src="/feat-notify.js?v=1884276bc2fc"></script>
+  <script type="text/axon-feature" data-src="/feat-compose.js?v=623fd75deaff"></script>
+  <script type="text/axon-feature" data-src="/agent-context.js?v=19c37556f869"></script>
+  <script type="text/axon-feature" data-src="/agent-usage.js?v=5df6a8396a83"></script>
+  <script type="text/axon-feature" data-src="/agent-consumption.js?v=f0da3b984bf4"></script>
+  <script type="text/axon-feature" data-src="/agent-accounts.js?v=006cd3dc8d1c"></script>
+  <script type="text/axon-feature" data-src="/feat-agents.js?v=af16597b71c6"></script>
+  <script type="text/axon-feature" data-src="/feat-library.js?v=49ae9b56987d"></script>
+  <script type="text/axon-feature" data-src="/dashboard.js?v=c108c07176a7"></script>
+  <script type="text/axon-feature" data-src="/storage.js?v=cd5b0a9a6d1c"></script>
+  <script type="text/axon-feature" data-src="/home-links.js?v=d896a9cb6858"></script>
+  <script type="text/axon-feature" data-src="/app-migrations.js?v=a94407ad7cb4"></script>
+  <script type="text/axon-feature" data-src="/app-store.js?v=24f0a43fd220"></script>
+  <script type="text/axon-feature" data-src="/connections.js?v=e19949c25db8"></script>
+  <script type="text/axon-feature" data-src="/settings.js?v=39555417b84c"></script>
+  <script type="text/axon-feature" data-src="/view-controls.js?v=32eb2a959359"></script>
+  <script type="text/axon-feature" data-src="/platform.js?v=03e29b76648d"></script>
+  <script type="text/axon-feature" data-src="/backups.js?v=06cafe794cda"></script>
+  <script type="text/axon-feature" data-src="/platform-operations.js?v=0a8f4260ad19"></script>
+  <script type="text/axon-feature" data-src="/shell.js?v=e3e27f204aee"></script>
+  <script type="text/axon-feature" data-module="true" data-src="/navigation.js?v=13511c81dded"></script>
   <script type="text/axon-feature" data-src="/mobile.js?v=66906ef2ce44"></script>
   <script>
     // Boot watchdog — runs even if app.js itself failed to load (deploy
@@ -743,6 +751,46 @@
     document.addEventListener('click', function (ev) {
       if (ev.target && ev.target.id === 'boot-retry' && !window.__axonApp) location.reload();
     });
+    // SW update notice: a new service worker waits instead of silently
+    // replacing the shell mid-session. We surface a reload bar; on click we
+    // tell the waiting worker to take over and reload when it does.
+    if ('serviceWorker' in navigator) {
+      var swBar;
+      var showUpdateBar = function (reg) {
+        if (swBar || !reg.waiting) return;
+        swBar = document.createElement('div');
+        swBar.id = 'sw-update-bar';
+        swBar.setAttribute('role', 'status');
+        var msg = document.createElement('span');
+        msg.textContent = 'Hay una versión nueva de Axon.';
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = 'Recargar';
+        btn.addEventListener('click', function () {
+          btn.disabled = true;
+          reg.waiting.postMessage('axon:skip-waiting');
+        });
+        swBar.append(msg, btn);
+        document.body.appendChild(swBar);
+      };
+      navigator.serviceWorker.getRegistration().then(function (reg) {
+        if (!reg) return;
+        showUpdateBar(reg);
+        reg.addEventListener('updatefound', function () {
+          var worker = reg.installing;
+          if (!worker) return;
+          worker.addEventListener('statechange', function () {
+            if (worker.state === 'installed' && navigator.serviceWorker.controller) showUpdateBar(reg);
+          });
+        });
+      }).catch(function () {});
+      var swReloaded = false;
+      navigator.serviceWorker.addEventListener('controllerchange', function () {
+        if (swReloaded) return;
+        swReloaded = true;
+        location.reload();
+      });
+    }
   </script>
 </body>
 </html>

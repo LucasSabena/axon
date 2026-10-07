@@ -14,6 +14,7 @@ import type {
   Listener,
   PortProcess,
   KnownService,
+  DomainMapping,
 } from './types';
 
 // --- Well-known services, keyed by process name (comm) ---
@@ -97,16 +98,22 @@ export async function scanListeners(): Promise<RawListener[]> {
   }
   const out = res.stdout;
   const listeners: RawListener[] = [];
-  const re = /^(tcp|udp)\s+\S+\s+\d+\s+\d+\s+(\S+):(\d+)\s+\S+(?:\s+users:\(\("([^"]+)",pid=(\d+),fd=\d+\))?/gm;
+  // The users:(...) chunk can hold several ("name",pid=N,fd=M) entries when a
+  // socket is shared/inherited — emit one listener per pid instead of only
+  // attributing it to the first process.
+  const re = /^(tcp|udp)\s+\S+\s+\d+\s+\d+\s+(\S+):(\d+)\s+\S+(?:\s+users:\(((?:\([^()]*\),?)+)\))?/gm;
+  const procRe = /\("([^"]+)",pid=(\d+),/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(out)) !== null) {
-    listeners.push({
-      proto: m[1] as 'tcp' | 'udp',
-      address: m[2],
-      port: parseInt(m[3], 10),
-      procName: m[4] || '',
-      pid: m[5] ? parseInt(m[5], 10) : 0,
-    });
+    const base = { proto: m[1] as 'tcp' | 'udp', address: m[2], port: parseInt(m[3], 10) };
+    const pairs = [...(m[4] || '').matchAll(procRe)];
+    if (!pairs.length) {
+      listeners.push({ ...base, procName: '', pid: 0 });
+      continue;
+    }
+    for (const p of pairs) {
+      listeners.push({ ...base, procName: p[1], pid: parseInt(p[2], 10) });
+    }
   }
   return listeners;
 }
@@ -151,7 +158,7 @@ function procPpid(stat: string): number {
   return parseInt(parts[1] || '0', 10) || 0;
 }
 
-function procStartTime(stat: string): number {
+export function procStartTime(stat: string): number {
   const idx = stat.lastIndexOf(')');
   if (idx < 0) return 0;
   const parts = stat.slice(idx + 1).trim().split(/\s+/);
@@ -260,6 +267,7 @@ interface ProjectInfo {
 
 const projectCache = new Map<string, { at: number; info: ProjectInfo | null }>();
 const PROJECT_CACHE_TTL = 30_000;
+const PROJECT_CACHE_MAX = 200;
 
 // Walk up from cwd looking for git root / manifests. Reads via /hostfs.
 export async function findProjectInfo(cwd: string): Promise<ProjectInfo | null> {
@@ -270,6 +278,18 @@ export async function findProjectInfo(cwd: string): Promise<ProjectInfo | null> 
 
   const info = await findProjectInfoUncached(cwd);
   projectCache.set(cacheKey, { at: Date.now(), info });
+  // Bounded map: drop expired entries first, then oldest insertion order.
+  if (projectCache.size > PROJECT_CACHE_MAX) {
+    const now = Date.now();
+    for (const [k, v] of projectCache) {
+      if (now - v.at > PROJECT_CACHE_TTL) projectCache.delete(k);
+    }
+    while (projectCache.size > PROJECT_CACHE_MAX) {
+      const oldest = projectCache.keys().next().value;
+      if (oldest === undefined) break;
+      projectCache.delete(oldest);
+    }
+  }
   return info;
 }
 
@@ -352,6 +372,81 @@ async function hostExistsPath(hostPath: string): Promise<boolean> {
 }
 
 // --- Identity classification ---
+
+// cmdline is displayed verbatim in the UI — argv can carry credentials
+// (`--password=x`, `--token x`, postgres://u:p@h, `PGPASSWORD=x psql`).
+// Mask them at the boundary.
+const SECRET_ARG_RE = /pass|token|secret|pwd|credential|auth|key|dsn|_url|_uri/i;
+// Single-dash flags whose value is a credential: redis-cli -a, mysql -p,
+// mosquitto -P/-u?, curl -u (user:pass), wget --password covered above.
+const SINGLE_DASH_SECRET = new Set(['-a', '-P', '-p', '-w', '-u']);
+// Same flags with the value attached: mysql -pSecret, curl -uadmin:pass.
+const SINGLE_DASH_ATTACHED = /^-[aPpwu]\S/;
+// credential-in-URL anywhere inside a token (e.g. --dsn=postgres://u:p@h)
+const URL_CRED_RE = /[a-z0-9+\-.]+:\/\/[^/\s]*:[^@\s]+@/i;
+// Schemeless user:pass@host — curl accepts it and it leaks the same way.
+const USERPASS_RE = /^[^\s/@:]+:[^\s/@]+@[^\s/]+/;
+// Secret-bearing shapes inside a single argv token: JSON bodies
+// ({"password":"x"}) and headers (Authorization:, X-Api-Key:).
+const INLINE_SECRET_RE = /(pass|token|secret|pwd|credential|auth|key|dsn|_url|_uri)[\w-]*["']?\s*:/i;
+export function maskCmd(cmd: string): string {
+  // procCmdline already converts NULs to spaces — split on whitespace (and
+  // tolerate \0 anyway for any caller that passes a raw cmdline).
+  const args = (cmd || '').split(/[\s\0]+/).filter((a) => a !== '');
+  const out: string[] = [];
+  let maskNext = false;
+  // After a bare "SecretHeader:" token the value lives in following tokens
+  // (e.g. -H 'Authorization: Bearer x') — mask until the next flag.
+  let maskChain = false;
+  for (const a of args) {
+    if (maskNext) { out.push('•••'); maskNext = false; continue; }
+    if (maskChain) {
+      // Only a pure-letter flag ends the chain — '-x9K!' is the secret
+      // value itself, not a flag.
+      if (/^-{1,2}[A-Za-z]+$/.test(a)) maskChain = false;
+      else { out.push('•••'); continue; }
+    }
+    const eq = a.indexOf('=');
+    // NAME=value style: env prefixes (PGPASSWORD=x) and --flag=value.
+    if (eq > 0) {
+      const key = a.slice(0, eq);
+      const val = a.slice(eq + 1);
+      if (SECRET_ARG_RE.test(key) || URL_CRED_RE.test(val) || USERPASS_RE.test(val)) {
+        out.push(`${key}=•••`);
+        continue;
+      }
+    }
+    if (URL_CRED_RE.test(a) || USERPASS_RE.test(a)) { out.push('•••'); continue; }
+    if (INLINE_SECRET_RE.test(a)) { out.push('•••'); if (/:$/.test(a)) maskChain = true; continue; }
+    if (a.startsWith('--') && SECRET_ARG_RE.test(a)) { out.push(a); maskNext = true; continue; }
+    if (SINGLE_DASH_SECRET.has(a)) { out.push(a); maskNext = true; continue; }
+    if (SINGLE_DASH_ATTACHED.test(a)) { out.push('•••'); continue; }
+    out.push(a);
+  }
+  return out.join(' ');
+}
+
+// argv-element variant: maskCmd can't be used on a pre-quoted command line
+// (quoting hides the '-' prefix from flag detection). Mask each element and
+// carry the flag→value pairing across elements.
+export function maskArgv(argv: string[]): string[] {
+  const out: string[] = [];
+  let maskNext = false;
+  // A bare "SecretHeader:" element means the value lives in the next
+  // elements (e.g. argv …, 'Authorization:', 'Bearer', 'x', …).
+  let chain = false;
+  for (const a of argv) {
+    if (maskNext) { out.push('•••'); maskNext = false; continue; }
+    if (chain) {
+      if (/^-{1,2}[A-Za-z]+$/.test(a)) chain = false;
+      else { out.push('•••'); continue; }
+    }
+    out.push(maskCmd(a));
+    if (SINGLE_DASH_SECRET.has(a) || (a.startsWith('--') && !a.includes('=') && SECRET_ARG_RE.test(a))) maskNext = true;
+    else if (/:$/.test(a) && INLINE_SECRET_RE.test(a)) chain = true;
+  }
+  return out;
+}
 
 function baseCmd(cmd: string): string {
   const first = (cmd || '').split('\0').join(' ').trim().split(/\s+/)[0] || '';
@@ -477,17 +572,25 @@ function systemdUnit(cgroup: string): { unit: string; scope: 'user' | 'system' }
 
 // --- Port health probing ---
 
-// Any resolved response (even 4xx/5xx/redirect) means something is answering.
-// Connection refused / timeout → unhealthy. UDP listeners are never probed.
+// A bare TCP connect answers "is this listener accepting" for ANY service —
+// an HTTP HEAD would falsely flag non-HTTP listeners (Redis, Postgres, SSH…)
+// as unhealthy and fill their logs with garbage. UDP is never probed.
 async function probePortHealth(port: number): Promise<{ ok: boolean; ms?: number }> {
   const t0 = performance.now();
   try {
-    await fetch(`http://127.0.0.1:${port}/`, {
-      method: 'HEAD',
-      signal: AbortSignal.timeout(400),
-      redirect: 'manual',
-    });
-    return { ok: true, ms: Math.round(performance.now() - t0) };
+    const ok = await Promise.race([
+      (async () => {
+        const sock = await Bun.connect({
+          hostname: '127.0.0.1',
+          port,
+          socket: { data() {} },
+        });
+        try { sock.end(); } catch { /* already closed */ }
+        return true;
+      })().catch(() => false),
+      Bun.sleep(400).then(() => false),
+    ]);
+    return ok ? { ok: true, ms: Math.round(performance.now() - t0) } : { ok: false };
   } catch {
     return { ok: false };
   }
@@ -533,13 +636,16 @@ async function scanPortProcesses(): Promise<PortProcess[]> {
       const identity = await classify(pid, name, cmd, cwd, uid, ports);
       const unit = systemdUnit(cgroup);
       if (unit) { identity.unit = unit.unit; identity.unitScope = unit.scope; }
+      // Stamp the identity we just observed so a later killProcessTree can
+      // reject a recycled PID (stopProject relies on this).
+      stampPid(pid, startJiffies);
       out.push({
         pid,
         ppid: procPpid(stat),
         user: await uidToName(uid),
         uid,
         name,
-        cmd,
+        cmd: maskCmd(cmd),
         cwd,
         listeners: ls.map(({ proto, address, port }) => ({ proto, address, port })),
         ports,
@@ -585,8 +691,8 @@ async function scanPortProcesses(): Promise<PortProcess[]> {
     }
   }
 
-  // Probe TCP listeners for HTTP health, all in parallel. UDP → healthy=null.
-  // Worst-case added latency is bounded by the 400ms abort timeout.
+  // Probe TCP listeners with a bare connect, all in parallel. UDP → healthy=null.
+  // Worst-case added latency is bounded by the 400ms timeout.
   const tcpPorts = new Set<number>();
   for (const p of out) {
     for (const l of p.listeners) {
@@ -614,7 +720,28 @@ async function scanPortProcesses(): Promise<PortProcess[]> {
   return out;
 }
 
-export async function killPlan(pid: number): Promise<KillPlan | null> {
+// Identification-time stamps: pid → process starttime (jiffies). killPlan
+// stamps the PID it identified so killProcessTree can refuse to signal a
+// recycled PID. Entries are short-lived and bounded.
+const identStamps = new Map<number, { start: number; at: number }>();
+const IDENT_STAMP_TTL = 120_000;
+
+function stampPid(pid: number, start: number): void {
+  if (start > 0) identStamps.set(pid, { start, at: Date.now() });
+  if (identStamps.size > 500) {
+    const now = Date.now();
+    for (const [k, v] of identStamps) {
+      if (now - v.at > IDENT_STAMP_TTL) identStamps.delete(k);
+    }
+    while (identStamps.size > 500) {
+      const oldest = identStamps.keys().next().value;
+      if (oldest === undefined) break;
+      identStamps.delete(oldest);
+    }
+  }
+}
+
+export async function killPlan(pid: number, domains?: DomainMapping[]): Promise<KillPlan | null> {
   const [cmd, cwd, status, stat, comm, cgroup] = await Promise.all([
     procCmdline(pid),
     procCwd(pid),
@@ -633,6 +760,7 @@ export async function killPlan(pid: number): Promise<KillPlan | null> {
   const unit = systemdUnit(cgroup);
   if (unit) { identity.unit = unit.unit; identity.unitScope = unit.scope; }
   const tree = await processTree(pid);
+  stampPid(pid, procStartTime(stat));
 
   const warnings: string[] = [];
   if (unit) {
@@ -644,25 +772,59 @@ export async function killPlan(pid: number): Promise<KillPlan | null> {
   if (identity.category === 'project' && identity.projectRoot) {
     warnings.push(`Proyecto: ${identity.projectRoot}`);
   }
+  // Associated domains die with the process — name them so the operator sees
+  // the blast radius, not just the port number.
+  for (const d of domains || []) {
+    if (ports.includes(d.port)) {
+      warnings.push(`El dominio ${d.fullDomain} apunta a este proceso y va a quedar caído.`);
+    }
+  }
 
   return {
     pid,
     name,
-    cmd: cmd || name,
+    cmd: maskCmd(cmd || name),
     cwd,
     identity,
     portsFreed: ports,
-    tree: [{ pid, name, cmd: cmd || name }, ...tree],
+    tree: [{ pid, name, cmd: maskCmd(cmd || name) }, ...tree.map((t) => ({ ...t, cmd: maskCmd(t.cmd) }))],
     warnings,
     blocked: identity.protected ? identity.protectionReason || 'Proceso protegido' : undefined,
   };
 }
 
-export async function killProcessTree(pid: number): Promise<{ ok: boolean; killed: number[]; error?: string }> {
+// Callers may pass a starttime (jiffies, /proc/<pid>/stat field 22) captured
+// when they identified the process; a mismatch means the PID was recycled.
+export async function killProcessTree(pid: number, expectedStart?: number): Promise<{ ok: boolean; killed: number[]; skipped?: number[]; error?: string }> {
   if (pid <= 1) return { ok: false, killed: [], error: 'PID inválido' };
   if (pid === process.pid || protectedPids.includes(pid)) {
     return { ok: false, killed: [], error: 'Proceso protegido' };
   }
+
+  // Re-identify the process NOW — the pid may have been recycled since the
+  // caller looked at it. Without an identity check a stale pid could SIGKILL
+  // a protected system process as root.
+  const [cmd, cwd, status, stat, comm] = await Promise.all([
+    procCmdline(pid),
+    procCwd(pid),
+    readProc(pid, 'status'),
+    readProc(pid, 'stat'),
+    readProc(pid, 'comm'),
+  ]);
+  if (!cmd && !comm) return { ok: false, killed: [], error: 'El proceso ya no existe' };
+  const start = procStartTime(stat);
+  if (!start) return { ok: false, killed: [], error: 'No se pudo verificar la identidad del proceso' };
+  const stamped = identStamps.get(pid);
+  const expected =
+    expectedStart ??
+    (stamped && Date.now() - stamped.at < IDENT_STAMP_TTL ? stamped.start : undefined);
+  if (expected !== undefined && start !== expected) {
+    return { ok: false, killed: [], error: 'El PID fue reutilizado por otro proceso; volvé a identificarlo' };
+  }
+
+  const name = (comm || '').trim() || baseCmd(cmd) || '?';
+  const uid = procUid(status);
+
   const listeners = await scanListeners();
   const ports = listeners.filter((l) => l.pid === pid).map((l) => l.port);
   const port = ports.find((p) => protectedPorts.includes(p));
@@ -670,13 +832,43 @@ export async function killProcessTree(pid: number): Promise<{ ok: boolean; kille
     return { ok: false, killed: [], error: `Puerto protegido ${port}` };
   }
 
+  // Full classification at kill time: protected identities refuse here,
+  // not only in the killPlan preview.
+  const identity = await classify(pid, name, cmd || name, cwd, uid, ports);
+  if (identity.protected) {
+    return { ok: false, killed: [], error: identity.protectionReason || 'Proceso protegido' };
+  }
+
   const tree = await processTree(pid);
-  const targets = [pid, ...tree.map((t) => t.pid)];
+  // Children are killed alongside the parent but get no classify() pass —
+  // a protected service forked/spawned as a child (e.g. nginx workers under
+  // a dev-server root) must not die silently. Skip them by known-name and
+  // by the same pid-level protections applied to the parent.
+  const childSafe = (t: { pid: number; name: string; cmd: string }): boolean => {
+    if (t.pid <= 1 || t.pid === process.pid || protectedPids.includes(t.pid)) return false;
+    const known = KNOWN_PROCESSES[t.name.toLowerCase()] || KNOWN_PROCESSES[baseCmd(t.cmd)];
+    return !(known && known.protect);
+  };
+  const skippedChildren = tree.filter((t) => !childSafe(t));
+  const targets = [pid, ...tree.filter(childSafe).map((t) => t.pid)];
+
+  // PID-recycle guard: capture each target's starttime and re-verify before
+  // every signal — a target whose identity changed is never signaled.
+  const stamps = new Map<number, number>();
+  for (const t of targets) {
+    const st = procStartTime(await readProc(t, 'stat'));
+    if (st > 0) stamps.set(t, st);
+  }
 
   const sendSignal = async (signal: 'TERM' | 'KILL') => {
+    const live: number[] = [];
+    for (const t of targets) {
+      const st = procStartTime(await readProc(t, 'stat'));
+      if (st > 0 && st === stamps.get(t)) live.push(t);
+    }
+    if (!live.length) return;
     // Signal on the host via nsenter so signal delivery is in host context.
-    const pids = targets.join(' ');
-    await hostExec(`kill -${signal} ${pids} 2>/dev/null; true`, { user: 'root', timeoutMs: 10_000 });
+    await hostExec(`kill -${signal} ${live.join(' ')} 2>/dev/null; true`, { user: 'root', timeoutMs: 10_000 });
   };
 
   await sendSignal('TERM');
@@ -699,15 +891,23 @@ export async function killProcessTree(pid: number): Promise<{ ok: boolean; kille
   for (const t of targets) {
     if (!(await procAlive(t))) killed.push(t);
   }
-  return { ok: killed.includes(pid), killed };
+  const skipped = skippedChildren.map((t) => t.pid);
+  return {
+    ok: killed.includes(pid),
+    killed,
+    ...(skipped.length ? { skipped } : {}),
+  };
 }
 
 async function procAlive(pid: number): Promise<boolean> {
   try {
     const stat = await readFile(`/proc/${pid}/stat`, 'utf-8');
     const idx = stat.lastIndexOf(')');
-    const state = stat.slice(idx + 1).trim().split(/\s+/)[0];
-    return state !== 'Z' && state !== 'X';
+    // Malformed stat (no ')' → idx -1, or empty state) must NOT count as
+    // alive — garbage would otherwise look like a running process.
+    if (idx < 0) return false;
+    const state = stat.slice(idx + 1).trim().split(/\s+/)[0] || '';
+    return /^[A-Za-z]$/.test(state) && state !== 'Z' && state !== 'X' && state !== 'x';
   } catch {
     return false;
   }
@@ -734,7 +934,7 @@ export async function getProcessDetail(pid: number) {
       let value = entry.slice(eq + 1);
       // Mask anything whose name or value smells like a credential —
       // DATABASE_URL=postgres://u:secret@… has a clean key name but leaks.
-      if (/(token|secret|key|pass|password|credential|auth)/i.test(key)
+      if (/(token|secret|key|pass|password|credential|auth|dsn|pwd|_url|_uri)/i.test(key)
         || /^[a-z0-9+\-.]+:\/\/[^/\s]*:[^@\s]+@/i.test(value)) value = '••••••';
       env[key] = value;
     }
@@ -755,7 +955,7 @@ export async function getProcessDetail(pid: number) {
     pid,
     ppid: procPpid(stat),
     name,
-    cmd: cmd || name,
+    cmd: maskCmd(cmd || name),
     cwd,
     user: await uidToName(uid),
     ports,

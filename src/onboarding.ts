@@ -54,7 +54,7 @@ function saveOnboarding(next: OnboardingFile | null): Promise<void> {
   const operation = saveQueue.catch(() => {}).then(async () => {
     await mkdir(path.dirname(FILE), { recursive: true });
     const temp = `${FILE}.${process.pid}.tmp`;
-    await writeFile(temp, JSON.stringify(next, null, 2) + '\n', 'utf-8');
+    await writeFile(temp, JSON.stringify(next, null, 2) + '\n', { encoding: 'utf-8', mode: 0o600 });
     await rename(temp, FILE);
   });
   saveQueue = operation;

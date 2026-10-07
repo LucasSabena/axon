@@ -157,8 +157,9 @@ def normalize_devin(data, now):
         if key == 'daily' and data.get('hide_daily_quota') is True: continue
         used = number(data.get(key + '_percentage'))
         if used is not None:
-            # The quota endpoint uses fractions below 1, percent above it.
-            row = window(key, label, used * 100 if used < 1 else used, data.get(key + '_reset_at'), duration)
+            # The quota endpoint uses fractions at or below 1, percent above
+            # it — a fully used quota reports 1.0, not 100.
+            row = window(key, label, used * 100 if used <= 1 else used, data.get(key + '_reset_at'), duration)
             if row: windows.append(row)
     balances = []
     remaining = number(data.get('overage_balance'))
@@ -364,11 +365,38 @@ class Collector:
         if not result.get('plan'): result['plan'] = public.get('plan')
         return result
 
+    def prune_cache(self):
+        # Fingerprints embed the credential, so every rotation orphans the old
+        # cache+lock pair. Drop files untouched for a week; the cap keeps the
+        # directory bounded even under churn.
+        try:
+            cutoff = self.clock() - 7 * 86400
+            stale = []
+            for p in self.cache.iterdir():
+                if p.is_symlink() or p.suffix not in ('.json', '.lock'): continue
+                try:
+                    if p.stat().st_mtime < cutoff: stale.append(p)
+                except OSError: continue
+            for p in stale[:512]:
+                try:
+                    if p.suffix == '.lock':
+                        # An actively-held lock survives unlink() but a new
+                        # open would start a second flock domain — only drop
+                        # locks we can acquire first.
+                        fd = os.open(p, os.O_RDWR | os.O_NOFOLLOW)
+                        try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        except BlockingIOError: os.close(fd); continue
+                        os.close(fd)
+                    p.unlink()
+                except OSError: continue
+        except OSError: pass
+
     def collect(self, agent, force=False):
         if agent in ['codex', 'claude']: entries = self.profiles(agent)
         elif agent in ['opencode', 'openchamber']: entries = self.opencode()
         elif agent == 'devin': entries = self.devin()
         else: raise self.accounts.Failure('Este agente no tiene un lector de cuotas', 404)
+        self.prune_cache()
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
             snapshots = list(executor.map(lambda e: self.snapshot(e, force), entries))
         return {'ok': True, 'agent': agent, 'accounts': snapshots, 'updatedAt': int(self.clock()), 'refreshSeconds': TTL,

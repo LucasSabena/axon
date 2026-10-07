@@ -8,11 +8,13 @@ interface Account { generation: string; clientId: string; refresh: string; acces
 interface Shared { id: string; name: string; url: string; type: 'file' | 'dir'; root: CloudEntry }
 interface Stored { sealed: string; generation: string }
 const digest = (s: string) => createHash('sha256').update(s).digest('hex');
+/** App IDs are configuration details, not secrets to expose to the browser. */
+export const maskClientId = (v: string) => v ? '…' + v.slice(-4) : '';
 class AppFolderRootError extends Error {}
 export class UploadRejected extends MaintenanceError {}
 export const headerJson = (value: unknown) => JSON.stringify(value).replace(/[\u007f-\uffff]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
 export function cloudPath(value: unknown): string {
-  if (typeof value !== 'string' || value.length > 4096 || /[\x00-\x1f\x7f\\]/.test(value) || (value && (!value.startsWith('/') || value.endsWith('/'))) || value.split('/').some(v => v === '.' || v === '..')) throw new MaintenanceError('Ruta de Dropbox inválida', 400);
+  if (typeof value !== 'string' || value.length > 4096 || /[\x00-\x1f\x7f\\]/.test(value) || value.includes('//') || (value && (!value.startsWith('/') || value.endsWith('/'))) || value.split('/').some(v => v === '.' || v === '..')) throw new MaintenanceError('Ruta de Dropbox inválida', 400);
   return value;
 }
 export function cloudName(value: unknown): string {
@@ -43,7 +45,14 @@ export class Dropbox {
   private save(owner:string, a:Account) { this.store.put('dropbox-account', owner, {generation:a.generation,sealed:this.vault.seal(a,'account:'+owner)}); }
   status(owner:string) {
     const a = this.record(owner)?.sealed ? this.account(owner) : null;
-    return {configured:!!this.clientId(owner),serverConfigured:!!this.envClient,clientId:this.clientId(owner),connected:!!a,appFolder:!!a?.appFolder,uploadSupported:true,uploadGranted:!!a?.uploadGranted,account:a ? {name:a.name,email:a.email} : null,sources:a ? [{id:'account',name:a.appFolder?'Carpeta de la aplicación':'Mi Dropbox',type:'account'},...this.shares(owner).map(s=>({id:s.id,name:s.name,type:'shared'}))] : []};
+    return {configured:!!this.clientId(owner),serverConfigured:!!this.envClient,clientId:maskClientId(this.clientId(owner)),connected:!!a,appFolder:!!a?.appFolder,uploadSupported:true,uploadGranted:!!a?.uploadGranted,account:a ? {name:a.name,email:a.email} : null,sources:a ? [{id:'account',name:a.appFolder?'Carpeta de la aplicación':'Mi Dropbox',type:'account'},...this.shares(owner).map(s=>({id:s.id,name:s.name,type:'shared'}))] : []};
+  }
+  async checkConnection(owner:string) {
+    const a=await this.access(owner);
+    const usage=await this.rpcWith(a.access,'users/get_space_usage',null).catch(()=>null);
+    if(!usage){await this.rpcWith(a.access,'users/get_current_account',null);return {};}
+    const used=Number(usage.used),allocated=Number(usage.allocation?.allocated);
+    return {used:Number.isSafeInteger(used)?used:undefined,total:Number.isSafeInteger(allocated)?allocated:undefined};
   }
   connectionIdentity(owner:string){const a=this.account(owner);return digest(a.clientId+':'+a.accountId+':'+(a.rootNamespace||''));}
   validateRemotePath(owner:string,source:string,p:string){this.source(owner,source);cloudPath(p);}
@@ -81,19 +90,21 @@ export class Dropbox {
     this.save(by.actorId,a);
     this.store.append({actor:by.actorId,action:'dropbox.connect',resource:a.accountId,status:'ok'});
   }
-  async disconnect(owner:string) {
-    const a=this.account(owner);
+  async disconnect(owner:string):Promise<{notice?:string}> {
+    // Refresh first while the record still exists so revocation reaches Dropbox; fall back to the last token.
+    const a=await this.access(owner).catch(()=>this.account(owner));
     this.store.put('dropbox-auth-version',owner,{version:crypto.randomUUID()});
     // Remove locally first: network failures must not resurrect credentials.
     this.store.db.query("DELETE FROM records WHERE (kind='dropbox-account' OR kind='dropbox-shared') AND (id=? OR json_extract(payload,'$.owner')=?)").run(owner,owner);
     this.store.db.query("DELETE FROM records WHERE kind='dropbox-oauth' AND json_extract(payload,'$.owner')=?").run(owner);
     await this.rpcWith(a.access,'auth/token/revoke',null).catch(()=>{});
     this.store.append({actor:owner,action:'dropbox.disconnect',resource:a.accountId,status:'ok'});
+    return {};
   }
   private async token(params:Record<string,string>) {
     const r=await this.http('https://api.dropboxapi.com/oauth2/token',{method:'POST',body:new URLSearchParams(params),redirect:'error',signal:AbortSignal.timeout(30000)});
     if (!r.ok) {await r.body?.cancel();throw new MaintenanceError('Dropbox no autorizó la conexión. Revisá la aplicación y volvé a conectar.',409);}
-    const v:any=await r.json(); if (typeof v.access_token!=='string' || !Number.isFinite(v.expires_in)) throw new MaintenanceError('Respuesta de autorización inválida',502); return v;
+    const v:any=await r.json(); if (typeof v.access_token!=='string' || !Number.isFinite(v.expires_in) || v.expires_in<=0) throw new MaintenanceError('Respuesta de autorización inválida',502); return v;
   }
   private async access(owner:string):Promise<Account> {
     const a=this.account(owner); if (a.expires>Date.now()+60000) return a;
@@ -154,13 +165,23 @@ export class Dropbox {
   }
   async metadata(owner:string,id:string,p:string):Promise<CloudEntry> {
     cloudPath(p);const s=this.source(owner,id);
+    if(s?.type==='file'&&p)throw new MaintenanceError('El enlace contiene un solo archivo',400);
     const m=await this.rpc(owner,s?'sharing/get_shared_link_metadata':'files/get_metadata',s?{url:s.url,...(p?{path:p}:{})}:{path:p});return entry(m,p);
   }
   async content(owner:string,id:string,p:string,revision?:string,range?:string,signal?:AbortSignal) {
-    cloudPath(p); const s=this.source(owner,id),a=await this.access(owner);
-    if(range&&!/^bytes=\d*-\d*$/.test(range))throw new MaintenanceError('Rango inválido',400);
-    const args=s?{url:s.url,...(p?{path:p}:{})}:{path:revision?'rev:'+revision:p};
-    const r=await this.http('https://content.dropboxapi.com/2/'+(s?'sharing/get_shared_link_file':'files/download'),{method:'POST',headers:{Authorization:'Bearer '+a.access,'Dropbox-API-Arg':headerJson(args),...(a.rootNamespace&&!a.appFolder?{'Dropbox-API-Path-Root':headerJson({'.tag':'root',root:a.rootNamespace})}:{}),...(range?{Range:range}:{})},redirect:'error',signal:signal?AbortSignal.any([signal,AbortSignal.timeout(86400000)]):AbortSignal.timeout(86400000)});
+    cloudPath(p); const s=this.source(owner,id);
+    if(s?.type==='file'&&p)throw new MaintenanceError('El enlace contiene un solo archivo',400);
+    if(range&&!/^bytes=(?:\d+-\d*|\d*-\d+)$/.test(range))throw new MaintenanceError('Rango inválido',400);
+    const a=await this.access(owner),args=s?{url:s.url,...(p?{path:p}:{})}:{path:revision?'rev:'+revision:p};
+    const timeout=signal?AbortSignal.any([signal,AbortSignal.timeout(86400000)]):AbortSignal.timeout(86400000);
+    const call=(root?:string)=>this.http('https://content.dropboxapi.com/2/'+(s?'sharing/get_shared_link_file':'files/download'),{method:'POST',headers:{Authorization:'Bearer '+a.access,'Dropbox-API-Arg':headerJson(args),...(root?{'Dropbox-API-Path-Root':headerJson({'.tag':'root',root})}:{}),...(range?{Range:range}:{})},redirect:'error',signal:timeout});
+    let r=await call(a.appFolder?undefined:a.rootNamespace);
+    if(a.rootNamespace&&!a.appFolder&&r.status===400&&(await r.clone().text()).includes('path root is not supported for sandbox app')){
+      await r.body?.cancel();
+      if(this.record(owner)?.generation!==a.generation)throw new MaintenanceError('La conexión cambió. Actualizá Dropbox.',409);
+      this.save(owner,{...this.account(owner),appFolder:true});
+      r=await call();
+    }
     if(r.status===416)return r;
     await this.check(r);return r;
   }
@@ -179,7 +200,7 @@ export class Dropbox {
   }
   async finishUpload(owner:string,session:string,offset:number,p:string,signal?:AbortSignal){
     cloudPath(p);if(!p)throw new MaintenanceError('Elegí un archivo de destino',400);
-    const r=await this.uploadCall(owner,'upload_session/finish',{cursor:{session_id:session,offset},commit:{path:p,mode:'add',autorename:false,strict_conflict:true},content_hash:dropboxContentHash(new Uint8Array())},new Uint8Array(),signal);
+    const r=await this.uploadCall(owner,'upload_session/finish',{cursor:{session_id:session,offset},commit:{path:p,mode:'add',autorename:false,strict_conflict:true}},new Uint8Array(),signal);
     if(r.status===409){await r.body?.cancel();throw new UploadRejected('Dropbox rechazó la publicación: revisá si existe el destino o falta su carpeta. No se reemplazan archivos.',409);}
     await this.check(r);return entry(await r.json(),p);
   }

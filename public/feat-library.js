@@ -159,7 +159,7 @@
         <div class="page-history"><button class="icon-btn" data-axon-back title="Atrás" aria-label="Atrás">${icon('arrow-left')}</button><button class="icon-btn" data-axon-forward title="Adelante" aria-label="Adelante">${icon('arrow-right')}</button><button class="icon-btn" id="lib-keys" title="Atajos de teclado" aria-label="Atajos de teclado">${icon('keyboard')}</button></div>
         <button class="icon-btn lib-side-toggle" id="lib-side-toggle" title="Secciones">${icon('panel-left')}</button>
         <div class="lib-title"><h2 id="lib-h">Biblioteca</h2><span class="lib-sub" id="lib-sub"></span></div>
-        <div class="lib-search">${icon('search')}<input id="lib-q" placeholder="Buscar por nombre, carpeta, tipo…" autocomplete="off"><kbd>/</kbd></div>
+        <div class="lib-search">${icon('search')}<input id="lib-q" placeholder="Buscar… ej: tipo:video >100mb vacaciones" autocomplete="off"><kbd>/</kbd></div>
         <div class="lib-tools">
           <select id="lib-sort" class="lib-select" title="Ordenar">
             <option value="date-desc">Más recientes</option>
@@ -201,6 +201,7 @@
       <div class="lib-dock"><div class="lib-uploads lib-jobs hidden" id="lib-jobs"></div><div class="lib-uploads hidden" id="lib-uploads"></div></div>
       <div class="lib-drop hidden" id="lib-drop"><div>${icon('upload-cloud')}<p>Soltá para subir</p><span id="lib-drop-dest"></span></div></div>
       <input type="file" id="lib-file" multiple hidden>
+      <input type="file" id="lib-file-dir" webkitdirectory hidden>
       <div class="lib-viewer hidden" id="lib-viewer"></div>
       <div class="modal hidden" id="lib-modal"><div class="modal-content lib-modal-content" id="lib-modal-c"></div></div>`;
     main.appendChild(sec);
@@ -221,8 +222,16 @@
       localStorage.setItem('lib-layout', L.layout);
       render();
     }));
-    $('#lib-upload').addEventListener('click', () => $('#lib-file').click());
-    $('#lib-file').addEventListener('change', (e) => { startUploads([...e.target.files]); e.target.value = ''; });
+    $('#lib-upload').addEventListener('click', (e) => {
+      if (typeof showCtxMenu !== 'function') return $('#lib-file').click();
+      const r = e.currentTarget.getBoundingClientRect();
+      showCtxMenu([
+        { icon: 'upload', label: 'Subir archivos', run: () => $('#lib-file').click() },
+        { icon: 'folder-up', label: 'Subir carpeta', run: () => $('#lib-file-dir').click() },
+      ], r.left, r.bottom + 4);
+    });
+    $('#lib-file').addEventListener('change', (e) => { startUploads([...e.target.files].map((f) => ({ f }))); e.target.value = ''; });
+    $('#lib-file-dir').addEventListener('change', (e) => { startUploads([...e.target.files].map((f) => ({ f, rel: f.webkitRelativePath || f.name }))); e.target.value = ''; });
     $('#lib-refresh').addEventListener('click', rescan);
     $('#lib-selmode').addEventListener('click', () => {
       L.selMode = !L.selMode;
@@ -245,12 +254,20 @@
     });
     sec.addEventListener('dragover', (e) => { if ([...(e.dataTransfer?.types || [])].includes('Files')) e.preventDefault(); });
     sec.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('#lib-drop').classList.add('hidden'); } });
-    sec.addEventListener('drop', (e) => {
-      if (!e.dataTransfer?.files?.length) return;
+    sec.addEventListener('drop', async (e) => {
+      if (!e.dataTransfer) return;
       e.preventDefault();
       dragDepth = 0;
       $('#lib-drop').classList.add('hidden');
-      startUploads([...e.dataTransfer.files]);
+      // Traverse dropped folders so the whole tree uploads with its structure.
+      let files = [];
+      const items = e.dataTransfer.items;
+      if (items?.length && items[0].webkitGetAsEntry) {
+        const entries = [...items].map((it) => it.webkitGetAsEntry()).filter(Boolean);
+        for (const ent of entries) files.push(...await collectEntry(ent));
+      }
+      if (!files.length) files = [...(e.dataTransfer.files || [])].map((f) => ({ f }));
+      startUploads(files);
     });
 
     $('#lib-share-manager').addEventListener('click',()=>setView({type:'shares'}));
@@ -330,11 +347,11 @@
         statusLine(status);
         if (status.revision !== L.revision) await load();
         pollStatus(2000);
-      } catch { pollStatus(15_000); }
+      } catch (e) { if (e.status !== 401) pollStatus(15_000); }
     }, delay);
   }
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && tabActive()) pollStatus(0); else clearTimeout(pollTimer); });
-  document.addEventListener('axon:section', e => { if(e.detail === 'library' && L.loaded) pollStatus(0); else clearTimeout(pollTimer); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && tabActive()) { pollStatus(0); pollJobs(0); } else clearTimeout(pollTimer); });
+  document.addEventListener('axon:section', e => { if(e.detail === 'library' && L.loaded) { pollStatus(0); pollJobs(0); } else clearTimeout(pollTimer); });
 
   function statusLine(s) {
     const bits = [];
@@ -389,9 +406,27 @@
     }
     if (L.q) {
       const terms = L.q.toLowerCase().split(/\s+/).filter(Boolean);
+      const isOp = (t) => /^(tipo:|ext:)/.test(t) || /^[<>]\d/.test(t);
+      const words = terms.filter((t) => !isOp(t));
+      const kindAlias = { imagen: 'image', imagenes: 'image', foto: 'image', fotos: 'image', video: 'video', videos: 'video', audio: 'audio', vector: 'vector', vectores: 'vector', 'diseño': 'design', diseno: 'design', documento: 'doc', documentos: 'doc', texto: 'doc', otro: 'other', otros: 'other' };
+      const kinds = new Set(), exts = new Set();
+      let minSize = -1, maxSize = -1;
+      for (const t of terms.filter(isOp)) {
+        if (t.startsWith('tipo:')) { const k = KIND[t.slice(5)] ? t.slice(5) : kindAlias[t.slice(5)]; if (k) kinds.add(k); }
+        else if (t.startsWith('ext:')) exts.add(t.slice(4).replace(/^\./, ''));
+        else {
+          const m = /^([<>])(\d+(?:[.,]\d+)?)(b|kb|mb|gb|tb)?$/.exec(t);
+          if (m) { const v = Number(m[2].replace(',', '.')) * ({ b: 1, kb: 1024, mb: 1048576, gb: 1073741824, tb: 1099511627776 }[m[3] || 'mb']); if (m[1] === '>') minSize = v; else maxSize = v; }
+        }
+      }
       list = list.filter((it) => {
+        if (kinds.size && !kinds.has(it.k)) return false;
+        if (exts.size && !exts.has(it.e)) return false;
+        if (minSize >= 0 && it.s <= minSize) return false;
+        if (maxSize >= 0 && it.s >= maxSize) return false;
+        if (!words.length) return true;
         const hay = `${it.p} ${KIND_ONE[it.k]} ${it.e}`.toLowerCase();
-        return terms.every((t) => hay.includes(t));
+        return words.every((t) => hay.includes(t));
       });
     }
     return list;
@@ -450,6 +485,7 @@
     if (!$('#tab-library')) return;
     renderSide();
     if (L.view.type === 'shares') return renderShares();
+    if (L.view.type === 'dupes') return renderDupes();
     renderCrumbs();
     const main = $('#lib-main');
     const keepShown = opts.keep ? L.shown : 0;
@@ -467,7 +503,7 @@
       if (subs.length) {
         html += `<div class="lib-folders">${subs.map((f) => `
           <button class="lib-folder" data-path="${esc(f.path)}">
-            <span class="lib-folder-cover">${f.cover ? `<img loading="lazy" src="${thumbUrl(f.cover)}" alt="">` : icon('folder')}</span>
+            <span class="lib-folder-cover">${f.cover ? `<img loading="lazy" src="${thumbUrl(f.cover)}" alt="" data-k="${f.cover.k}" data-e="${esc(f.cover.e)}">` : icon('folder')}</span>
             <span class="lib-folder-meta"><b>${esc(f.name)}</b><small>${f.count.toLocaleString('es-AR')} archivos · ${fmtSize(f.size)}</small></span>
           </button>`).join('')}</div>`;
       }
@@ -536,7 +572,7 @@
     const fav = L.favs.has(it.id);
     const media = it.th === -1
       ? `<span class="lib-ext k-${it.k}">${icon(KIND[it.k]?.ic || 'file')}<b>${esc(it.e.toUpperCase() || '?')}</b></span>`
-      : `<img loading="lazy" decoding="async" src="${thumbUrl(it)}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'lib-ext k-${it.k}',innerHTML:'<b>${esc(it.e.toUpperCase())}</b>'}))">`;
+      : `<img loading="lazy" decoding="async" src="${thumbUrl(it)}" alt="" data-k="${it.k}" data-e="${esc(it.e)}">`;
     const badge = it.k === 'video'
       ? `<span class="lib-badge">${icon('play')}${fmtDur(it.d)}</span>`
       : it.k !== 'image' ? `<span class="lib-badge">${esc(it.e.toUpperCase())}</span>` : '';
@@ -550,7 +586,7 @@
 
   function rowHtml(it, i) {
     const sel = L.sel.has(it.id);
-    const media = it.th === -1 ? `<span class="lib-ext k-${it.k}">${icon(KIND[it.k]?.ic || 'file')}</span>` : `<img loading="lazy" src="${thumbUrl(it)}" alt="">`;
+    const media = it.th === -1 ? `<span class="lib-ext k-${it.k}">${icon(KIND[it.k]?.ic || 'file')}</span>` : `<img loading="lazy" src="${thumbUrl(it)}" alt="" data-k="${it.k}" data-e="${esc(it.e)}">`;
     return `<div class="lib-row${sel ? ' sel' : ''}" data-i="${i}" data-id="${it.id}">
       <span class="lib-row-th"><button class="lib-check" data-act="sel" aria-label="Seleccionar ${esc(it.n)}">${icon('check')}</button>${media}</span>
       <span class="lib-row-n">${L.favs.has(it.id) ? `<span class="lib-star">${icon('star')}</span>` : ''}${esc(it.n)}</span>
@@ -571,6 +607,24 @@
     }, { rootMargin: '1200px' });
     observer.observe(s);
   }
+
+  // Broken thumbnails fall back to the kind badge. Delegated on capture —
+  // 'error' doesn't bubble, and an inline onerror handler would let an
+  // esc()'d &#39; decode back to a quote inside the attribute (XSS vector).
+  document.addEventListener('error', (e) => {
+    const img = e.target;
+    if (!(img instanceof HTMLImageElement) || !img.dataset.k) return;
+    const span = document.createElement('span');
+    span.className = `lib-ext k-${img.dataset.k}`;
+    const ic = document.createElement('i');
+    ic.setAttribute('data-lucide', KIND[img.dataset.k]?.ic || 'file');
+    ic.className = 'lucide-icon';
+    const b = document.createElement('b');
+    b.textContent = (img.dataset.e || '?').toUpperCase();
+    span.append(ic, b);
+    img.replaceWith(span);
+    refreshIcons();
+  }, true);
 
   // Delegated tile interactions.
   document.addEventListener('click', (e) => {
@@ -679,7 +733,7 @@
     const on = L.sel.size > 0 || L.selMode;
     $('#lib-body')?.classList.toggle('selecting', on);
     $('#tab-library')?.classList.toggle('lib-selecting', on);
-    if (!on || L.view.type === 'shares') { bar.classList.add('hidden'); return; }
+    if (!on || L.view.type === 'shares' || L.view.type === 'dupes') { bar.classList.add('hidden'); return; }
     const ids = [...L.sel];
     const list = ids.map((id) => L.byId.get(id)).filter(Boolean);
     const size = list.reduce((a, it) => a + it.s, 0);
@@ -756,6 +810,7 @@
         ${item('recent', undefined, 'clock', 'Recientes', nRecent)}
         ${item('fav', undefined, 'star', 'Favoritos', L.favs.size)}
         ${item('shares', undefined, 'link', 'Links compartidos', L.sharesCount)}
+        ${item('dupes', undefined, 'copy', 'Duplicados')}
       </div>
       <div class="lib-side-sec"><div class="lib-side-h">Tipos</div>
         ${KINDS.filter((k) => counts[k.k]).map((k) => item('kind', k.k, k.ic, k.label, counts[k.k])).join('')}
@@ -826,6 +881,7 @@
     $('#lib-mkdir')?.addEventListener('click', async () => {
       const name = await promptModal('Nueva carpeta', '', 'Nombre de la carpeta');
       if (!name) return;
+      if (name.includes('/') || name.includes('\\') || name === '.' || name === '..') return toast('Usá un nombre sin barras, punto ni doble punto', 'error');
       try {
         const r = await api('/api/library/mkdir', { method: 'POST', body: { dir: `${v.value}/${name}` } });
         toast('Carpeta creada — subí archivos o mové algunos ahí', 'ok', '', 3000);
@@ -843,7 +899,7 @@
 
   async function toggleFav(ids, on) {
     ids.forEach((id) => (on ? L.favs.add(id) : L.favs.delete(id)));
-    try { await api('/api/library/favorite', { method: 'POST', body: { ids, on } }); } catch (err) { errToast(err); }
+    try { await api('/api/library/favorite', { method: 'POST', body: { ids, on } }); } catch (err) { ids.forEach((id) => (on ? L.favs.delete(id) : L.favs.add(id))); errToast(err); }
     $$('#lib-body .lib-tile').forEach((el) => el.querySelector('.lib-fav')?.classList.toggle('on', L.favs.has(el.dataset.id)));
     renderSide();
     if (L.view.type === 'fav') render();
@@ -949,16 +1005,47 @@
         const listing=await api('/api/files?path='+encodeURIComponent(target));
         const taken=new Set(listing.entries.map(e=>e.name));
         closeModal();
-        let moved=0;
-        for(const it of selected){
-          if(dirOf(it.p)===target)continue;
-          let name=it.n, n=1;
-          const dot=it.n.lastIndexOf('.'), stem=dot>0?it.n.slice(0,dot):it.n, ext=dot>0?it.n.slice(dot):'';
-          while(taken.has(name))name=`${stem} (copia${n++===1?'':' '+(n-1)})${ext}`;
-          await window.AxonTransfers.run(it.p,target+'/'+name,'move');
-          taken.add(name);moved++;
+        // Sequential transfers report into a dock row: N/M + per-file % + ETA,
+        // and each in-flight move is cancellable through the transfer API.
+        ensureUpPanel().classList.remove('hidden');
+        const row = document.createElement('div');
+        row.className = 'lib-up lib-mv';
+        row.innerHTML = `<span class="lib-up-n">Moviendo a ${esc(prettyPath(target))}</span><span class="lib-up-s"></span><button class="icon-btn lib-up-cancel" title="Cancelar movimiento">${icon('x')}</button><div class="lib-up-bar"><i></i></div>`;
+        $('#lib-up-list').prepend(row); refreshIcons();
+        const bar = row.querySelector('i'), stEl = row.querySelector('.lib-up-s');
+        let cancel = false, currentOp = null;
+        row.querySelector('.lib-up-cancel').addEventListener('click', async () => {
+          cancel = true;
+          if (currentOp?.id) await api(`/api/files/copyjob/${currentOp.id}`, { method: 'DELETE' }).catch(() => {});
+        });
+        let moved = 0;
+        for (const [idx, it] of selected.entries()) {
+          if (cancel) break;
+          if (dirOf(it.p) === target) { moved++; continue; }
+          let name = it.n, n = 1;
+          const dot = it.n.lastIndexOf('.'), stem = dot > 0 ? it.n.slice(0, dot) : it.n, ext = dot > 0 ? it.n.slice(dot) : '';
+          while (taken.has(name)) name = `${stem} (copia${n++ === 1 ? '' : ' ' + (n - 1)})${ext}`;
+          stEl.textContent = `${idx + 1}/${selected.length} · ${it.n}`;
+          try {
+            await window.AxonTransfers.run(it.p, target + '/' + name, 'move', {
+              onProgress: (op, info) => {
+                currentOp = op;
+                const pct = (idx + (info?.pct ?? 0) / 100) / selected.length * 100;
+                bar.style.width = Math.min(100, pct).toFixed(1) + '%';
+                if (info?.pct != null) stEl.textContent = `${idx + 1}/${selected.length} · ${it.n} · ${info.pct}%${info.eta ? ` · quedan ~${info.eta}` : ''}`;
+              },
+            });
+          } catch (err) {
+            if (cancel || err.cancelled) break;
+            throw err;
+          }
+          taken.add(name); moved++;
         }
-        toast(`${moved} archivo${moved===1?'':'s'} movido${moved===1?'':'s'}`, 'ok', '', 2500);
+        bar.style.width = '100%';
+        row.querySelector('.lib-up-cancel')?.remove();
+        stEl.textContent = cancel ? `Cancelado · ${moved} movidos` : `✓ ${moved} movidos`;
+        row.classList.add(cancel ? 'err' : 'done');
+        toast(cancel ? `Movimiento cancelado — ${moved} archivos llegaron al destino` : `${moved} archivo${moved === 1 ? '' : 's'} movido${moved === 1 ? '' : 's'}`, cancel ? 'warn' : 'ok', '', 4000);
         L.sel.clear();
         closeViewer();
         load();
@@ -1408,7 +1495,7 @@
     if (libraryKeyboard(e)) return;
     if (e.key === '/') { e.preventDefault(); $('#lib-q').focus(); }
     else if (e.key === 'Escape' && (L.sel.size || L.selMode)) { L.sel.clear(); L.selMode = false; syncSelClasses(); }
-    else if ((e.ctrlKey || e.metaKey) && e.key === 'a' && L.view.type !== 'shares') {
+    else if ((e.ctrlKey || e.metaKey) && e.key === 'a' && L.view.type !== 'shares' && L.view.type !== 'dupes') {
       e.preventDefault();
       L.list.forEach((it) => L.sel.add(it.id));
       syncSelClasses();
@@ -1456,7 +1543,7 @@
 
   function sharePreview(list) {
     const size = list.reduce((a, it) => a + it.s, 0);
-    return `<div class="lib-share-prev">${list.slice(0, 6).map((it) => (it.th === -1 ? `<span class="lib-ext k-${it.k}"><b>${esc(it.e.toUpperCase())}</b></span>` : `<img src="${thumbUrl(it)}" alt="">`)).join('')}${list.length > 6 ? `<span class="lib-more">+${list.length - 6}</span>` : ''}<small>${list.length} · ${fmtSize(size)}</small></div>`;
+    return `<div class="lib-share-prev">${list.slice(0, 6).map((it) => (it.th === -1 ? `<span class="lib-ext k-${it.k}"><b>${esc(it.e.toUpperCase())}</b></span>` : `<img src="${thumbUrl(it)}" alt="" data-k="${it.k}" data-e="${esc(it.e)}">`)).join('')}${list.length > 6 ? `<span class="lib-more">+${list.length - 6}</span>` : ''}<small>${list.length} · ${fmtSize(size)}</small></div>`;
   }
 
   function openShareModal(ids, title) {
@@ -1478,7 +1565,7 @@
       <label class="lib-toggle"><input type="checkbox" id="lsh-pw-on"><span>Proteger con contraseña</span></label>
       <input type="text" id="lsh-pw" class="filter-input lib-wide hidden" placeholder="Contraseña" autocomplete="off">
       <label class="lib-toggle"><input type="checkbox" id="lsh-notify" checked><span>Notificar visitas, reproducciones y descargas</span></label>
-      <label class="lib-toggle" id="lsh-cdn-w"><input type="checkbox" id="lsh-cdn"${localStorage.getItem('lib-cdn') === '0' ? '' : ' checked'}><span>Acelerar con la CDN de Cloudflare <small>(vistas previas y archivos se sirven desde el nodo más cercano a quien abre el link)</small></span></label>
+      <label class="lib-toggle" id="lsh-cdn-w"><input type="checkbox" id="lsh-cdn"${localStorage.getItem('lib-cdn') === '0' ? '' : ' checked'}><span>Acelerar con la CDN de Cloudflare <small>(más rápido, pero Cloudflare puede conservar copias temporales en sus nodos fuera del servidor)</small></span></label>
       ${heavy || bigPhotos ? `<p class="lib-muted">${icon('zap')} Para que cargue rápido: ${[bigPhotos ? `${bigPhotos} foto${bigPhotos > 1 ? 's' : ''} se ${bigPhotos > 1 ? 'muestran' : 'muestra'} en una versión liviana (el original se baja al descargar o hacer zoom)` : '', heavy ? `${heavy} video${heavy > 1 ? 's' : ''} pesado${heavy > 1 ? 's' : ''} o HEVC se ${heavy > 1 ? 'preparan' : 'prepara'} en una versión para streaming` : ''].filter(Boolean).join(' · ')}.</p>` : ''}
       <div class="modal-actions"><button class="btn-secondary" data-close>Cancelar</button><button class="btn-primary" id="lsh-ok">${icon('link')} Crear link</button></div>`, 'lib-share-modal');
     $$('#lsh-ttl .chip').forEach((b) => b.addEventListener('click', () => {
@@ -1582,7 +1669,7 @@
       <label class="lib-toggle"><input type="checkbox" id="les-pw-on"${s.hasPassword ? ' checked' : ''}><span>Contraseña${s.hasPassword ? ' <small>(dejá el campo vacío para mantener la actual)</small>' : ''}</span></label>
       <input type="text" id="les-pw" class="filter-input lib-wide${s.hasPassword ? '' : ' hidden'}" placeholder="${s.hasPassword ? 'Nueva contraseña' : 'Contraseña'}" autocomplete="off">
       <div class="lib-field-l">Archivos <small class="lt-hint">· tocá para quitar</small></div>
-      <div class="les-files">${files.map((it) => `<button class="les-f" data-id="${it.id}" title="${esc(it.n)}">${it.th === -1 ? `<span class="lib-ext k-${it.k}"><b>${esc(it.e.toUpperCase())}</b></span>` : `<img src="${thumbUrl(it)}" alt="">`}<i>${icon('x')}</i></button>`).join('')}</div>
+      <div class="les-files">${files.map((it) => `<button class="les-f" data-id="${it.id}" title="${esc(it.n)}">${it.th === -1 ? `<span class="lib-ext k-${it.k}"><b>${esc(it.e.toUpperCase())}</b></span>` : `<img src="${thumbUrl(it)}" alt="" data-k="${it.k}" data-e="${esc(it.e)}">`}<i>${icon('x')}</i></button>`).join('')}</div>
       <div class="modal-actions"><button class="btn-secondary" data-close>Cancelar</button><button class="btn-primary" id="les-ok">${icon('save')} Guardar</button></div>`);
     let ttl = -1;
     $$('#les-ttl .chip').forEach((b) => b.addEventListener('click', () => { ttl = Number(b.dataset.s); $$('#les-ttl .chip').forEach((x) => x.classList.toggle('active', x === b)); }));
@@ -1642,7 +1729,7 @@
     body.innerHTML = `<div class="lib-shares">${d.shares.map((s) => {
       const thumbs = s.ids.slice(0, 4).map((id) => L.byId.get(id)).filter(Boolean);
       return `<div class="lib-share${s.alive ? '' : ' dead'}" data-sid="${s.id}">
-        <div class="lib-share-th n${thumbs.length}">${thumbs.map((it) => (it.th === -1 ? `<span class="lib-ext k-${it.k}"><b>${esc(it.e.toUpperCase())}</b></span>` : `<img loading="lazy" src="${thumbUrl(it)}" alt="">`)).join('') || icon('file')}</div>
+        <div class="lib-share-th n${thumbs.length}">${thumbs.map((it) => (it.th === -1 ? `<span class="lib-ext k-${it.k}"><b>${esc(it.e.toUpperCase())}</b></span>` : `<img loading="lazy" src="${thumbUrl(it)}" alt="" data-k="${it.k}" data-e="${esc(it.e)}">`)).join('') || icon('file')}</div>
         <div class="lib-share-main">
           <b>${esc(s.title)}</b>
           <small>${s.count} archivo${s.count === 1 ? '' : 's'} · ${fmtSize(s.size)}${s.missing ? ` · ${s.missing} ya no existen` : ''}${s.lastAccess ? ` · último acceso ${esc(fmtDateTime(s.lastAccess))}` : ''}</small>
@@ -1689,6 +1776,63 @@
     refreshIcons();
   }
 
+  // ---------- Duplicates ----------
+
+  let dupesGen = 0;
+  async function renderDupes() {
+    $('#lib-crumbs').innerHTML = `<span class="lib-crumb-title">Duplicados</span><span class="lib-crumb-sp"></span>
+      <button class="lib-crumb-act" id="lib-dupes-re">${icon('refresh-cw')} Volver a buscar</button><span class="lib-status" id="lib-status"></span>`;
+    $('#lib-dupes-re').addEventListener('click', () => renderDupes());
+    updateBulk();
+    const body = $('#lib-body');
+    body.className = 'lib-body';
+    body.innerHTML = `<div class="lib-empty">${icon('loader', 'spin')}<p>Buscando duplicados — se agrupa por tamaño y se compara el contenido…</p></div>`;
+    refreshIcons();
+    const gen = ++dupesGen;
+    let d;
+    try { d = await api('/api/library/duplicates'); }
+    catch (err) {
+      if (gen !== dupesGen) return;
+      body.innerHTML = `<div class="lib-empty">${icon('alert-triangle')}<p>No se pudo buscar duplicados: ${esc(err.message)}</p></div>`;
+      refreshIcons();
+      return;
+    }
+    if (gen !== dupesGen || L.view.type !== 'dupes') return;
+    const groups = d.groups || [];
+    const dupCount = groups.reduce((a, g) => a + g.items.length - 1, 0);
+    const reclaim = groups.reduce((a, g) => a + g.size * (g.items.length - 1), 0);
+    $('#lib-sub').textContent = groups.length ? `${groups.length} grupos · ${dupCount} repetidos · ${fmtSize(reclaim)} recuperables` : 'Sin duplicados';
+    if (!groups.length) {
+      body.innerHTML = `<div class="lib-empty">${icon('check-check')}<p>No se encontraron duplicados.<br>Solo se consideran archivos con el mismo tamaño.</p></div>`;
+      refreshIcons();
+      return;
+    }
+    body.innerHTML = `
+      <p class="lib-muted">${icon('info')} El más reciente de cada grupo queda desmarcado — revisá antes de eliminar. Van a la papelera de Axon y se pueden restaurar.${d.partial ? ` Análisis parcial: faltan ${d.remaining} grupos por comparar; usá "Volver a buscar" para continuar.` : ''}</p>
+      <div class="lib-dupes">${groups.map((g) => `
+        <section class="lib-dupe">
+          <header><b>${g.items.length} copias · ${fmtSize(g.size)} c/u</b><span>recuperables ${fmtSize(g.size * (g.items.length - 1))}${g.exact ? '' : ' · contenido muestreado (archivos grandes)'}</span></header>
+          <div class="lib-dupe-items">${g.items.map((it, ii) => `
+            <label class="lib-dupe-item" data-id="${it.id}">
+              <span class="lib-dupe-th">${it.th === -1 ? `<span class="lib-ext k-${it.k}"><b>${esc(it.e.toUpperCase())}</b></span>` : `<img loading="lazy" src="${thumbUrl(it)}" alt="" data-k="${it.k}" data-e="${esc(it.e)}">`}</span>
+              <span class="lib-dupe-m"><b>${esc(it.n)}</b><small>${esc(prettyPath(dirOf(it.p)))}</small><small>${fmtDateTime(when(it))}${ii === 0 ? ' · más reciente' : ''}</small></span>
+              <button class="icon-btn lib-dupe-open" data-p="${esc(dirOf(it.p))}" title="Abrir carpeta">${icon('folder-open')}</button>
+              <input type="checkbox"${ii === 0 ? '' : ' checked'} aria-label="Enviar a papelera ${esc(it.n)}">
+            </label>`).join('')}</div>
+          <button class="btn-danger lib-dupe-del">${icon('trash-2')} Enviar marcados a papelera</button>
+        </section>`).join('')}</div>`;
+    body.querySelectorAll('.lib-dupe-open').forEach((b) => b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); setView({ type: 'folder', value: b.dataset.p }); }));
+    body.querySelectorAll('.lib-dupe-del').forEach((b) => b.addEventListener('click', async () => {
+      const box = b.closest('.lib-dupe');
+      const rows = [...box.querySelectorAll('.lib-dupe-item')];
+      const ids = rows.filter((r) => r.querySelector('input[type=checkbox]').checked).map((r) => r.dataset.id);
+      if (!ids.length) return toast('Marcá los repetidos a eliminar', 'error');
+      if (ids.length === rows.length && !(await confirmDialog('Eliminar todas las copias', 'Marcaste TODAS las copias del grupo — no queda ninguna en la biblioteca.', 'Eliminar todas'))) return;
+      await trashIds(ids);
+    }));
+    refreshIcons();
+  }
+
   // ---------- Upload (chunked) ----------
 
   const upQ = [];
@@ -1698,24 +1842,59 @@
     return L.view.type === 'folder' ? L.view.value : '';
   }
 
-  function startUploads(files) {
-    if (!files.length) return;
-    const dir = uploadDest();
+  // Whole dropped folders keep their structure via webkitGetAsEntry.
+  async function collectEntry(ent, prefix = '') {
+    if (ent.isFile) {
+      const f = await new Promise((res, rej) => ent.file(res, rej));
+      return [{ f, rel: prefix + f.name }];
+    }
+    if (!ent.isDirectory) return [];
+    const rd = ent.createReader(), out = [];
+    for (;;) {
+      const batch = await new Promise((res, rej) => rd.readEntries(res, rej));
+      if (!batch.length) break;
+      for (const sub of batch) out.push(...await collectEntry(sub, `${prefix}${ent.name}/`));
+    }
+    return out;
+  }
+
+  function ensureUpPanel() {
     const panel = $('#lib-uploads');
-    panel.classList.remove('hidden');
     if (!panel.querySelector('.lib-up-h')) {
       panel.innerHTML = `<div class="lib-up-h"><b>Subidas</b><button class="icon-btn" id="lib-up-x" title="Ocultar">${icon('x')}</button></div><div class="lib-up-list" id="lib-up-list"></div>`;
       $('#lib-up-x').addEventListener('click', () => { panel.classList.add('hidden'); panel.innerHTML = ''; });
     }
-    for (const f of files) {
+    return panel;
+  }
+
+  function startUploads(files) {
+    if (!files.length) return;
+    const dir = uploadDest();
+    const panel = ensureUpPanel();
+    panel.classList.remove('hidden');
+    for (const { f, rel } of files) {
       const row = document.createElement('div');
       row.className = 'lib-up';
-      row.innerHTML = `<span class="lib-up-n">${esc(f.name)}</span><span class="lib-up-s">${fmtSize(f.size)}</span><div class="lib-up-bar"><i></i></div>`;
+      row.innerHTML = `<span class="lib-up-n">${esc(rel || f.name)}</span><span class="lib-up-s">${fmtSize(f.size)}</span><button class="icon-btn lib-up-cancel" title="Cancelar subida">${icon('x')}</button><div class="lib-up-bar"><i></i></div>`;
       $('#lib-up-list').prepend(row);
-      upQ.push({ f, dir, row });
+      const job = { f, rel: rel || f.name, dir, row, uid: null, ctrl: null, cancelled: false };
+      row.querySelector('.lib-up-cancel').addEventListener('click', () => cancelUpload(job));
+      upQ.push(job);
     }
     refreshIcons();
     pumpUploads();
+  }
+
+  function cancelUpload(job) {
+    job.cancelled = true;
+    const i = upQ.indexOf(job);
+    if (i >= 0) upQ.splice(i, 1);
+    job.ctrl?.abort();
+    if (job.uid) api(`/api/library/upload/${job.uid}`, { method: 'DELETE' }).catch(() => {});
+    const s = job.row.querySelector('.lib-up-s');
+    if (s) s.textContent = 'Cancelada';
+    job.row.classList.add('err');
+    job.row.querySelector('.lib-up-cancel')?.remove();
   }
 
   function pumpUploads() {
@@ -1730,35 +1909,56 @@
     }
   }
 
-  async function uploadOne({ f, dir, row }) {
+  async function uploadOne(job) {
+    const { f, dir, row } = job;
     const bar = row.querySelector('i');
-    const setSt = (txt, cls) => { row.querySelector('.lib-up-s').textContent = txt; if (cls) row.classList.add(cls); };
+    const setSt = (txt, cls) => { const s = row.querySelector('.lib-up-s'); if (s) s.textContent = txt; if (cls) row.classList.add(cls); };
     try {
-      const init = await api('/api/library/upload/init', { method: 'POST', body: { name: f.name, size: f.size, dir: dir || undefined } });
+      job.ctrl = new AbortController();
+      const init = await api('/api/library/upload/init', { method: 'POST', body: { name: f.name, size: f.size, dir: dir || undefined, rel: job.rel } });
+      job.uid = init.id;
       const cs = init.chunkSize;
       let off = 0;
       const t0 = Date.now();
       while (off < f.size) {
+        if (job.cancelled) return;
         const blob = f.slice(off, Math.min(f.size, off + cs));
         let tries = 0;
         while (true) {
-          const res = await fetch(`/api/library/upload/${init.id}?offset=${off}`, { method: 'PUT', body: blob, credentials: 'same-origin' });
+          const res = await fetch(`/api/library/upload/${init.id}?offset=${off}`, { method: 'PUT', body: blob, credentials: 'same-origin', signal: job.ctrl.signal });
           const j = await res.json().catch(() => ({}));
           if (res.ok && j.ok) { off = j.received; break; }
           if (res.status === 409 && j.received != null) { off = j.received; break; }
+          if (job.cancelled) return;
           if (++tries >= 4) throw new Error(j.error || `HTTP ${res.status}`);
           await new Promise((r) => setTimeout(r, 1000 * tries));
         }
         const pct = f.size ? off / f.size : 1;
         bar.style.width = (pct * 100).toFixed(1) + '%';
         const rate = off / Math.max(1, (Date.now() - t0) / 1000);
-        setSt(`${Math.round(pct * 100)}% · ${fmtSize(rate)}/s`);
+        const left = rate > 0 ? Math.round((f.size - off) / rate) : 0;
+        setSt(`${Math.round(pct * 100)}% · ${fmtSize(rate)}/s${off < f.size ? ` · quedan ~${left < 60 ? `${Math.max(1, left)}s` : `${Math.ceil(left / 60)}min`}` : ''}`);
       }
+      if (job.cancelled) return;
       const done = await api(`/api/library/upload/${init.id}/finish`, { method: 'POST' });
       bar.style.width = '100%';
+      row.querySelector('.lib-up-cancel')?.remove();
       setSt(`✓ ${prettyPath(dirOf(done.path))}`, 'done');
     } catch (err) {
+      if (job.cancelled || err.name === 'AbortError') return;
+      row.querySelector('.lib-up-cancel')?.remove();
       setSt(`Error: ${err.message || err}`, 'err');
+      // Retry just re-queues the file — a fresh init resumes from scratch.
+      const rb = document.createElement('button');
+      rb.className = 'btn-secondary lib-up-retry';
+      rb.textContent = 'Reintentar';
+      rb.addEventListener('click', () => {
+        rb.remove(); job.cancelled = false; job.uid = null; job.ctrl = null;
+        row.classList.remove('err');
+        const s = row.querySelector('.lib-up-s'); if (s) s.textContent = fmtSize(f.size);
+        upQ.push(job); pumpUploads();
+      });
+      row.querySelector('.lib-up-s')?.insertAdjacentElement('afterend', rb);
     }
   }
 
@@ -2109,7 +2309,7 @@
 
   // ---------- Jobs panel ----------
 
-  const J = { list: [], timer: null, seen: new Map(), open: false, reloadT: null };
+  const J = { list: [], timer: null, seen: new Map(), open: false, reloadT: null, wasActive: false, fails: 0 };
   const JOB_IC = { image: 'image', video: 'film', audio: 'music', transcribe: 'captions' };
   const STAGE = { starting: 'iniciando el motor…', loading: 'cargando modelo…', downloading: 'descargando modelo (una sola vez)…', audio: 'leyendo audio…', transcribing: 'transcribiendo', encoding: 'procesando', 'encoding-gpu': 'procesando (GPU)', replacing: 'reemplazando…', queued: 'en cola' };
 
@@ -2120,9 +2320,10 @@
 
   function pollJobs(delay = 1500) {
     clearTimeout(J.timer);
+    if (!tabActive() || document.hidden) return;
     J.timer = setTimeout(async () => {
       let d;
-      try { d = await api('/api/library/tools/jobs'); } catch { return; }
+      try { d = await api('/api/library/tools/jobs'); J.fails = 0; } catch (e) { if (e.status !== 401) pollJobs(Math.min(60_000, 15_000 * ++J.fails)); return; }
       J.list = d.jobs;
       let changed = false;
       for (const j of d.jobs) {
@@ -2131,7 +2332,10 @@
         if (prev && prev !== j.state && j.state === 'done' && j.type === 'transcribe') onTranscribed(j);
         J.seen.set(j.id, j.state);
       }
-      if (d.active) J.open = true;
+      // Only re-open when work starts again — "Ocultar" must stick while a
+      // job keeps running.
+      if (d.active && !J.wasActive) J.open = true;
+      J.wasActive = !!d.active;
       renderJobs();
       if (changed) {
         clearTimeout(J.reloadT);
@@ -2416,7 +2620,7 @@
   async function restoreLibrary(params,snap) {
     ensureDom();
     closeViewer(false);
-    L.view={type:['all','recent','fav','kind','col','folder','shares'].includes(params.type)?params.type:'all',value:params.value || ''};
+    L.view={type:['all','recent','fav','kind','col','folder','shares','dupes'].includes(params.type)?params.type:'all',value:params.value || ''};
     L.q=params.q || '';
     if(['grid','list'].includes(params.view))L.layout=params.view;
     if(['date-desc','date-asc','name-asc','name-desc','size-desc','size-asc','kind'].includes(params.sort))L.sort=params.sort;
@@ -2457,7 +2661,7 @@
   }
   let libraryType='',libraryTypeTimer;
   function libraryKeyboard(e) {
-    if(L.view.type==='shares'||!L.list.length)return false;
+    if(L.view.type==='shares'||L.view.type==='dupes'||!L.list.length)return false;
     if((e.target.tagName==='BUTTON'||e.target.tagName==='A')&&['Enter',' '].includes(e.key))return false;
     let index=L.list.findIndex(it=>it.id===L.cursor);
     let next=index;
@@ -2494,7 +2698,7 @@
     ['click','keyup','change'].forEach(t=>sec.addEventListener(t,save));
     $('#lib-q').addEventListener('input',()=>setTimeout(save,180));
     $('#lib-main').addEventListener('scroll',save,{passive:true});
-    $('#lib-keys').addEventListener('click',()=>openModal('<h3>Teclado en Biblioteca</h3><dl class="shortcut-list"><dt>Flechas · Inicio · Fin</dt><dd>Mover el foco entre archivos</dd><dt>Enter</dt><dd>Abrir el archivo enfocado</dd><dt>Espacio</dt><dd>Seleccionar o deseleccionar</dd><dt>Shift + flechas</dt><dd>Extender selección</dd><dt>Ctrl/⌘ + flechas</dt><dd>Mover foco sin cambiar selección</dd><dt>/ · escribir un nombre</dt><dd>Buscar o saltar a un archivo</dd><dt>Esc · ← · → en el visor</dt><dd>Volver o cambiar de archivo</dd></dl><button class="btn-secondary" data-close>Cerrar</button>'));
+    $('#lib-keys').addEventListener('click',()=>openModal('<h3>Teclado en Biblioteca</h3><dl class="shortcut-list"><dt>Flechas · Inicio · Fin</dt><dd>Mover el foco entre archivos</dd><dt>Enter</dt><dd>Abrir el archivo enfocado</dd><dt>Espacio</dt><dd>Seleccionar o deseleccionar</dd><dt>Shift + flechas</dt><dd>Extender selección</dd><dt>Ctrl/⌘ + flechas</dt><dd>Mover foco sin cambiar selección</dd><dt>/ · escribir un nombre</dt><dd>Buscar o saltar a un archivo</dd><dt>Filtros en la búsqueda</dt><dd>tipo:video · ext:jpg · &gt;100mb · &lt;5mb (combinables con texto)</dd><dt>Esc · ← · → en el visor</dt><dd>Volver o cambiar de archivo</dd></dl><button class="btn-secondary" data-close>Cerrar</button>'));
     markLibraryCursor();
   }
   const previousRender=render;render=function(...args){

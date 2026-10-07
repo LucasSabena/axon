@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { hostExec, hostSpawnInteractive, hostSpawn, hostToContainer, containerToHost, hostExists, HOST_USER } from './host';
+import { hostExec, hostSpawnInteractive, hostSpawn, hostToContainer, containerToHost, hostExists, HOST_USER, killHostProc } from './host';
 import { readdir, stat, lstat, open, realpath, readFile, writeFile, mkdir, unlink } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -48,14 +48,23 @@ async function homeDir(): Promise<string> {
 }
 
 // Normalize + validate a client-supplied path. Returns the resolved absolute
-// host path or a Spanish error message.
-async function resolveAllowed(input: string | undefined | null): Promise<{ path?: string; error?: string }> {
+// host path or a Spanish error message. The real status travels with the
+// error: 400 invalid input, 403 outside allowed roots, 409 disk unplugged.
+async function resolveAllowed(input: string | undefined | null): Promise<{ path?: string; error?: string; status?: number }> {
   try {return {path:await resolveHostPath(input?.trim()||await homeDir(),{root:true})};}
-  catch(e){return {error:e instanceof Error?e.message:'Ruta inválida'};}
+  catch(e){return {error:e instanceof Error?e.message:'Ruta inválida',status:e instanceof MaintenanceError?e.status:403};}
 }
 
 // POSIX single-quote escaping: 'foo'bar' -> 'foo'"'"'bar'
 const shq = (s: string) => `'${s.replace(/'/g, `'"'"'`)}'`;
+
+// Writes on a volume the panel mounted read-only must fail with a clear 403
+// before hostExec surfaces a generic chmod/mv/zip error.
+async function assertWritable(hostPath: string): Promise<void> {
+  const snap = await hostVolumes.snapshot().catch(() => ({ volumes: [] }));
+  const v = volumeForPath(snap.volumes || [], hostPath);
+  if (v?.readOnly) throw new MaintenanceError('Este volumen es de solo lectura — no se puede modificar', 403);
+}
 
 // Write a buffer to a host path. The host fs is mounted read-only at /hostfs,
 // so bytes are streamed through stdin of a host-side `cat > dest` (nsenter).
@@ -66,9 +75,19 @@ async function writeHostFile(hostPath:string,buf:Buffer,revision:string):Promise
     const script=await readFile(new URL('./storage/edit-host.py',import.meta.url),'utf8');
     const proc=hostSpawnInteractive(`python3 -c ${shq(script)} ${shq(JSON.stringify({path:hostPath,revision,size:buf.length}))}`,{user:WRITE_USER});
     const input=proc.stdin as {write(d:Uint8Array):number|Promise<number>;flush():number|Promise<number>;end():void};
-    const result=new Response(proc.stdout as ReadableStream<Uint8Array>).text(),errors=new Response(proc.stderr as ReadableStream<Uint8Array>).text();
-    try{await input.write(buf);await input.flush();}finally{input.end();}
-    const [output,,code]=await Promise.all([result,errors,proc.exited]);if(code!==0)throw new Error();return JSON.parse(output);
+    // edit-host.py serializes writers with flock(LOCK_EX): a stuck worker would
+    // otherwise queue every later save behind it forever. Kill on a bound.
+    const timer=setTimeout(()=>killHostProc(proc),60_000);
+    try{
+      const result=new Response(proc.stdout as ReadableStream<Uint8Array>).text(),errors=new Response(proc.stderr as ReadableStream<Uint8Array>).text();
+      try{
+        // FileSink.write may accept only part of the buffer — re-offer the rest
+        // so the worker always receives exactly `size` bytes.
+        for(let off=0;off<buf.length;){const n=Number(await input.write(buf.subarray(off)));if(n<=0)throw new Error();off+=n;}
+        await input.flush();
+      }finally{input.end();}
+      const [output,,code]=await Promise.all([result,errors,proc.exited]);if(code!==0)throw new Error();return JSON.parse(output);
+    }finally{clearTimeout(timer);}
   }catch{return {ok:false,error:'La edición no se confirmó. Se conservó el original; revisá permisos y compará nuevamente.'};}
 }
 
@@ -134,6 +153,9 @@ const INLINE_EXTS = new Set(
 const CONVERT_EXTS = new Set(
   'heic heif tiff tif eps ps ai psd xcf raw cr2 cr3 nef arw dng orf rw2 pef sr2 erf mrw kdc x3f'.split(' ')
 );
+// Browser-native raster formats get a magick thumbnail too when ?w= is passed
+// (svg rasterized on purpose — strips any script the file may carry).
+const THUMB_EXTS = new Set('png jpg jpeg gif webp ico bmp avif svg'.split(' '));
 const MAX_CONVERT_BYTES = 400 * 1024 * 1024;
 const CONVERT_TIMEOUT_MS = 90_000;
 
@@ -172,15 +194,23 @@ async function prunePreviewCache(): Promise<void> {
   } catch { /* cache dir missing — nothing to prune */ }
 }
 
+type PreviewResult = { buf?: Buffer; error?: string; detail?: string };
+
+// Conversions of the same file serialize here: a concurrent caller re-reads
+// the freshly written cache instead of running a second magick over a shared
+// temp name.
+const previewFlights = new Map<string, Promise<PreviewResult>>();
+
 async function convertedPreview(
   hostPath: string,
-  st: { size: number; mtimeMs: number }
-): Promise<{ buf?: Buffer; error?: string; detail?: string }> {
+  st: { size: number; mtimeMs: number },
+  w = 0
+): Promise<PreviewResult> {
   if (st.size > MAX_CONVERT_BYTES) {
     return { error: 'Archivo demasiado grande para generar vista previa' };
   }
   const key = createHash('sha1')
-    .update(`${hostPath}|${st.size}|${Math.floor(st.mtimeMs)}`)
+    .update(`${hostPath}|${st.size}|${Math.floor(st.mtimeMs)}|w${w}`)
     .digest('hex');
   const cachePath = path.join(PREVIEW_CACHE_DIR, `${key}.png`);
   try {
@@ -188,44 +218,65 @@ async function convertedPreview(
     if (buf.length) return { buf };
   } catch { /* miss — convert below */ }
 
-  const tmpHost = `/tmp/axon-prev-${key}.png`;
-  // [0] selects the first page/frame (eps/ps/ai/pdf-like, psd composite).
-  const res = await hostExec(
-    `magick ${shq(hostPath + '[0]')} -auto-orient -resize '2400x2400>' ${shq('png:' + tmpHost)}`,
-    { user: WRITE_USER, timeoutMs: CONVERT_TIMEOUT_MS }
-  );
-  if (!res.ok) {
-    return {
-      error: 'No se pudo convertir el archivo para vista previa',
-      detail: (res.stderr || res.stdout || `exit ${res.code}`).slice(0, 500),
-    };
-  }
-  let buf: Buffer;
+  const flight = (previewFlights.get(hostPath) ?? Promise.resolve<PreviewResult>({})).then(async (): Promise<PreviewResult> => {
+    // The earlier conversion in this queue may have filled the cache already.
+    try {
+      const again = await readFile(cachePath);
+      if (again.length) return { buf: again };
+    } catch { /* still a miss */ }
+    // Unpredictable temp name: a precreated /tmp symlink can't redirect the
+    // output, and parallel conversions of different files never collide.
+    const tmpHost = `/tmp/axon-prev-${crypto.randomUUID()}.png`;
+    try {
+      // [0] selects the first page/frame (eps/ps/ai/pdf-like, psd composite).
+      const res = await hostExec(
+        `magick ${shq(hostPath + '[0]')} -auto-orient -resize ${shq(w ? `${w}x${w}>` : '2400x2400>')} ${shq('png:' + tmpHost)}`,
+        { user: WRITE_USER, timeoutMs: CONVERT_TIMEOUT_MS }
+      );
+      if (!res.ok) {
+        return {
+          error: 'No se pudo convertir el archivo para vista previa',
+          detail: (res.stderr || res.stdout || `exit ${res.code}`).slice(0, 500),
+        };
+      }
+      let buf: Buffer;
+      try {
+        buf = await readFile(hostToContainer(tmpHost));
+      } catch (e: any) {
+        return {
+          error: 'No se pudo leer la vista previa generada',
+          detail: String(e?.message || e),
+        };
+      }
+      try {
+        await mkdir(PREVIEW_CACHE_DIR, { recursive: true });
+        await writeFile(cachePath, buf);
+        prunePreviewCache().catch(() => {});
+      } catch { /* cache is best-effort */ }
+      return { buf };
+    } finally {
+      // The temp file must go away even when magick or the readback fails.
+      hostExec(`rm -f -- ${shq(tmpHost)}`, { user: WRITE_USER, timeoutMs: 10_000 }).catch(() => {});
+    }
+  });
+  previewFlights.set(hostPath, flight);
   try {
-    buf = await readFile(hostToContainer(tmpHost));
-  } catch (e: any) {
-    return {
-      error: 'No se pudo leer la vista previa generada',
-      detail: String(e?.message || e),
-    };
+    return await flight;
+  } finally {
+    if (previewFlights.get(hostPath) === flight) previewFlights.delete(hostPath);
   }
-  hostExec(`rm -f -- ${shq(tmpHost)}`, { user: WRITE_USER, timeoutMs: 10_000 }).catch(() => {});
-  try {
-    await mkdir(PREVIEW_CACHE_DIR, { recursive: true });
-    await writeFile(cachePath, buf);
-    prunePreviewCache().catch(() => {});
-  } catch { /* cache is best-effort */ }
-  return { buf };
 }
 
 // bytes=start-end | bytes=start- | bytes=-suffix → {start,end} | 'unsatisfiable'
+// Malformed or multi-range headers are ignored (full 200 body) per RFC 9110;
+// only a syntactically valid but unsatisfiable range earns a 416.
 function parseRange(
   header: string | undefined,
   size: number
 ): { start: number; end: number } | 'unsatisfiable' | null {
   if (!header) return null;
   const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
-  if (!m || (!m[1] && !m[2])) return 'unsatisfiable';
+  if (!m || (!m[1] && !m[2])) return null;
   let start: number, end: number;
   if (m[1] === '') {
     const suffix = parseInt(m[2], 10);
@@ -236,7 +287,8 @@ function parseRange(
     start = parseInt(m[1], 10);
     end = m[2] === '' ? size - 1 : Math.min(size - 1, parseInt(m[2], 10));
   }
-  if (start > end || start >= size) return 'unsatisfiable';
+  if (start >= size) return 'unsatisfiable';
+  if (start > end) return null;
   return { start, end };
 }
 
@@ -260,7 +312,7 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
   // ---------- List directory ----------
   app.get('/api/files', async (c) => {
     const r = await resolveAllowed(c.req.query('path'));
-    if (!r.path) return c.json({ ok: false, error: r.error }, 403);
+    if (!r.path) return c.json({ ok: false, error: r.error }, (r.status ?? 403) as 403);
     const cp = hostToContainer(r.path);
 
     let dirents;
@@ -282,33 +334,41 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
         code === 'EACCES' ? 'Sin permiso para leer el directorio' :
         'No se pudo leer el directorio';
       return c.json({ ok: false, error: msg, detail: String(e?.message || e) },
-        code === 'ENOENT' ? 404 : code === 'EACCES' ? 403 : 500);
+        code === 'ENOENT' ? 404 : code === 'ENOTDIR' ? 400 : code === 'EACCES' ? 403 : 500);
     }
 
-    const entries: FileEntry[] = await Promise.all(
-      dirents.map(async (d) => {
-        const cfull = path.join(cp, d.name);
-        const ent: FileEntry = { name: d.name, type: 'file', size: 0, mtime: 0, mode: '' };
-        const st = await withTimeout(lstat(cfull), STAT_TIMEOUT_MS, null).catch(() => null);
-        if (st) {
-          ent.size = st.size;
-          ent.mtime = st.mtimeMs;
-          ent.mode = (st.mode & 0o7777).toString(8);
-          if (st.isSymbolicLink()) {
-            ent.type = 'link';
-            // A symlink to a dir navigates like a dir when the target resolves.
-            const t = await withTimeout(stat(cfull), STAT_TIMEOUT_MS, null).catch(() => null);
-            if (t) {
-              if (t.isDirectory()) ent.type = 'dir';
-              ent.size = t.size;
-              ent.mtime = t.mtimeMs;
+    // Bound concurrent lstat calls: a directory with tens of thousands of
+    // entries must not queue that many libuv requests at once.
+    const entries: FileEntry[] = new Array(dirents.length);
+    let nextDirent = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(64, dirents.length) }, async () => {
+        while (nextDirent < dirents.length) {
+          const i = nextDirent++;
+          const d = dirents[i];
+          const cfull = path.join(cp, d.name);
+          const ent: FileEntry = { name: d.name, type: 'file', size: 0, mtime: 0, mode: '' };
+          const st = await withTimeout(lstat(cfull), STAT_TIMEOUT_MS, null).catch(() => null);
+          if (st) {
+            ent.size = st.size;
+            ent.mtime = st.mtimeMs;
+            ent.mode = (st.mode & 0o7777).toString(8);
+            if (st.isSymbolicLink()) {
+              ent.type = 'link';
+              // A symlink to a dir navigates like a dir when the target resolves.
+              const t = await withTimeout(stat(cfull), STAT_TIMEOUT_MS, null).catch(() => null);
+              if (t) {
+                if (t.isDirectory()) ent.type = 'dir';
+                ent.size = t.size;
+                ent.mtime = t.mtimeMs;
+              }
+            } else if (st.isDirectory()) {
+              ent.type = 'dir';
+              ent.size = 0;
             }
-          } else if (st.isDirectory()) {
-            ent.type = 'dir';
-            ent.size = 0;
           }
+          entries[i] = ent;
         }
-        return ent;
       })
     );
 
@@ -325,7 +385,7 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
   // ---------- Read text file (512KB cap) ----------
   app.get('/api/files/read', async (c) => {
     const r = await resolveAllowed(c.req.query('path'));
-    if (!r.path) return c.json({ ok: false, error: r.error }, 403);
+    if (!r.path) return c.json({ ok: false, error: r.error }, (r.status ?? 403) as 403);
     const cp = hostToContainer(r.path);
     try {
       const st = await stat(cp);
@@ -333,7 +393,7 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
       // FIFOs/sockets would block fh.read() forever — only regular files.
       if (!st.isFile()) return c.json({ ok: false, error: 'No es un archivo regular' }, 400);
     } catch (e: any) {
-      return c.json({ ok: false, error: 'El archivo no existe', detail: String(e?.message || e) }, 404);
+      return c.json({ ok: false, error: e?.code === 'EACCES' ? 'Sin permiso para leer el archivo' : 'El archivo no existe', detail: String(e?.message || e) }, e?.code === 'EACCES' ? 403 : 404);
     }
 
     let fh: Awaited<ReturnType<typeof open>> | null = null;
@@ -371,7 +431,7 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
   // ---------- Preview (inline stream + Range + format conversion) ----------
   app.get('/api/files/preview', async (c) => {
     const r = await resolveAllowed(c.req.query('path'));
-    if (!r.path) return c.json({ ok: false, error: r.error }, 403);
+    if (!r.path) return c.json({ ok: false, error: r.error }, (r.status ?? 403) as 403);
     const cp = hostToContainer(r.path);
     let st;
     try {
@@ -381,17 +441,21 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
       if (!s.isFile()) return c.json({ ok: false, error: 'No es un archivo regular' }, 400);
       st = s;
     } catch (e: any) {
-      return c.json({ ok: false, error: 'El archivo no existe', detail: String(e?.message || e) }, 404);
+      return c.json({ ok: false, error: e?.code === 'EACCES' ? 'Sin permiso para leer el archivo' : 'El archivo no existe', detail: String(e?.message || e) }, e?.code === 'EACCES' ? 403 : 404);
     }
 
     const name = path.posix.basename(r.path);
     const ext = (name.split('.').pop() || '').toLowerCase();
+    // ?w=N asks for a bounded thumbnail — grid cards must not pull the full
+    // original over the wire just to render a 56px cell.
+    const wq = parseInt(c.req.query('w') || '', 10);
+    const thumb = Number.isFinite(wq) ? Math.min(Math.max(Math.floor(wq), 24), 1200) : 0;
 
     // Formats the browser can't render → PNG via ImageMagick on the host.
-    if (CONVERT_EXTS.has(ext)) {
-      const conv = await convertedPreview(r.path, st);
+    if (CONVERT_EXTS.has(ext) || (thumb && THUMB_EXTS.has(ext))) {
+      const conv = await convertedPreview(r.path, st, thumb);
       if (!conv.buf) return c.json({ ok: false, error: conv.error, detail: conv.detail }, 415);
-      const etag = `"cv-${st.size}-${Math.floor(st.mtimeMs)}"`;
+      const etag = `"cv-${st.size}-${Math.floor(st.mtimeMs)}-w${thumb}"`;
       if (c.req.header('if-none-match') === etag) {
         return new Response(null, { status: 304, headers: { ETag: etag } });
       }
@@ -401,6 +465,7 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
           'Content-Length': String(conv.buf.length),
           'Content-Disposition': `inline; filename="${encodeURIComponent(name)}.png"`,
           'Cache-Control': 'private, max-age=300',
+          'X-Content-Type-Options': 'nosniff',
           ETag: etag,
         },
       });
@@ -418,6 +483,7 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
       // Blocks <script> inside svg/xml when the URL is opened as a document
       // (new tab / iframe). Media and pdf viewers are unaffected.
       'Content-Security-Policy': "script-src 'none'",
+      'X-Content-Type-Options': 'nosniff',
       ETag: etag,
     };
     if (c.req.header('if-none-match') === etag && !c.req.header('range')) {
@@ -454,7 +520,7 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
   // ---------- Download (stream + Content-Disposition) ----------
   app.get('/api/files/download', async (c) => {
     const r = await resolveAllowed(c.req.query('path'));
-    if (!r.path) return c.json({ ok: false, error: r.error }, 403);
+    if (!r.path) return c.json({ ok: false, error: r.error }, (r.status ?? 403) as 403);
     const cp = hostToContainer(r.path);
     let st;
     try {
@@ -462,7 +528,7 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
       if (st.isDirectory()) return c.json({ ok: false, error: 'Es un directorio' }, 400);
       if (!st.isFile()) return c.json({ ok: false, error: 'No es un archivo regular' }, 400);
     } catch (e: any) {
-      return c.json({ ok: false, error: 'El archivo no existe', detail: String(e?.message || e) }, 404);
+      return c.json({ ok: false, error: e?.code === 'EACCES' ? 'Sin permiso para leer el archivo' : 'El archivo no existe', detail: String(e?.message || e) }, e?.code === 'EACCES' ? 403 : 404);
     }
 
     const name = path.posix.basename(r.path);
@@ -474,6 +540,65 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
         'Content-Length': String(st.size),
         'Content-Disposition': `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`,
         'X-Content-Type-Options': 'nosniff',
+      },
+    });
+  });
+
+  // ---------- Download a folder (or a selection) as a streamed zip ----------
+  // `zip -qr -` writes the archive straight to stdout ("-" = streaming mode),
+  // so nothing lands on the host disk and the client abort kills the proc.
+  app.get('/api/files/download-zip', async (c) => {
+    let baseDir: string;
+    let args: string;
+    let label: string;
+    const itemsRaw = c.req.query('items');
+    if (itemsRaw !== undefined) {
+      const rd = await resolveAllowed(c.req.query('dir'));
+      if (!rd.path) return c.json({ ok: false, error: rd.error }, (rd.status ?? 403) as 403);
+      let parsed: unknown;
+      try { parsed = JSON.parse(itemsRaw); } catch { return c.json({ ok: false, error: 'Selección inválida' }, 400); }
+      const names = (Array.isArray(parsed) ? parsed : [])
+        .map((n) => String(n))
+        .filter((n) => n && !n.includes('/') && n !== '.' && n !== '..' && Buffer.byteLength(n, 'utf8') <= 255);
+      if (!names.length || names.length > 300) {
+        return c.json({ ok: false, error: 'Selección inválida para comprimir' }, 400);
+      }
+      baseDir = rd.path;
+      label = path.posix.basename(rd.path) || 'archivos';
+      args = names.map((n) => shq(n.startsWith('-') ? './' + n : n)).join(' ');
+    } else {
+      const r = await resolveAllowed(c.req.query('path'));
+      if (!r.path) return c.json({ ok: false, error: r.error }, (r.status ?? 403) as 403);
+      const st = await stat(hostToContainer(r.path)).catch(() => null);
+      if (!st?.isDirectory()) return c.json({ ok: false, error: 'No es una carpeta' }, 400);
+      baseDir = path.posix.dirname(r.path);
+      label = path.posix.basename(r.path) || 'carpeta';
+      args = shq(label.startsWith('-') ? './' + label : label);
+    }
+    const chk = await hostExec('command -v zip', { user: WRITE_USER, timeoutMs: 10_000 });
+    if (!chk.ok) return c.json({ ok: false, error: 'zip no está instalado en el servidor' }, 501);
+    // Info-ZIP zip has no '--': the './' prefix shields names that start with '-'.
+    const proc = hostSpawn(`cd ${shq(baseDir)} && exec zip -qr - ${args}`, { user: WRITE_USER, timeoutSec: 900 });
+    const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(ctrl) {
+        try {
+          const { done, value } = await reader.read();
+          if (done) ctrl.close(); else ctrl.enqueue(value);
+        } catch (e) { ctrl.error(e); }
+      },
+      cancel() {
+        reader.cancel().catch(() => {});
+        killHostProc(proc);
+      },
+    });
+    const asciiName = label.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_') || 'carpeta';
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'application/zip',
+        'Content-Disposition': `attachment; filename="${asciiName}.zip"; filename*=UTF-8''${encodeURIComponent(label)}.zip`,
+        'X-Content-Type-Options': 'nosniff',
+        'Cache-Control': 'private, no-store',
       },
     });
   });
@@ -492,7 +617,8 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
     // Resolve the parent only: following an existing leaf symlink would create
     // a different file instead of reporting the name collision.
     const parent = await resolveAllowed(body.path);
-    if (!parent.path) return c.json({ ok: false, error: parent.error }, 403);
+    if (!parent.path) return c.json({ ok: false, error: parent.error }, (parent.status ?? 403) as 403);
+    await assertWritable(parent.path);
     const directory = await stat(hostToContainer(parent.path)).catch(() => null);
     if (!directory) return c.json({ ok: false, error: 'La carpeta destino no existe' }, 404);
     if (!directory.isDirectory()) return c.json({ ok: false, error: 'El destino no es una carpeta' }, 400);
@@ -530,7 +656,7 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
       return c.json({ ok: false, error: 'Cuerpo JSON inválido' }, 400);
     }
     const r = await resolveAllowed(body?.path);
-    if (!r.path) return c.json({ ok: false, error: r.error }, 403);
+    if (!r.path) return c.json({ ok: false, error: r.error }, (r.status ?? 403) as 403);
 
     let buf: Buffer;
     if (typeof body?.b64 === 'string') {
@@ -543,6 +669,7 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
 
     if(buf.length>MAX_READ_BYTES)return c.json({ok:false,error:'La edición supera 512 KiB'},413);
     if(typeof body.revision!=='string'||! /^(?:[a-f0-9]{64}|missing)$/.test(body.revision))return c.json({ok:false,error:'Recargá el archivo para obtener su revisión antes de guardar'},409);
+    await assertWritable(r.path);
     const res = await writeHostFile(r.path, buf,body.revision);
     if (!res.ok) return c.json({ ok: false, error: res.error }, res.conflict?409:500);
     const name=path.posix.basename(r.path);
@@ -561,8 +688,8 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
       return c.json({ ok: false, error: 'Cuerpo JSON inválido' }, 400);
     }
     const r = await resolveAllowed(body?.path);
-    if (!r.path) return c.json({ ok: false, error: r.error }, 403);
-
+    if (!r.path) return c.json({ ok: false, error: r.error }, (r.status ?? 403) as 403);
+    await assertWritable(r.path);
     const res = await hostExec(`mkdir -p -- ${shq(r.path)}`, { user: WRITE_USER, timeoutMs: 15_000 });
     if (!res.ok) {
       return c.json(
@@ -575,9 +702,11 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
 
   // Transfers share the durable host worker with Library and maintenance.
   const transferActor=(c:any)=>{const by=actor(c);if(c.req.header('origin')!==requestOrigin(c))throw new MaintenanceError('Origen no permitido',403);return by;};
-  const transferPaths=async(input:any)=>{
+  const transferPaths=async(input:any,mode?:string)=>{
     const from=await resolveAllowed(input?.from),to=await resolveAllowed(input?.to);
-    if(!from.path||!to.path)throw new MaintenanceError(from.error||to.error||'Ruta no permitida',403);
+    if(!from.path||!to.path)throw new MaintenanceError(from.error||to.error||'Ruta no permitida',(from.status??to.status)??403);
+    await assertWritable(to.path);
+    if((mode??String(input?.mode))!=='copy')await assertWritable(from.path); // moves/rename unlink the source
     const sourceMountId=await hostVolumes.validate(from.path,input?.fromVolume);
     const destinationMountId=await hostVolumes.validate(to.path,input?.toVolume);
     return {from:from.path,to:to.path,...(!qaHome?{sourceMountId:sourceMountId||undefined,destinationMountId:destinationMountId||undefined}:{})};
@@ -587,7 +716,7 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
     if(!transfers)throw new MaintenanceError('Motor de transferencias no disponible',503);
     const by=transferActor(c),input=await maintenanceBody(c);only(input,['mode','from','to','fromVolume','toVolume']);
     if(!['copy','move'].includes(String(input.mode)))throw new MaintenanceError('Modo inválido',400);
-    const paths=await transferPaths(input);return c.json({ok:true,plan:publicTransferPlan(await transfers.plan(input.mode as 'copy'|'move',paths.from,paths.to,by,paths))},201);
+    const paths=await transferPaths(input,String(input.mode));return c.json({ok:true,plan:publicTransferPlan(await transfers.plan(input.mode as 'copy'|'move',paths.from,paths.to,by,paths))},201);
   });
   app.post('/api/files/transfers/:id/execute',async c=>{
     if(!transfers)throw new MaintenanceError('Motor de transferencias no disponible',503);
@@ -599,7 +728,7 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
   app.get('/api/files/transfers/:id',async c=>{if(!transfers)throw new MaintenanceError('Motor no disponible',503);return c.json({ok:true,operation:await transfers.status(c.req.param('id'),actor(c))});});
   for(const [route,mode] of [['rename','move'],['copy','copy']] as const)app.post('/api/files/'+route,async c=>{
     if(!transfers)throw new MaintenanceError('Motor de transferencias no disponible',503);
-    const by=transferActor(c),input=await maintenanceBody(c);only(input,['from','to']);const paths=await transferPaths(input);
+    const by=transferActor(c),input=await maintenanceBody(c);only(input,['from','to','fromVolume','toVolume']);const paths=await transferPaths(input,mode);
     if(paths.from===paths.to)return c.json({ok:true,...paths});
     const operation=await transfers.quick(mode,paths.from,paths.to,by);return c.json({ok:true,...paths,operation});
   });
@@ -620,14 +749,20 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
   // ---------- Detailed stat (properties dialog) ----------
   app.get('/api/files/stat', async (c) => {
     const r = await resolveAllowed(c.req.query('path'));
-    if (!r.path) return c.json({ ok: false, error: r.error }, 403);
+    if (!r.path) return c.json({ ok: false, error: r.error }, (r.status ?? 403) as 403);
     const res = await hostExec(
       `stat -c '%s|%Y|%X|%Z|%a|%A|%U|%G|%F|%h|%i' -- ${shq(r.path)} && readlink -- ${shq(r.path)} 2>/dev/null || true`,
       { user: WRITE_USER, timeoutMs: 15_000 }
     );
     if (!res.ok) return c.json({ ok: false, error: 'No se pudo leer', detail: res.stderr }, 500);
     const [fields, target] = res.stdout.trim().split('\n');
-    const [size, mtime, atime, ctime, mode, modeStr, user, group, ftype, links, inode] = fields.split('|');
+    // The `|| true` above makes a failed stat exit 0 with empty stdout —
+    // missing entries must answer 404, not a zeroed stat sheet.
+    const parts = (fields || '').split('|');
+    if (parts.length < 11 || !parts[0]) {
+      return c.json({ ok: false, error: 'El archivo no existe', detail: res.stderr || undefined }, 404);
+    }
+    const [size, mtime, atime, ctime, mode, modeStr, user, group, ftype, links, inode] = parts;
     let blocks = 0;
     const du = await hostExec(`du -sb -- ${shq(r.path)} 2>/dev/null | cut -f1`, { user: WRITE_USER, timeoutMs: 60_000 });
     if (du.ok) blocks = parseInt(du.stdout.trim(), 10) || 0;
@@ -663,8 +798,9 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
       return c.json({ ok: false, error: 'Modo inválido — usá octal (ej: 755)' }, 400);
     }
     const r = await resolveAllowed(body?.path);
-    if (!r.path) return c.json({ ok: false, error: r.error }, 403);
-    const res = await hostExec(`chmod ${mode} -- ${shq(r.path)}`, { user: WRITE_USER, timeoutMs: 15_000 });
+    if (!r.path) return c.json({ ok: false, error: r.error }, (r.status ?? 403) as 403);
+    await assertWritable(r.path);
+    const res = await hostExec(`chmod ${body?.recursive === true ? '-R ' : ''}${mode} -- ${shq(r.path)}`, { user: WRITE_USER, timeoutMs: 60_000 });
     if (!res.ok) return c.json({ ok: false, error: 'No se pudo cambiar permisos', detail: res.stderr }, 500);
     return c.json({ ok: true });
   });
@@ -672,7 +808,7 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
   // ---------- Directory size (lazy, per-row) ----------
   app.get('/api/files/dirsize', async (c) => {
     const r = await resolveAllowed(c.req.query('path'));
-    if (!r.path) return c.json({ ok: false, error: r.error }, 403);
+    if (!r.path) return c.json({ ok: false, error: r.error }, (r.status ?? 403) as 403);
     const res = await hostExec(`du -sb -- ${shq(r.path)} 2>/dev/null | cut -f1`, {
       user: WRITE_USER,
       timeoutMs: 60_000,
@@ -684,7 +820,7 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
   // ---------- Free space for the status bar ----------
   app.get('/api/files/df', async (c) => {
     const r = await resolveAllowed(c.req.query('path'));
-    if (!r.path) return c.json({ ok: false, error: r.error }, 403);
+    if (!r.path) return c.json({ ok: false, error: r.error }, (r.status ?? 403) as 403);
     const res = await hostExec(`df -Pk -- ${shq(r.path)} | tail -1`, { user: WRITE_USER, timeoutMs: 10_000 });
     if (!res.ok) return c.json({ ok: false, error: 'No se pudo leer df', detail: res.stderr }, 500);
     const parts = res.stdout.trim().split(/\s+/);
@@ -700,7 +836,7 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
   // ---------- Recursive search (distinct from the in-folder filter) ----------
   app.get('/api/files/search', async (c) => {
     const r = await resolveAllowed(c.req.query('path'));
-    if (!r.path) return c.json({ ok: false, error: r.error }, 403);
+    if (!r.path) return c.json({ ok: false, error: r.error }, (r.status ?? 403) as 403);
     const q = (c.req.query('q') || '').trim();
     if (q.length < 2 || q.length > 120) {
       return c.json({ ok: false, error: 'La búsqueda necesita al menos 2 caracteres' }, 400);
@@ -709,18 +845,22 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
     // User metacharacters are escaped so the query stays literal.
     const esc = q.replace(/[\\*?\[\]]/g, (ch) => '\\' + ch);
     const res = await hostExec(
-      `find ${shq(r.path)} -maxdepth 7 -iname ${shq('*' + esc + '*')} -printf '%y\\t%p\\n' 2>/dev/null | head -${limit}`,
+      // NUL-separated records: a filename may legally contain \n and \t, so
+      // newline/tab framing would corrupt paths or drop the path field whole.
+      `find ${shq(r.path)} -maxdepth 7 -iname ${shq('*' + esc + '*')} -printf '%y\\t%p\\0' 2>/dev/null | head -c ${limit * 4400}`,
       { user: WRITE_USER, timeoutMs: 25_000 }
     );
     if (!res.ok) return c.json({ ok: false, error: 'Búsqueda fallida', detail: res.stderr }, 500);
-    const results = res.stdout
-      .split('\n')
-      .filter(Boolean)
-      .map((line) => {
-        const [t, p] = line.split('\t');
-        return { type: t === 'd' ? 'dir' : 'file', path: p, name: path.posix.basename(p), dir: path.posix.dirname(p) };
+    const records = res.stdout.split('\0');
+    const tail = records.pop() ?? ''; // '' on clean end; a partial record when head -c cut the stream
+    const results = records
+      .filter((rec) => /^[a-z]\t/.test(rec))
+      .slice(0, limit)
+      .map((rec) => {
+        const p = rec.slice(2);
+        return { type: rec[0] === 'd' ? 'dir' : 'file', path: p, name: path.posix.basename(p), dir: path.posix.dirname(p) };
       });
-    return c.json({ ok: true, results, truncated: results.length >= limit });
+    return c.json({ ok: true, results, truncated: results.length >= limit || tail !== '' });
   });
 
   // ---------- Compress / extract ----------
@@ -744,7 +884,8 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
     const op = body?.op;
     if (op === 'compress') {
       const rd = await resolveAllowed(body?.dir);
-      if (!rd.path) return c.json({ ok: false, error: rd.error }, 403);
+      if (!rd.path) return c.json({ ok: false, error: rd.error }, (rd.status ?? 403) as 403);
+      await assertWritable(rd.path);
       const names: string[] = (Array.isArray(body?.names) ? body.names : [])
         .map((n: unknown) => String(n))
         .filter((n: string) => n && !n.includes('/') && n !== '.' && n !== '..');
@@ -757,11 +898,12 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
       if (await hostExists(outPath)) {
         return c.json({ ok: false, error: 'Ya existe un archivo con ese nombre' }, 409);
       }
-      const quoted = names.map(shq).join(' ');
+      // Info-ZIP zip/unzip don't accept '--' (unlike GNU tools). A './'
+      // prefix keeps a '-name' entry from being parsed as an option.
+      const quoted = names.map((n) => shq(n.startsWith('-') ? './' + n : n)).join(' ');
       const cmd =
         format === 'zip'
-          // Info-ZIP zip/unzip don't accept '--' (unlike GNU tools).
-          ? `zip -rq ${shq(outPath)} -- ${quoted}`
+          ? `zip -rq ${shq(outPath)} ${quoted}`
           : `tar -c${format === 'tar.gz' ? 'z' : ''}f ${shq(outPath)} -- ${quoted}`;
       const res = await hostExec(`cd ${shq(rd.path)} && ${cmd}`, { user: WRITE_USER, timeoutMs: 300_000 });
       if (!res.ok) return c.json({ ok: false, error: 'No se pudo comprimir', detail: res.stderr }, 500);
@@ -769,9 +911,10 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
     }
     if (op === 'extract') {
       const r = await resolveAllowed(body?.path);
-      if (!r.path) return c.json({ ok: false, error: r.error }, 403);
+      if (!r.path) return c.json({ ok: false, error: r.error }, (r.status ?? 403) as 403);
       const rd = await resolveAllowed(body?.destDir);
-      if (!rd.path) return c.json({ ok: false, error: rd.error }, 403);
+      if (!rd.path) return c.json({ ok: false, error: rd.error }, (rd.status ?? 403) as 403);
+      await assertWritable(rd.path);
       const ext = archiveExtOf(r.path);
       if (!ext) return c.json({ ok: false, error: 'Formato de archivo no soportado' }, 400);
       // Always extract into a fresh folder named after the archive — never
@@ -781,8 +924,10 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
       for (let i = 1; await hostExists(outDir) && i < 100; i++) {
         outDir = path.posix.join(rd.path, `${stem} (${i + 1})`);
       }
+      // unzip takes no '--'; the archive/outDir args are absolute paths
+      // resolved server-side, so they can never start with '-'.
       const cmd = ext === 'zip'
-        ? `mkdir -p -- ${shq(outDir)} && unzip -q -- ${shq(r.path)} -d ${shq(outDir)}`
+        ? `mkdir -p -- ${shq(outDir)} && unzip -q ${shq(r.path)} -d ${shq(outDir)}`
         : `mkdir -p -- ${shq(outDir)} && tar -xf ${shq(r.path)} -C ${shq(outDir)}`;
       const res = await hostExec(cmd, { user: WRITE_USER, timeoutMs: 300_000 });
       if (!res.ok) return c.json({ ok: false, error: 'No se pudo extraer', detail: res.stderr }, 500);
@@ -794,7 +939,7 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
   // Compatibility API for the existing progress chips. No in-memory job map.
   app.post('/api/files/copyjob',async c=>{
     if(!transfers)throw new MaintenanceError('Motor no disponible',503);
-    const by=transferActor(c),input=await maintenanceBody(c);only(input,['from','to','mode','fromVolume','toVolume']);const paths=await transferPaths(input);
+    const by=transferActor(c),input=await maintenanceBody(c);only(input,['from','to','mode','fromVolume','toVolume']);const paths=await transferPaths(input,input.mode==='move'?'move':'copy');
     const mode=input.mode==='move'?'move':'copy';const plan=await transfers.plan(mode,paths.from,paths.to,by,paths);
     await transfers.execute(plan.id,plan.digest,by);return c.json({ok:true,jobId:plan.id,total:plan.logicalBytes},202);
   });

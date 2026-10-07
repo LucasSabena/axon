@@ -10,7 +10,7 @@
 .ag-consumption-notice { color:var(--warn); font-size:12px; line-height:1.5; margin:10px 0; }
 .ag-consumption-empty { padding:24px 0; color:var(--text-dim); line-height:1.6; }
 .ag-consumption-chart { margin:20px 0; }
-.ag-consumption-chart figcaption { font-size:12px; color:var(--text-dim); margin-bottom:12px; }
+.ag-consumption-chart figcaption { font-size:12px; color:var(--text-dim); margin-bottom:12px; display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; }
 .ag-consumption-chart svg { display:block; width:100%; height:120px; border-bottom:1px solid var(--border); fill:var(--accent); }
 .ag-consumption-chart > div { display:flex; justify-content:space-between; font-size:11px; color:var(--text-dim); padding-top:6px; }
 .ag-consumption-model { border-top:1px solid var(--border); padding:16px 0; min-width:0; }
@@ -31,4 +31,34 @@
 .ag-consumption-daily caption { text-align:left; color:var(--text-dim); margin:8px 0; }
 .ag-consumption-source { font-size:11px; color:var(--text-dim); line-height:1.6; overflow-wrap:anywhere; }
 [data-agent-consumption-panel] { min-width:0; }
-@media(max-width:720px) { .ag-consumption-stats { grid-template-columns:repeat(2,minmax(0,1fr)); } .ag-consumption-stats dd { font-size:17px; } .ag-consumption-tokens { grid-template-columns:repeat(2,minmax(0,1fr)); } .ag-consumption-filters { grid-template-columns:repeat(2,minmax(0,1fr)); } .ag-consumption-filters label:last-child { grid-column:1/-1; } }
+.agc-tip { position:fixed; z-index:300; pointer-events:none; background:var(--bg-overlay); border:1px solid var(--border-strong); border-radius:var(--radius); padding:8px 10px; font-size:11px; box-shadow:var(--shadow-modal); max-width:280px; }
+.agc-tip > b { display:block; margin-bottom:5px; font-size:12px; overflow-wrap:anywhere; }
+.agc-tip-row { display:flex; align-items:center; gap:6px; padding:2px 0; }
+.agc-tip-row i { width:8px; height:8px; border-radius:2px; flex-shrink:0; }
+.agc-tip-row span { color:var(--text-dim); flex:1; }
+.agc-tip-row strong,.agc-tip-row.strong span { color:var(--text); font-weight:650; }
+.agc-tip-row b { font-variant-numeric:tabular-nums; white-space:nowrap; }
+.agc-dist { margin:18px 0 4px; }
+.agc-dist-bar { display:flex; height:14px; border-radius:var(--radius-sm); overflow:hidden; background:var(--bg-elevated); }
+.agc-dist-bar i { display:block; min-width:0; }
+.agc-legend { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+.agc-legend-chip { display:inline-flex; align-items:center; gap:6px; background:var(--bg-elevated); border:1px solid var(--border); color:var(--text-dim); border-radius:999px; padding:3px 10px; font:inherit; font-size:11px; cursor:pointer; }
+.agc-legend-chip:hover { border-color:var(--border-strong); color:var(--text); }
+.agc-legend-chip.active { color:var(--text); border-color:var(--accent); }
+.agc-legend-chip i { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+.agc-legend-chip b { font-variant-numeric:tabular-nums; }
+.agc-chart-head { display:flex; justify-content:flex-end; margin:14px 0 -8px; }
+.agc-metric { display:inline-flex; border:1px solid var(--border); border-radius:var(--radius-sm); overflow:hidden; }
+.agc-metric button { background:transparent; border:0; color:var(--text-dim); font:inherit; font-size:11px; padding:4px 10px; cursor:pointer; }
+.agc-metric button.active { background:var(--accent-soft); color:var(--text); }
+.ag-consumption-chart g:hover rect { opacity:.8; }
+.agc-x { display:flex; justify-content:space-between; font-size:11px; color:var(--text-dim); padding-top:6px; }
+.agc-groups-toolbar { display:flex; align-items:end; gap:10px; flex-wrap:wrap; margin:20px 0 4px; }
+.agc-groups-toolbar h4 { margin:0 auto 0 0; font-weight:650; }
+.agc-groups-toolbar .agc-count { color:var(--text-dim); font-weight:500; font-size:12px; }
+.agc-groups-toolbar input[type="search"] { max-width:220px; }
+.agc-groups-toolbar select { max-width:170px; }
+.agc-cat-bar { display:flex; height:8px; border-radius:4px; overflow:hidden; background:var(--bg-elevated); margin:10px 0; }
+.agc-cat-bar i { display:block; min-width:0; }
+.agc-prov-dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; vertical-align:baseline; }
+@media(max-width:720px) { .ag-consumption-stats { grid-template-columns:repeat(2,minmax(0,1fr)); } .ag-consumption-stats dd { font-size:17px; } .ag-consumption-tokens { grid-template-columns:repeat(2,minmax(0,1fr)); } .ag-consumption-filters { grid-template-columns:repeat(2,minmax(0,1fr)); } .ag-consumption-filters label:last-child { grid-column:1/-1; } .agc-groups-toolbar input[type="search"],.agc-groups-toolbar select { max-width:none; flex:1 1 45%; } }

@@ -48,7 +48,8 @@ async function verify(token: string): Promise<SessionPayload | null> {
     if (!valid) return null;
 
     const payload = JSON.parse(new TextDecoder().decode(data)) as SessionPayload;
-    if (payload.exp < Date.now() / 1000) return null;
+    // exp must be a finite number — a non-numeric one would never expire.
+    if (typeof payload.exp !== 'number' || !Number.isFinite(payload.exp) || payload.exp < Date.now() / 1000) return null;
     return payload;
   } catch {
     return null;
@@ -114,7 +115,10 @@ export async function verifySessionToken(token: string): Promise<SessionPayload 
 
 export async function getSession(c: Context): Promise<SessionPayload | null> {
   const cookie = c.req.header('cookie') || '';
-  const match = cookie.match(new RegExp(`${COOKIE_NAME}=([^;]+)`));
+  // Anchored like legacySessionId/sessionIdFromRequest — an unanchored match
+  // would let a shadow cookie (xaxon_session=...) pass verification with a
+  // token that never entered the revocation registry.
+  const match = cookie.match(new RegExp(`(?:^|;\\s*)${COOKIE_NAME}=([^;]+)`));
   if (!match) return null;
   return verify(match[1]);
 }

@@ -3,6 +3,7 @@ import { readFile, writeFile, mkdir } from 'fs/promises';
 import * as path from 'path';
 import { hostExec } from './host';
 import { loadConfig } from './config';
+import { isCriticalUnit } from './systemd-units';
 
 // ---------- Ops: salud del servidor + Wake-on-LAN + energía programada ----------
 // Self-contained feature module — index.ts only calls registerOpsRoutes(app).
@@ -15,7 +16,7 @@ function fail(c: any, status: number, error: string, extra?: Record<string, unkn
 
 // ---------- WoL + power persistence (mirrors heartbeats.ts pattern) ----------
 
-interface WolDevice { name: string; mac: string; addedAt: string }
+interface WolDevice { name: string; mac: string; broadcast?: string; addedAt: string }
 interface WolWake { t: number; mac: string; name?: string; broadcast?: string; method?: string }
 interface ScheduledPower { action: 'reboot' | 'shutdown'; minutes: number; scheduledAt: string; fireAt: string }
 interface WolFile { devices: WolDevice[]; wakes: WolWake[]; power: ScheduledPower | null }
@@ -58,7 +59,8 @@ function saveSoon(): void {
 }
 
 const MAC_RE = /^([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$/;
-const BCAST_RE = /^(\d{1,3}\.){3}\d{1,3}$/;
+// Real IPv4 octets only (0-255) — `\d{1,3}` alone would accept 999.999.999.999.
+const BCAST_RE = /^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
 
 function normMac(mac: string): string {
   return mac.replace(/-/g, ':').toLowerCase();
@@ -147,33 +149,50 @@ async function checkUnits(): Promise<FailedUnit[]> {
   return [...parse(userRes.stdout, 'user'), ...parse(sysRes.stdout, 'system')];
 }
 
-async function checkSsh(): Promise<{ failed24h: number | null; source?: string }> {
+async function checkSsh(): Promise<{ failed24h: number | null; source?: string; window?: '24h' | 'last50' }> {
   // grep -c exits 1 when the count is 0 — judge by stdout, not by exit code.
   const j = await hostExec(
     "journalctl _COMM=sshd --since '24 hours ago' -o cat --no-pager 2>/dev/null | grep -c 'Failed password'",
     { user: 'root', timeoutMs: 20_000 }
   );
   const jn = parseInt(j.stdout.trim(), 10);
-  if (!Number.isNaN(jn)) return { failed24h: jn, source: 'journalctl' };
+  if (!Number.isNaN(jn)) return { failed24h: jn, source: 'journalctl', window: '24h' };
 
-  const lb = await hostExec("lastb -n 50 2>/dev/null | grep -cv '^\\s*$'", { user: 'root', timeoutMs: 10_000 });
-  const ln = parseInt(lb.stdout.trim(), 10);
-  if (!Number.isNaN(ln)) return { failed24h: ln, source: 'lastb' };
+  // `lastb -s` (util-linux) bounds the window to 24h honestly. Older lastb
+  // builds reject --since; then the count is labelled 'last50' so the UI
+  // doesn't claim a 24h window that `lastb -n 50` never had.
+  const probe = await hostExec("lastb --since '2020-01-01 00:00:00' </dev/null >/dev/null 2>&1; echo $?", { user: 'root', timeoutMs: 10_000 });
+  if (probe.stdout.trim() === '0') {
+    const lb = await hostExec(
+      `lastb -s "$(date -d '24 hours ago' '+%Y-%m-%d %H:%M:%S')" 2>/dev/null | grep -cv '^\\s*$\\|^btmp'`,
+      { user: 'root', timeoutMs: 10_000 }
+    );
+    const ln = parseInt(lb.stdout.trim(), 10);
+    if (!Number.isNaN(ln)) return { failed24h: ln, source: 'lastb', window: '24h' };
+  } else {
+    // Exclude blank lines AND the `btmp begins …` trailer — counting all
+    // non-empty lines would add +1 and report the window size as failures.
+    const lb = await hostExec("lastb -n 50 2>/dev/null | grep -cv '^\\s*$\\|^btmp'", { user: 'root', timeoutMs: 10_000 });
+    const ln = parseInt(lb.stdout.trim(), 10);
+    if (!Number.isNaN(ln)) return { failed24h: ln, source: 'lastb', window: 'last50' };
+  }
 
   return { failed24h: null };
 }
 
-async function checkUpdates(): Promise<{ total: number; security: number }> {
+async function checkUpdates(): Promise<{ total: number; security: number; names: string[] }> {
   const res = await hostExec(
     `u=$(apt list --upgradable 2>/dev/null | tail -n +2); ` +
     `echo "TOTAL:$(printf '%s\\n' "$u" | grep -c .)"; ` +
-    `echo "SEC:$(printf '%s\\n' "$u" | grep -ci secur)"`,
+    `echo "SEC:$(printf '%s\\n' "$u" | grep -ci secur)"; ` +
+    `printf '%s\\n' "$u" | grep -o '^[^/[:space:]]*' | head -8 | sed 's/^/NAME:/'`,
     { user: 'root', timeoutMs: 30_000 }
   );
   const total = parseInt(res.stdout.match(/TOTAL:(\d+)/)?.[1] || '', 10);
   const security = parseInt(res.stdout.match(/SEC:(\d+)/)?.[1] || '', 10);
   if (Number.isNaN(total)) throw new Error('apt no respondió');
-  return { total, security: Number.isNaN(security) ? 0 : security };
+  const names = res.stdout.split('\n').map((l) => l.match(/^NAME:(.+)/)?.[1]).filter((n): n is string => !!n);
+  return { total, security: Number.isNaN(security) ? 0 : security, names };
 }
 
 interface CertInfo {
@@ -244,7 +263,9 @@ interface ResourceInfo {
 
 async function checkResources(): Promise<ResourceInfo> {
   const res = await hostExec(
-    `echo '==DF=='; df -h / /home --output=pcent,target 2>/dev/null || df -h / /home 2>/dev/null; ` +
+    // All real mounts, not just / and /home — external disks and /boot
+    // partitions are health-relevant too. -x filters pseudo filesystems.
+    `echo '==DF=='; df -h --output=pcent,target -x tmpfs -x devtmpfs -x overlay -x squashfs -x efivarfs 2>/dev/null || df -h 2>/dev/null; ` +
     `echo '==MEM=='; free -m 2>/dev/null; ` +
     `echo '==TEMP=='; command -v sensors >/dev/null 2>&1 && sensors 2>/dev/null || true`,
     { user: 'root', timeoutMs: 15_000 }
@@ -254,8 +275,17 @@ async function checkResources(): Promise<ResourceInfo> {
 
   const disks: { mount: string; pcent: number }[] = [];
   for (const line of seg('DF', 'MEM').split('\n')) {
-    const m = line.trim().match(/^(\d+)%\s+(\S+)$/);
-    if (m && !disks.some((d) => d.mount === m[2])) disks.push({ mount: m[2], pcent: parseInt(m[1], 10) });
+    // Parse by column, not a fixed regex: `--output=pcent,target` yields
+    // " 42% /home" while plain `df -h` (busybox) yields a full row like
+    // "/dev/sda1  10G  5G  5G  50%  /". The % cell and trailing mount are
+    // the only stable fields.
+    const cols = line.trim().split(/\s+/);
+    const pi = cols.findIndex((x) => /^\d{1,3}%$/.test(x));
+    const mount = cols[cols.length - 1] || '';
+    // Skip kernel pseudo-mounts the busybox fallback (no -x) would include.
+    if (pi >= 0 && mount.startsWith('/') && !/^\/(dev|sys|proc|snap)(\/|$)/.test(mount) && !disks.some((d) => d.mount === mount)) {
+      disks.push({ mount, pcent: parseInt(cols[pi], 10) });
+    }
   }
   const root = disks.find((d) => d.mount === '/') || disks[0];
 
@@ -273,7 +303,7 @@ async function checkResources(): Promise<ResourceInfo> {
   const temps: { label: string; c: number }[] = [];
   for (const line of seg('TEMP', 'X').split('\n')) {
     const m = line.match(/^\s*([^:(]{2,40}?):\s+\+?(-?\d+(?:\.\d+)?)°C/);
-    if (m && temps.length < 8) temps.push({ label: m[1].trim(), c: parseFloat(m[2]) });
+    if (m && temps.length < 12) temps.push({ label: m[1].trim(), c: parseFloat(m[2]) });
   }
 
   return { disks, diskPct: root?.pcent ?? null, memPct, memUsedMb, memTotalMb, temps };
@@ -302,6 +332,23 @@ async function checkTunnel(): Promise<{ status: string; source: string; detail?:
 // ---------- Routes ----------
 
 export function registerOpsRoutes(app: Hono): void {
+  // Same write-hardening as storage/http.ts protect(): mutating routes only
+  // accept small JSON bodies. (Session + origin checks live in index.ts
+  // middleware; a body-less DELETE stays allowed.)
+  app.use('/api/ops/*', async (c, next) => {
+    if (!['GET', 'HEAD'].includes(c.req.method)) {
+      const len = Number(c.req.header('content-length') || 0);
+      if (len > 300_000) {
+        return c.json({ ok: false, error: 'Solicitud demasiado grande' }, 413);
+      }
+      const hasBody = len > 0 || !!c.req.header('transfer-encoding');
+      if (hasBody && !c.req.header('content-type')?.startsWith('application/json')) {
+        return c.json({ ok: false, error: 'Se requiere JSON' }, 415);
+      }
+    }
+    return next();
+  });
+
   // Lazily restore persisted WoL devices/wakes/power on first request.
   const ensureStore = () => loadWolStore();
 
@@ -336,8 +383,14 @@ export function registerOpsRoutes(app: Hono): void {
     const body = await c.req.json().catch(() => ({}));
     const unit = String(body.unit || '');
     const scope = body.scope === 'system' ? 'system' : 'user';
-    if (!/^[A-Za-z0-9_.@:-]+\.(service|socket|timer|scope|mount|path|slice|target)$/.test(unit)) {
+    // Only leaf workload units: restarting a target/slice/scope/mount can
+    // power off the host (reboot.target activates on restart), kill every
+    // process in a slice, or terminate a login session.
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.@:-]*\.(service|socket|timer)$/.test(unit)) {
       return fail(c, 400, 'Nombre de unidad inválido');
+    }
+    if (isCriticalUnit(unit)) {
+      return fail(c, 403, 'Esa unidad es crítica para el sistema; no se puede reiniciar desde Axon');
     }
     const cmd = scope === 'user'
       ? `export XDG_RUNTIME_DIR=/run/user/$(id -u); systemctl --user restart ${unit}`
@@ -380,9 +433,12 @@ export function registerOpsRoutes(app: Hono): void {
     const mac = normMac(String(body.mac || ''));
     if (!name) return fail(c, 400, 'Falta el nombre');
     if (!MAC_RE.test(mac)) return fail(c, 400, 'MAC inválida — formato aa:bb:cc:dd:ee:ff');
+    const bcastRaw = String(body.broadcast || '').trim();
+    if (bcastRaw && !BCAST_RE.test(bcastRaw)) return fail(c, 400, 'Broadcast inválido — formato IPv4');
+    const broadcast = bcastRaw || undefined;
     const existing = store.devices.find((d) => d.mac === mac);
-    if (existing) { existing.name = name; }
-    else store.devices.push({ name, mac, addedAt: new Date().toISOString() });
+    if (existing) { existing.name = name; existing.broadcast = broadcast; }
+    else store.devices.push({ name, mac, broadcast, addedAt: new Date().toISOString() });
     saveSoon();
     return c.json({ ok: true, devices: store.devices });
   });

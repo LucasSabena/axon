@@ -43,6 +43,13 @@ def atomic(p, value):
     os.replace(tmp, p)
     fd = os.open(p.parent, os.O_DIRECTORY); os.fsync(fd); os.close(fd)
 
+def atomic_text(p, text):
+    tmp = p.parent / (p.name + '.' + secrets.token_hex(8) + '.tmp')
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'w') as f: f.write(text); f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, p)
+    fd = os.open(p.parent, os.O_DIRECTORY); os.fsync(fd); os.close(fd)
+
 def read(p):
     if p.is_symlink(): raise ValueError('Recibo enlazado no permitido')
     return json.loads(p.read_text())
@@ -87,8 +94,17 @@ def base_for(request):
 def restic_env(base, repository=None):
     password = base / 'repository-password'
     if not password.exists():
-        fd = os.open(password, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, 'w') as f: f.write(secrets.token_urlsafe(48))
+        # Link the completed file into place atomically: a concurrent caller
+        # loses the link race and never observes a half-written credential.
+        tmp = base / (password.name + '.' + secrets.token_hex(8) + '.tmp')
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            with os.fdopen(fd, 'w') as f: f.write(secrets.token_urlsafe(48))
+            try: os.link(tmp, password)
+            except FileExistsError: pass
+        finally:
+            try: tmp.unlink()
+            except OSError: pass
     if password.is_symlink() or password.stat().st_mode & 0o077: raise ValueError('Credencial de backup no válida')
     return dict(os.environ, RESTIC_REPOSITORY=repository or str(base / 'repository'), RESTIC_PASSWORD_FILE=str(password),
                 RESTIC_CACHE_DIR=str(private(base / 'cache')))
@@ -128,6 +144,7 @@ def validate_policy(policy, base):
         if any(n not in database_names(info['Id']) for n in selected): raise ValueError('Base no encontrada')
     exclusions = policy.get('exclusions', EXCLUDES)
     if not isinstance(exclusions, list) or len(exclusions) > 50 or any(not isinstance(p, str) or not p or len(p) > 4096 or '\0' in p for p in exclusions): raise ValueError('Exclusiones inválidas')
+    if any(not re.sub(r'[\s/*?\[\]{}!^,\\]', '', p) for p in exclusions): raise ValueError('Una exclusión descartaría todo el contenido')
     retention = policy.get('retentionDays', 0)
     if not isinstance(retention, int) or retention < 0 or retention > 3650: raise ValueError('Conservación inválida')
 
@@ -153,55 +170,196 @@ def verify_by_reading(snapshot, env):
     # A full disk backup must be verifiable even when the source disk cannot
     # accommodate a second full copy. Restic reads and hashes every data pack.
     run(['restic', 'check', '--read-data'], env, timeout=7200)
-    process = subprocess.Popen(['restic', 'ls', '--json', '--recursive', snapshot], env=env,
+    # `timeout` bounds the producer itself — a hung restic (dead destination
+    # disk, D-state I/O) cannot block the stdout loop forever.
+    process = subprocess.Popen(['timeout', '-k', '10', '7200', 'restic', 'ls', '--json', '--recursive', snapshot], env=env,
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     chosen = None
     try:
         for line in process.stdout:
-            node = json.loads(line)
+            try: node = json.loads(line)
+            except ValueError: continue
             if node.get('struct_type') == 'node' and node.get('type') == 'file':
                 chosen = node['path']; break
     finally:
         process.stdout.close()
-        if process.poll() is None: process.terminate()
-        process.wait(timeout=10)
+        if process.poll() is None:
+            process.terminate()
+            try: process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill(); process.wait(timeout=10)
+        rc = process.returncode or 0
+    if chosen is None and rc: raise RuntimeError('La copia no pudo leerse para comprobar su contenido')
     if chosen:
         # Exercise the recovery pipeline with actual bytes, without filling SSD.
         with open(os.devnull, 'wb') as sink:
             run(['restic', 'dump', snapshot, chosen], env, stdout=sink, timeout=7200)
     return chosen
 
+def cleanup_jobs(base):
+    jobs = base / 'jobs'
+    if not jobs.is_dir(): return
+    now = time.time()
+    receipts = set(); terminal = set()
+    for p in jobs.glob('*.json'):
+        if p.name.endswith('.input.json'): continue
+        receipts.add(p.stem)
+        try: receipt = read(p)
+        except Exception:
+            # An unreadable receipt is 'unknown', not terminal — a live worker
+            # may still hold it. Apply the same 24h age guard before GCing.
+            try:
+                if now - p.stat().st_mtime > 86400: terminal.add(p.stem)
+            except OSError: pass
+            continue
+        if receipt.get('state') in ('verified', 'failed', 'interrupted', 'cancelled') and now - (receipt.get('endedAt') or receipt.get('createdAt') or 0) / 1000 > 86400: terminal.add(p.stem)
+    for p in list(jobs.glob('*.input.json')) + list(jobs.glob('*.log')):
+        rid = p.name.split('.', 1)[0]
+        try:
+            if rid in terminal or (rid not in receipts and now - p.stat().st_mtime > 86400): p.unlink()
+        except OSError: pass
+    for folder in (jobs, base):
+        for p in folder.glob('*.tmp'):
+            try:
+                if now - p.stat().st_mtime > 3600: p.unlink()
+            except OSError: pass
+    # Orphaned staging/verification trees from SIGKILLed workers or reboots.
+    for kind in ('staging', 'verification'):
+        d = base / kind
+        if not d.is_dir(): continue
+        for p in d.iterdir():
+            try:
+                if p.is_symlink() or not p.is_dir(): continue
+                if p.name in terminal or (p.name not in receipts and now - p.stat().st_mtime > 86400): shutil.rmtree(p)
+            except OSError: pass
+    # Orphaned verification containers: --rm only reaps on exit, so a SIGKILLed
+    # worker leaves its axon-backup-verify-* container running forever. A live
+    # worker always has a receipt, so only terminal/receipt-less names go.
+    try:
+        out = subprocess.run(['docker', 'ps', '-a', '--filter', 'name=axon-backup-verify-', '--format', '{{.Names}}'],
+                             capture_output=True, text=True, timeout=30)
+        for name in out.stdout.split():
+            rid = name.rsplit('axon-backup-verify-', 1)[-1]
+            if rid in terminal or rid not in receipts:
+                subprocess.run(['docker', 'rm', '-f', name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+    except Exception: pass
+
 def retain_verified(base, policy, snapshot, env):
     days = policy.get('retentionDays', 0)
-    if not days: return [], None
     # Only delete old versions whose successful restoration has a durable receipt.
-    verified = set()
+    # The snapshot listing is already scoped to this repository by policy tag,
+    # so a remounted destination path must not exclude the old receipts.
+    verified = set(); failed = set(); protected = set()
+    now = time.time()
     for receipt_path in (base / 'jobs').glob('*.json'):
         if receipt_path.name.endswith('.input.json'): continue
-        old = read(receipt_path)
-        if old.get('mode') == 'backup' and old.get('state') == 'verified' and old.get('policy', {}).get('id') == policy['id'] and old.get('policy', {}).get('repository') == policy.get('repository') and old.get('snapshot'):
-            verified.add(old['snapshot'])
+        try: old = read(receipt_path)
+        except Exception: continue
+        snap = old.get('snapshot')
+        if not snap: continue
+        stale_terminal = old.get('state') in ('failed', 'interrupted') and now - (old.get('endedAt') or old.get('createdAt') or 0) / 1000 > 86400
+        if old.get('mode') == 'backup' and old.get('policy', {}).get('id') == policy['id'] and old.get('state') == 'verified': verified.add(snap)
+        elif old.get('mode') == 'backup' and old.get('policy', {}).get('id') == policy['id'] and stale_terminal: failed.add(snap)
+        # Only an in-flight receipt pins a snapshot — terminal restore/verify
+        # receipts used to protect their snapshot forever (unbounded retention).
+        elif old.get('state') in ('queued', 'running'): protected.add(snap)
+    failed -= verified | protected
+    # A dead backup leaves unreferenced pack data no snapshot names; forget
+    # cannot reach it — only prune can. Run it while a recent failed/
+    # interrupted receipt exists, independent of the retention window.
+    tainted = bool(failed)
+    if not tainted:
+        for receipt_path in (base / 'jobs').glob('*.json'):
+            if receipt_path.name.endswith('.input.json'): continue
+            try: old = read(receipt_path)
+            except Exception: continue
+            if old.get('mode') == 'backup' and old.get('policy', {}).get('id') == policy['id'] and old.get('state') in ('failed', 'interrupted') and now - (old.get('endedAt') or old.get('createdAt') or 0) / 1000 < 7 * 86400:
+                tainted = True; break
+    if not days and not failed and not tainted: return [], None
     snapshots = json.loads(run(['restic', 'snapshots', '--json', '--tag', 'axon-policy:' + policy['id']], env))
     from datetime import datetime
-    cutoff = time.time() - days * 86400
-    expired = [row['id'] for row in snapshots if row['id'] in verified and row['id'] != snapshot and datetime.fromisoformat(row['time'].replace('Z', '+00:00')).timestamp() < cutoff]
+    cutoff = now - days * 86400
+    expired = [row['id'] for row in snapshots if row['id'] != snapshot and
+               (row['id'] in failed or (days and row['id'] in verified and datetime.fromisoformat(row['time'].replace('Z', '+00:00')).timestamp() < cutoff))]
     if expired:
         run(['restic', 'forget', '--', *expired], env, timeout=7200)
         # Restic's supported pruning preserves every still-referenced snapshot.
         try: run(['restic', 'prune'], env, timeout=7200)
         except Exception: return expired, 'La copia está comprobada. Las versiones vencidas se retiraron, pero la liberación de espacio quedó pendiente.'
+    elif tainted:
+        try: run(['restic', 'prune'], env, timeout=7200)
+        except Exception: pass
     return expired, None
 
+
+def worker_alive(base, job_id):
+    # True only when the spawned worker is found by argv — a probe failure is
+    # not proof of death.
+    try:
+        intent = str(base / 'jobs' / (job_id + '.input.json')).encode()
+        for pid in os.listdir('/proc'):
+            if not pid.isdigit(): continue
+            try: cmd = Path('/proc/' + pid + '/cmdline').read_bytes()
+            except OSError: continue
+            if b'backup-worker.py' in cmd and intent in cmd: return True
+    except OSError: pass
+    return False
+
+def stale_worker(receipt, base, job_id):
+    # Conservative liveness: inconclusive evidence never causes a rewrite.
+    if receipt.get('state') not in ('running', 'queued'): return False
+    if receipt.get('owner') and receipt.get('pid'):
+        live = incarnation(receipt['pid'])
+        if live is not None: return live != receipt['owner']
+        return not Path('/proc/' + str(receipt['pid'])).exists()
+    if receipt.get('state') == 'queued' and time.time() * 1000 - (receipt.get('createdAt') or 0) < 60000: return False
+    # The worker identity was never recorded; look for the spawned process by
+    # its argv so an orphaned but running worker is not declared dead.
+    try:
+        if worker_alive(base, job_id): return False
+    except OSError: return False
+    return True
 
 def status(base, job_id):
     if not re.fullmatch('[a-f0-9-]{36}', job_id): raise ValueError('ID inválido')
     p = base / 'jobs' / (job_id + '.json')
     if not p.exists(): return dict(id=job_id, state='interrupted', message='No hay un worker ni un recibo de inicio confirmado. El intento se conserva sin repetirlo.')
-    receipt = read(p)
-    if receipt['state'] in ('running', 'queued') and receipt.get('owner') and incarnation(receipt.get('pid')) != receipt['owner']:
-        receipt.update(state='interrupted', phase='interrupted', message='La operación se interrumpió antes de confirmarse. Conservamos la copia y el registro del intento.')
-        atomic(p, receipt)
-    return receipt
+    try: receipt = read(p)
+    except Exception: receipt = None
+    if receipt is None:
+        # A corrupt receipt must not wedge the queue forever. Under launch.lock
+        # re-read once; still unreadable means either real corruption (replace
+        # with interrupted evidence — a live worker's next update() rewrites
+        # anyway) or a transient read error (return without writing).
+        lockfd = os.open(base / 'launch.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(lockfd, fcntl.LOCK_EX)
+            try: receipt = read(p)
+            except Exception:
+                # A live worker rewrites its own receipt via update() — only
+                # stamp 'interrupted' when the worker is provably gone, or TS
+                # freezes 'interrupted' for a backup that may still verify.
+                if worker_alive(base, job_id):
+                    return dict(id=job_id, state='running', message='El recibo no pudo leerse; el worker sigue activo y lo reescribirá.')
+                receipt = dict(id=job_id, state='interrupted', phase='interrupted', endedAt=int(time.time()*1000),
+                               message='El recibo no pudo leerse; el resultado quedó incierto.')
+                try: atomic(p, receipt)
+                except OSError: pass
+            return receipt
+        finally: os.close(lockfd)
+    if not stale_worker(receipt, base, job_id): return receipt
+    # Serialize with launch.lock and re-verify inside it: a live worker that
+    # finished between the read and the rewrite must not be clobbered.
+    lockfd = os.open(base / 'launch.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        try: fcntl.flock(lockfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError: return receipt
+        fresh = read(p)
+        if not stale_worker(fresh, base, job_id): return fresh
+        fresh.update(state='interrupted', phase='interrupted', message='La operación se interrumpió antes de confirmarse. Conservamos la copia y el registro del intento.')
+        atomic(p, fresh)
+        return fresh
+    finally: os.close(lockfd)
 
 def start(request):
     base = base_for(request); private(base / 'jobs')
@@ -211,43 +369,72 @@ def start(request):
     try:
         fcntl.flock(lockfd, fcntl.LOCK_EX)
         target = base / 'jobs' / (job_id + '.json')
-        if target.exists(): return status(base, job_id)
-        if request.get('mode', 'backup') == 'backup': validate_policy(request['policy'], base)
-        else:
-            original = status(base, request['originalId'])
-            if not original.get('snapshot') or original.get('state') not in ('verified', 'failed', 'interrupted'): raise ValueError('Snapshot no disponible')
-            request['snapshot'] = original['snapshot']; request['policy'] = {**original['policy'], 'repository': request.get('policy', {}).get('repository', original['policy'].get('repository'))}; request['dumpImage'] = original.get('dumpImage')
-            snapshot_selection(request.get('paths'))
-            request['bytes'] = original.get('bytes', 0); request['files'] = original.get('files'); request['sourcePaths'] = original.get('sourcePaths')
+        if target.exists():
+            # status() re-acquires launch.lock on a new fd — release ours first
+            # or a corrupt receipt path deadlocks this call.
+            os.close(lockfd); lockfd = -1
+            return status(base, job_id)
+        try:
+            if request.get('mode', 'backup') == 'backup': validate_policy(request['policy'], base)
+            else:
+                # Same re-entrancy: read the original receipt directly instead of
+                # calling status() under launch.lock.
+                oid = request.get('originalId')
+                if not isinstance(oid, str) or not re.fullmatch('[a-f0-9-]{36}', oid): raise ValueError('ID inválido')
+                try: original = read(base / 'jobs' / (oid + '.json'))
+                except Exception: raise ValueError('Snapshot no disponible')
+                if not original.get('snapshot') or original.get('state') not in ('verified', 'failed', 'interrupted'): raise ValueError('Snapshot no disponible')
+                request['snapshot'] = original['snapshot']; request['policy'] = {**original['policy'], 'repository': request.get('policy', {}).get('repository', original['policy'].get('repository'))}; request['dumpImage'] = original.get('dumpImage')
+                snapshot_selection(request.get('paths'))
+                request['bytes'] = original.get('bytes', 0); request['files'] = original.get('files'); request['sourcePaths'] = original.get('sourcePaths')
+        except Exception as e:
+            # A deterministic rejection (invalid policy, missing snapshot) is
+            # terminal evidence — a durable 'failed' receipt tells TS not to
+            # retry it hourly as an ambiguous 'interrupted' launch.
+            rejected = dict(id=job_id, policy=request.get('policy'), mode=request.get('mode', 'backup'),
+                            state='failed', phase='rejected', createdAt=int(time.time()*1000), endedAt=int(time.time()*1000),
+                            message='La copia fue rechazada antes de iniciar: ' + str(e)[:200])
+            try: atomic(target, rejected)
+            except OSError: pass
+            return rejected
         receipt = dict(id=job_id, policy=request['policy'], mode=request.get('mode', 'backup'), state='queued',
                        phase='starting', createdAt=int(time.time()*1000), message='Preparando la copia.',
                        snapshot=request.get('snapshot'), originalId=request.get('originalId'), dumpImage=request.get('dumpImage'), paths=request.get('paths'), bytes=request.get('bytes', 0), files=request.get('files'), sourcePaths=request.get('sourcePaths'))
         atomic(target, receipt)
         worker = base / 'backup-worker.py'; code = Path(__file__).read_text() if '__file__' in globals() and Path(__file__).is_file() else request['workerSource']
-        fd = os.open(worker, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, 'w') as f: f.write(code)
+        # Replace atomically: a just-spawned worker must never read a partial file.
+        atomic_text(worker, code)
+        try: cleanup_jobs(base)
+        except Exception: pass
         intent = base / 'jobs' / (job_id + '.input.json'); atomic(intent, {**request, 'workerSource': None})
         log = os.open(base / 'jobs' / (job_id + '.log'), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         child = subprocess.Popen([sys.executable, str(worker), 'worker', str(intent)], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True)
         os.close(log)
         receipt.update(pid=child.pid, owner=incarnation(child.pid)); atomic(target, receipt)
         return receipt
-    finally: os.close(lockfd)
+    finally:
+        if lockfd >= 0: os.close(lockfd)
 
 def worker(request):
-    base = base_for(request); target = base / 'jobs' / (request['id'] + '.json')
+    base = base_for(request)
+    if not isinstance(request.get('id'), str) or not re.fullmatch('[a-f0-9-]{36}', request['id']): raise ValueError('ID inválido')
+    target = base / 'jobs' / (request['id'] + '.json')
     # Wait for launcher to durably record this process identity before updating.
     launchfd = os.open(base / 'launch.lock', os.O_RDWR | os.O_NOFOLLOW)
-    fcntl.flock(launchfd, fcntl.LOCK_EX); receipt = read(target); os.close(launchfd)
+    fcntl.flock(launchfd, fcntl.LOCK_EX); receipt = read(target); fcntl.flock(launchfd, fcntl.LOCK_UN)
     lockfd = os.open(base / 'repository.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-    def update(**values): receipt.update(values); atomic(target, receipt)
+    # Receipt writes serialize with status() rewrites on launch.lock.
+    def update(**values):
+        receipt.update(values)
+        fcntl.flock(launchfd, fcntl.LOCK_EX)
+        try: atomic(target, receipt)
+        finally: fcntl.flock(launchfd, fcntl.LOCK_UN)
     staging = None; verify_container = None; repo_fd = None; restored = None; mode = receipt['mode']
     try:
         try: fcntl.flock(lockfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError: raise RuntimeError('Otro backup o restauración utiliza el repositorio. Reintentá al terminar.')
         policy = receipt['policy']; mode = receipt['mode']
         for source, mount_id in request.get('sourceMounts', {}).items(): check_mount(source, mount_id)
-        check_mount(policy.get('source'), request.get('sourceMountId'))
         check_mount(policy.get('repository'), request.get('repositoryMountId'))
         repository = safe_path(policy['repository']) if policy.get('repository') else base / 'repository'
         repository.mkdir(parents=True, exist_ok=True)
@@ -300,17 +487,33 @@ def worker(request):
                 for name in [str(base), str(repository), str(safe_path(request['home']) / 'AXON-Restauraciones'), 'AXON-Backups', *request.get('excludedRepositories', [])]: args += ['--exclude', name]
                 if policy.get('diskMode'):
                     for name in ['/proc', '/sys', '/dev', '/run', '/tmp', '/mnt', '/media', '/hostfs']: args += ['--exclude', name]
-                    # Also exclude bind mounts on the same filesystem to avoid recursion.
-                    for line in Path('/proc/self/mountinfo').read_text().splitlines():
-                        mount = re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), line.split(' - ', 1)[0].split()[4])
-                        if mount not in sources and any(mount.startswith(source.rstrip('/') + '/') for source in sources): args += ['--exclude', mount]
+                # Exclude nested mounts inside the sources: --one-file-system does
+                # not skip same-device bind mounts, which would be ingested twice.
+                for line in Path('/proc/self/mountinfo').read_text().splitlines():
+                    mount = re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), line.split(' - ', 1)[0].split()[4])
+                    if mount not in sources and any(mount.startswith(source.rstrip('/') + '/') for source in sources): args += ['--exclude', mount]
 
             args += ['--', *sources]
-            output = run(args, env, timeout=7200)
-            summary = next((json.loads(line) for line in reversed(output.decode().splitlines()) if json.loads(line).get('message_type') == 'summary'), None)
-            if not summary or not summary.get('snapshot_id'): raise RuntimeError('Restic no confirmó un snapshot')
+            result = subprocess.run(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=7200)
+            # Tolerate non-JSON progress lines; only the summary matters.
+            summary = None
+            for line in (result.stdout or b'').decode(errors='replace').splitlines():
+                try: row = json.loads(line)
+                except ValueError: continue
+                if row.get('message_type') == 'summary': summary = row
+            # rc=3 means some source files were unreadable; the snapshot is still
+            # committed and gets verified like a complete one.
+            if result.returncode not in (0, 3) or not summary or not summary.get('snapshot_id'): raise RuntimeError('La herramienta no pudo completar la operación: restic')
+            if not summary.get('total_files_processed'):
+                nonempty = False
+                for s in sources:
+                    try:
+                        with os.scandir(s) as it: nonempty = next(it, None) is not None
+                    except OSError: pass
+                    if nonempty: break
+                if nonempty: raise RuntimeError('La copia no incluyó ningún archivo. Revisá las exclusiones elegidas.')
             update(snapshot=summary['snapshot_id'], bytes=summary.get('total_bytes_processed', 0), files=summary.get('total_files_processed', 0), sourcePaths=sources,
-                   exclusions=exclusions, phase='verify', message='Restaurando el snapshot en una carpeta nueva para verificar sus datos.')
+                   exclusions=exclusions, phase='verify', message='Restaurando el snapshot en una carpeta nueva para verificar sus datos.' + (' Algunos archivos no pudieron leerse.' if result.returncode == 3 else ''))
         for source, mount_id in request.get('sourceMounts', {}).items(): check_mount(source, mount_id)
         check_mount(policy.get('repository'), request.get('repositoryMountId'))
         snapshot = receipt['snapshot']
@@ -337,6 +540,7 @@ def worker(request):
         if needs_stream_verification:
             update(phase='verify', message='Comprobando todos los datos y probando la recuperación sin ocupar el disco del servidor.')
             sample = verify_by_reading(snapshot, env)
+            if sample is None and receipt.get('files'): raise RuntimeError('La copia verificada no devolvió archivos para la prueba de recuperación')
             update(verification='full-data-read-and-file-recovery', recoveredSample=sample)
         else:
             run(restore_args, env, timeout=7200)
@@ -358,8 +562,8 @@ def worker(request):
                  '--tmpfs', '/var/lib/postgresql/data:rw,size=2g', '-e', 'POSTGRES_HOST_AUTH_METHOD=trust', '-e', 'POSTGRES_USER=axon_verify', image])
             ready = False
             for _ in range(60):
-                main_process = subprocess.run(['docker', 'exec', verify_container, 'cat', '/proc/1/comm'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-                result = subprocess.run(['docker', 'exec', verify_container, 'pg_isready', '-U', 'axon_verify'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                main_process = subprocess.run(['docker', 'exec', verify_container, 'cat', '/proc/1/comm'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=60)
+                result = subprocess.run(['docker', 'exec', verify_container, 'pg_isready', '-U', 'axon_verify'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
                 if not result.returncode and main_process.stdout.strip() == b'postgres': ready = True; break
                 time.sleep(.5)
             if not ready: raise RuntimeError('PostgreSQL de verificación no inició')
@@ -394,11 +598,28 @@ def worker(request):
         update(state='failed', phase=receipt.get('phase', 'unknown'), endedAt=int(time.time()*1000), message=str(error)[:240])
     finally:
         if verify_container:
-            subprocess.run(['docker', 'rm', '-f', verify_container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if mode != 'restore' and restored and restored.is_dir() and not restored.is_symlink(): shutil.rmtree(restored)
-        if staging and staging.is_dir() and not staging.is_symlink(): shutil.rmtree(staging)
-        if repo_fd is not None: os.close(repo_fd)
-        os.close(lockfd)
+            # A failure here must not skip the staging/fd cleanup below.
+            try: subprocess.run(['docker', 'rm', '-f', verify_container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+            except Exception:
+                try: subprocess.run(['docker', 'kill', verify_container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+                except Exception: pass
+        # Each step is individually guarded — a failing cleanup must not skip
+        # the rest or leak the lock descriptors.
+        if mode != 'restore' and restored:
+            try:
+                if restored.is_dir() and not restored.is_symlink(): shutil.rmtree(restored)
+            except Exception: pass
+        if staging:
+            try:
+                if staging.is_dir() and not staging.is_symlink(): shutil.rmtree(staging)
+            except Exception: pass
+        if repo_fd is not None:
+            try: os.close(repo_fd)
+            except OSError: pass
+        try: os.close(lockfd)
+        except OSError: pass
+        try: os.close(launchfd)
+        except OSError: pass
 
 def main(request):
     action = request.get('action')

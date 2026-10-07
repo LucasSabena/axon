@@ -1,7 +1,6 @@
 import { stat } from 'node:fs/promises';
 import { hostToContainer } from '../host';
 import type { ProjectHub } from './projects';
-import { PlatformError } from './store';
 
 export interface DiagnosticCheck { key: string; label: string; state:'pass'|'fail'|'warn'|'unknown'|'info'; detail:string; ms?:number }
 export interface ProbeResult { ok:boolean; status?:number; ms:number; error?:string }
@@ -39,7 +38,7 @@ export class Diagnostics {
     catch { add('files','Carpeta del proyecto','fail','La carpeta no está disponible o faltan permisos.'); }
     add('process','Proceso',!data.coverage.processes ? 'unknown' : data.processes.length ? 'pass' : 'info',!data.coverage.processes ? 'La lectura de procesos falló.' : data.processes.length ? `${data.processes.length} proceso(s) relacionado(s).` : 'No se detectaron procesos con puertos. Puede estar detenido o ejecutar tareas sin listener.');
     for (const port of data.ports.slice(0,20)) {
-      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new PlatformError('Puerto registrado inválido');
+      if (!Number.isInteger(port) || port < 1 || port > 65535) { add(`port:${String(port)}`,`Puerto local :${String(port)}`,'fail','Puerto registrado inválido.'); continue; }
       const result = await this.probes.tcp(port);add(`port:${port}`,`Puerto local :${port}`,result.ok ? 'pass' : 'fail',result.ok ? 'Acepta conexiones TCP locales.' : result.error || 'No responde.',result.ms);
     }
     if (!data.ports.length) add('ports','Puertos','info','El proyecto no tiene un puerto registrado ni listeners detectados.');

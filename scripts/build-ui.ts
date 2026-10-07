@@ -17,7 +17,10 @@ const shell=await readFile('public/index.html','utf8');
 // The service-worker cache name tracks the shipped asset set: a changed build
 // means a changed sw.js, which means a clean cache on activation — no
 // cross-version asset mixing is possible.
-const swSrc=(await readFile('public/sw.js','utf8')).replace(/const CACHE = 'axon-[^']*'/,"const CACHE = 'axon-__CACHE_STAMP__'");
+const swOriginal=await readFile('public/sw.js','utf8');
+const swSrc=swOriginal.replace(/const CACHE = 'axon-[^']*'/,"const CACHE = 'axon-__CACHE_STAMP__'");
+// A silent no-op here would ship a stale cache name across releases.
+if(swSrc===swOriginal)throw new Error("public/sw.js: `const CACHE = 'axon-…'` stamp point not found; refusing to ship an unversioned service-worker cache");
 const stamp=createHash('sha256').update(shell).update(swSrc).digest('hex').slice(0,12);
 await writeFile('public/sw.js',swSrc.replace('axon-__CACHE_STAMP__',`axon-${stamp}`));
 console.log(`Local Web Awesome bundle: ${result.outputs[0].size} bytes`);

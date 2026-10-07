@@ -1,7 +1,7 @@
 /* Salud: measures host usage and preserves applications with detected or unknown activity. */
 (() => {
   'use strict';
-  let snapshot = null, loading = false, acting = false, timer = null, query = '', sort = 'cpu', showStopped = false, fresh = false;
+  let snapshot = null, loading = false, acting = false, timer = null, query = '', sort = 'cpu', showStopped = false, fresh = false, signedIn = true;
   const pct = n => n == null ? 'Sin medición' : `${n.toLocaleString('es-AR', { maximumFractionDigits: 1 })}%`;
   const mb = n => n == null ? 'Sin medición' : n >= 1024 ? `${(n / 1024).toFixed(1)} GB` : `${Math.round(n)} MB`;
   const when = t => new Date(t).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -39,14 +39,14 @@
     section.addEventListener('change', handleChange);
     $('#opt-search').addEventListener('input', e => { query = e.target.value; renderApps(); });
     document.addEventListener('axon:section', e => { if (e.detail === 'ops') startPolling(); else stopPolling(); });
-    document.addEventListener('visibilitychange', () => { if (document.hidden) stopPolling(); else if (activeTabName === 'ops') { load(); startPolling(); } });
-    document.addEventListener('axon:session-expired', stopPolling);
+    document.addEventListener('visibilitychange', () => { if (document.hidden) stopPolling(); else if (activeTabName === 'ops' && signedIn) { load(); startPolling(); } });
+    document.addEventListener('axon:session-expired', () => { signedIn = false; stopPolling(); });
     window.AxonPages ||= {};
     window.AxonPages.ops = { restore: async () => { startPolling(); await load(); }, leave: stopPolling };
     if (activeTabName === 'ops') { startPolling(); load(); }
     refreshIcons();
   }
-  function startPolling() { if (!timer) timer = setInterval(() => { if (!document.hidden && activeTabName === 'ops' && !acting && !document.activeElement?.matches('[data-importance]')) load(); }, 15_000); }
+  function startPolling() { if (!signedIn) return; if (!timer) timer = setInterval(() => { if (!document.hidden && activeTabName === 'ops' && signedIn && !acting && !document.activeElement?.matches('[data-importance]')) load(); }, 15_000); }
   function stopPolling() { clearInterval(timer); timer = null; }
   async function load() {
     if (loading) return;
@@ -81,7 +81,7 @@
     const apps = snapshot.apps.filter(a => (showStopped || a.state !== 'exited' && a.state !== 'created') && `${a.name} ${a.title} ${a.purpose}`.toLowerCase().includes(query.toLowerCase())).sort((a, b) => sort === 'name' ? a.name.localeCompare(b.name) : (b[sort] ?? -1) - (a[sort] ?? -1));
     $('#opt-apps').innerHTML = apps.length ? apps.map(a => {
       const running = a.state === 'running';
-      return `<tr data-id="${esc(a.id)}"><td><b>${esc(a.title)}</b><span class="opt-app-name">${esc(a.name)} · ${running ? 'Encendida' : a.state === 'exited' || a.state === 'created' ? 'Apagada' : esc(a.state)}</span><p>${esc(a.purpose)}</p><details ${opened.has(a.id) ? 'open' : ''}><summary>Ver conexiones y detalles</summary><small>Imagen: ${esc(a.image)}${a.project ? `<br>Grupo: ${esc(a.project)}` : ''}<br>${a.connections.length ? `Direcciones que pueden dejar de responder: ${a.connections.map(esc).join(', ')}` : 'No hay direcciones asociadas en Axon. Puede tener usuarios o conexiones que Axon no conoce.'}${a.dependents.length ? `<br>La necesitan: ${a.dependents.map(esc).join(', ')}` : ''}</small></details></td><td data-label="CPU">${running ? pct(a.cpu) : '—'}${running && a.cpu != null ? `<div class="opt-meter-track"><i style="width:${Math.min(100, a.cpu)}%"></i></div>` : ''}</td><td data-label="Memoria">${running ? mb(a.memoryMb) : '—'}</td><td data-label="Cuándo la necesitás">${a.critical ? `<span class="opt-protected">${icon('shield-check')} Protegida</span>` : `<select data-importance="${esc(a.id)}" aria-label="Cuándo necesitás ${esc(a.name)}" ${acting || !fresh ? 'disabled' : ''}><option value="unknown" ${a.importance === 'unknown' ? 'selected' : ''}>Por decidir</option><option value="always" ${a.importance === 'always' ? 'selected' : ''}>Siempre encendida</option><option value="sometimes" ${a.importance === 'sometimes' ? 'selected' : ''} ${a.dependents.length ? 'disabled' : ''}>Sólo cuando la uso</option></select>`}<small>${esc(a.blocked || a.activity?.reason || 'Se comprobará su uso antes de permitir apagarla.')}</small></td><td>${a.canStop ? `<button class="btn-secondary" data-stop="${esc(a.id)}" ${acting || !fresh ? 'disabled' : ''}>Apagar…</button>` : '<span class="opt-muted">Sin acción automática</span>'}</td></tr>`;
+      return `<tr data-id="${esc(a.id)}"><td><b>${esc(a.title)}</b><span class="opt-app-name">${esc(a.name)} · ${running ? 'Encendida' : a.state === 'exited' || a.state === 'created' ? 'Apagada' : esc(a.state)}</span><p>${esc(a.purpose)}</p><details ${opened.has(a.id) ? 'open' : ''}><summary>Ver conexiones y detalles</summary><small>Imagen: ${esc(a.image)}${a.project ? `<br>Grupo: ${esc(a.project)}` : ''}<br>${a.connections.length ? `Direcciones que pueden dejar de responder: ${a.connections.map(esc).join(', ')}` : 'No hay direcciones asociadas en Axon. Puede tener usuarios o conexiones que Axon no conoce.'}${a.dependents.length ? `<br>La necesitan: ${a.dependents.map(esc).join(', ')}` : ''}</small></details></td><td data-label="CPU">${running ? pct(a.cpu) : '—'}${running && a.cpu != null ? `<div class="opt-meter-track"><i style="width:${Math.min(100, a.cpu)}%"></i></div>` : ''}</td><td data-label="Memoria">${running ? mb(a.memoryMb) : '—'}</td><td data-label="Cuándo la necesitás">${a.critical ? `<span class="opt-protected">${icon('shield-check')} Protegida</span>` : `<select data-importance="${esc(a.id)}" aria-label="Cuándo necesitás ${esc(a.name)}" ${acting || !fresh ? 'disabled' : ''}><option value="unknown" ${a.importance === 'unknown' ? 'selected' : ''}>Por decidir</option><option value="always" ${a.importance === 'always' ? 'selected' : ''}>Siempre encendida</option><option value="sometimes" ${a.importance === 'sometimes' ? 'selected' : ''} ${a.dependents.length ? 'disabled' : ''}>Sólo cuando la uso</option></select>`}<small>${esc(a.blocked || a.activity?.reason || 'Se comprobará su uso antes de permitir apagarla.')}</small></td><td>${a.canStop ? `<button class="btn-secondary" data-stop="${esc(a.id)}" ${acting || !fresh ? 'disabled' : ''}>Apagar…</button>` : running ? '<span class="opt-muted">Sin acción automática</span>' : `<button class="btn-secondary" data-start="${esc(a.id)}" ${acting || !fresh ? 'disabled' : ''}>Encender</button>`}</td></tr>`;
     }).join('') : `<tr><td colspan="5">${snapshot.errors.some(e => e.includes('Docker')) ? 'No se pudo leer Docker. Reintentá con Actualizar.' : 'No hay aplicaciones que coincidan con el filtro.'}</td></tr>`;
     refreshIcons();
   }
@@ -95,9 +95,12 @@
     const peak = points.reduce((a, b) => a.cpu > b.cpu ? a : b);
     const span = Math.max(1, points.at(-1).at - points[0].at);
     const segments = [[]];
-    points.forEach((p, i) => { if (i && p.at - points[i - 1].at > 45_000) segments.push([]); segments.at(-1).push(`${(p.at - points[0].at) / span * 700},${100 - Math.min(100, p.cpu)}`); });
+    const memSegments = [[]];
+    points.forEach((p, i) => { if (i && p.at - points[i - 1].at > 45_000) { segments.push([]); memSegments.push([]); } segments.at(-1).push(`${(p.at - points[0].at) / span * 700},${100 - Math.min(100, p.cpu)}`); memSegments.at(-1).push(`${(p.at - points[0].at) / span * 700},${100 - Math.min(100, p.memory || 0)}`); });
     const chart = segments.map(s => s.length === 1 ? `<circle cx="${s[0].split(',')[0]}" cy="${s[0].split(',')[1]}" r="2"/>` : `<polyline points="${s.join(' ')}" fill="none"/>`).join('');
-    $('#opt-history').innerHTML = `<div class="opt-history-meta"><span>Pico registrado: <b>${pct(peak.cpu)}</b> a las ${when(peak.at)}</span><span>${points.length} muestras · desde ${when(points[0].at)}</span></div><svg class="opt-chart" viewBox="0 0 700 105" role="img" aria-label="Historial de CPU: pico de ${pct(peak.cpu)}"><line x1="0" y1="15" x2="700" y2="15" class="opt-chart-threshold"/>${chart}</svg><p class="opt-muted">En la muestra del pico coincidieron: ${peak.top.slice(0, 3).map(t => `${esc(t.name)} (${pct(t.cpu)})`).join(', ') || 'sin atribución disponible'}. Las mediciones por aplicación son aproximadas y pueden no sumar el total. Las muestras pueden omitir picos breves.</p>`;
+    const memChart = memSegments.filter(s => s.length > 1).map(s => `<polyline points="${s.join(' ')}" fill="none" stroke="#60a5fa" stroke-opacity="0.55" stroke-dasharray="3 2"/>`).join('');
+    const peakMem = points.reduce((a, b) => (b.memory || 0) > (a.memory || 0) ? b : a);
+    $('#opt-history').innerHTML = `<div class="opt-history-meta"><span>Pico CPU: <b>${pct(peak.cpu)}</b> a las ${when(peak.at)}</span><span>Pico memoria: <b>${pct(peakMem.memory)}</b></span><span>${points.length} muestras · desde ${when(points[0].at)}</span></div><svg class="opt-chart" viewBox="0 0 700 105" role="img" aria-label="Historial de CPU y memoria: pico de CPU ${pct(peak.cpu)}, pico de memoria ${pct(peakMem.memory)}"><line x1="0" y1="15" x2="700" y2="15" class="opt-chart-threshold"/>${chart}${memChart}</svg><p class="opt-muted">La línea punteada es memoria. En la muestra del pico coincidieron: ${peak.top.slice(0, 3).map(t => `${esc(t.name)} (${pct(t.cpu)})`).join(', ') || 'sin atribución disponible'}. Las mediciones por aplicación son aproximadas y pueden no sumar el total. Las muestras pueden omitir picos breves.</p>`;
   }
   function renderReceipts() {
     $('#opt-receipts').innerHTML = snapshot.receipts.slice(0, 3).map(r => {
@@ -129,13 +132,19 @@
       catch (err) { errToast(err); }
       finally { acting = false; render(); } return;
     }
+    if (btn.dataset.start) {
+      acting = true; render();
+      try { await api(`/api/optimizer/apps/${btn.dataset.start}/start`, { method: 'POST', timeoutMs: 60_000 }); $('#opt-op-result').textContent = 'Encendida.'; await load(); }
+      catch (err) { errToast(err); }
+      finally { acting = false; render(); } return;
+    }
     if (btn.id !== 'opt-plan' && !btn.dataset.stop) return;
     acting = true; render();
     try {
       const cleanup = !btn.dataset.stop && $('#opt-clean').checked;
       const plan = await api('/api/optimizer/plan', { method: 'POST', body: { cleanup, ...(btn.dataset.stop ? { ids: [btn.dataset.stop] } : {}) }, timeoutMs: 35_000 });
       if (!plan.apps.length && !plan.cleanup) { $('#opt-op-result').textContent = plan.message; return; }
-      const message = plan.apps.map(a => `${a.name}: ${a.purpose}${a.connections.length ? '\nDirecciones afectadas: ' + a.connections.join(', ') : ''}`).join('\n\n') + (plan.apps.length ? '\n\nSe comprobó que estaban libres. Se volverá a revisar justo antes de apagar cada una: si aparece uso, seguirá encendida. Podés volver a encender las que se apaguen después.' : '') + (plan.skipped?.length ? '\n\nSe mantienen encendidas:\n' + plan.skipped.map(a => a.name + ': ' + a.reason).join('\n') : '') + (plan.cleanup ? '\n\nSe borra sólo caché de compilación de Docker sin uso desde hace 7 días. No se borran aplicaciones, imágenes ni volúmenes. La caché se regenera y no tiene deshacer.' : '') + '\n\nNo se puede garantizar cuánto bajará la CPU. La propuesta vence en un minuto.';
+      const message = plan.apps.map(a => `${a.name}: ${a.purpose}\nEvidencia medida: CPU ${pct(a.cpu)} · memoria ${mb(a.memoryMb)}${a.connections.length ? '\nDirecciones afectadas: ' + a.connections.join(', ') : ''}`).join('\n\n') + (plan.apps.length ? '\n\nSe comprobó que estaban libres. Se volverá a revisar justo antes de apagar cada una: si aparece uso, seguirá encendida. Podés volver a encender las que se apaguen después.' : '') + (plan.skipped?.length ? '\n\nSe mantienen encendidas:\n' + plan.skipped.map(a => a.name + ': ' + a.reason).join('\n') : '') + (plan.cleanup ? '\n\nSe borra sólo caché de compilación de Docker sin uso desde hace 7 días. No se borran aplicaciones, imágenes ni volúmenes. La caché se regenera y no tiene deshacer.' : '') + '\n\nNo se puede garantizar cuánto bajará la CPU. La propuesta vence en unos minutos.';
       if (!await confirmDialog('Revisar optimización', message, 'Aplicar optimización')) return;
       $('#opt-op-result').textContent = 'Aplicando cambios… Esperá el resultado antes de reintentar.';
       const result = await api('/api/optimizer/apply', { method: 'POST', body: { token: plan.token }, timeoutMs: 180_000 });

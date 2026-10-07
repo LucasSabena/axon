@@ -94,6 +94,9 @@ async function loadAlerts(): Promise<void> {
             if (a.key.startsWith('systemd:')) knownFailedUnits.add(a.key.slice('systemd:'.length));
           }
         }
+        // A probe that fails on the first tick after restart shouldn't be
+        // able to tell these apart from "recovered" either.
+        lastCurrent = new Map(active);
       }
     }
   } catch { /* missing/corrupt file — start with defaults */ }
@@ -117,7 +120,7 @@ function fire(candidate: ActiveAlert, doNotify: boolean): void {
   recordEvent('alert', candidate.title, candidate.detail);
 }
 
-function reconcile(current: Map<string, ActiveAlert>, silent: Set<string>): void {
+function reconcile(current: Map<string, ActiveAlert>, silent: Set<string>, preserve: Set<string>): void {
   let dirty = false;
   for (const [key, cand] of current) {
     const had = active.has(key);
@@ -125,7 +128,9 @@ function reconcile(current: Map<string, ActiveAlert>, silent: Set<string>): void
     if (!had) dirty = true;
   }
   for (const [key, prev] of Array.from(active.entries())) {
-    if (!current.has(key)) {
+    // Keys in `preserve` come from a check whose probe failed this tick —
+    // missing candidates mean "unknown", not "recovered".
+    if (!current.has(key) && !preserve.has(key)) {
       active.delete(key);
       lastFired.delete(key);
       recordEvent('info', `${prev.title} — recuperado`, prev.detail);
@@ -137,34 +142,68 @@ function reconcile(current: Map<string, ActiveAlert>, silent: Set<string>): void
 
 // --- individual checks: each pushes candidates into `current` ---
 
-let cpuOverMinutes = 0;
+// Track the sustained-CPU window by wall clock, not by tick invocations —
+// a manual POST /api/alerts/check must not count as a minute.
+let cpuOverSince: number | null = null;
 
-async function checkResources(current: Map<string, ActiveAlert>): Promise<void> {
+async function checkResources(current: Map<string, ActiveAlert>, preserve: Set<string>): Promise<void> {
   const stats = await getServerStats();
-
-  if (stats.diskPercent >= thresholds.diskPct) {
-    current.set('disk', {
-      key: 'disk',
-      title: `Disco casi lleno (${stats.diskPercent}%)`,
-      detail: `Usados ${stats.diskUsedGb}GB de ${stats.diskTotalGb}GB — umbral ${thresholds.diskPct}%`,
-      since: Date.now(),
-      severity: 'critical',
-    });
+  const failed = new Set(stats.failedCollectors || []);
+  // A collector that fell back to 0 says "unknown", not "recovered" — keep
+  // the previous alert (and its cooldown) out of the delete pass. Per-volume
+  // keys share the collector name as prefix ('disk' → 'disk:<mount>').
+  for (const k of failed) {
+    preserve.add(k);
+    for (const key of lastCurrent.keys()) if (key.startsWith(`${k}:`)) preserve.add(key);
   }
 
-  if (stats.cpuPercent >= thresholds.cpuPct) cpuOverMinutes++;
-  else cpuOverMinutes = 0;
+  const fireDisk = (key: string, label: string, pct: number, detail: string) => {
+    if (pct >= thresholds.diskPct) {
+      current.set(key, {
+        key,
+        title: `Disco casi lleno: ${label} (${pct}%)`,
+        detail: `${detail} — umbral ${thresholds.diskPct}%`,
+        since: Date.now(),
+        severity: 'critical',
+      });
+    }
+  };
+  if (!failed.has('disk') && stats.disksError) {
+    // Volume inventory failed — "unknown", keep last tick's disk:* alerts.
+    preserve.add('disk');
+    for (const key of lastCurrent.keys()) if (key.startsWith('disk:')) preserve.add(key);
+  } else if (!failed.has('disk')) {
+    // Every mounted volume gets its own alert, not just the root filesystem.
+    const volumes = (stats.disks || []).filter((v) => v.path && v.size > 0 && v.available != null);
+    if (volumes.length) {
+      for (const v of volumes) {
+        const pct = Math.round(((v.size - v.available!) / v.size) * 100);
+        fireDisk(`disk:${v.path}`, v.name || v.path!, pct, `${v.path} queda con ${Math.round(v.available! / (1024 ** 3))}GB libres de ${Math.round(v.size / (1024 ** 3))}GB`);
+      }
+    } else {
+      fireDisk('disk:/', 'raíz', stats.diskPercent, `Usados ${stats.diskUsedGb}GB de ${stats.diskTotalGb}GB`);
+    }
+  }
+
+  if (failed.has('cpu')) {
+    // Unreadable /proc/stat: keep the sustained window instead of resetting it.
+  } else if (stats.cpuPercent >= thresholds.cpuPct) {
+    if (cpuOverSince === null) cpuOverSince = Date.now();
+  } else {
+    cpuOverSince = null;
+  }
+  const cpuOverMinutes = cpuOverSince === null ? 0 : (Date.now() - cpuOverSince) / 60_000;
   if (cpuOverMinutes >= thresholds.cpuMinutes) {
     current.set('cpu', {
       key: 'cpu',
       title: `CPU alta sostenida (${stats.cpuPercent}%)`,
-      detail: `Por encima del ${thresholds.cpuPct}% durante ${cpuOverMinutes} minutos seguidos`,
+      detail: `Por encima del ${thresholds.cpuPct}% durante ${Math.floor(cpuOverMinutes)} minutos seguidos`,
       since: Date.now(),
       severity: 'warning',
     });
   }
 
-  if (stats.memoryPercent >= thresholds.memPct) {
+  if (!failed.has('mem') && stats.memoryPercent >= thresholds.memPct) {
     current.set('mem', {
       key: 'mem',
       title: `RAM casi llena (${stats.memoryPercent}%)`,
@@ -180,7 +219,17 @@ const lastRestartCounts = new Map<string, number>();
 const DOCKER_ID_SAFE = /^[a-zA-Z0-9_.-]+$/;
 const shq = (s: string) => `'${s.replace(/'/g, `'"'"'`)}'`;
 
-async function checkContainers(current: Map<string, ActiveAlert>): Promise<void> {
+// The candidates each check produced last tick — a probe failure preserves
+// them instead of letting reconcile delete them and clear their cooldowns.
+let lastCurrent = new Map<string, ActiveAlert>();
+
+function preserveCheck(prefix: string, preserve: Set<string>): void {
+  for (const key of lastCurrent.keys()) {
+    if (key.startsWith(prefix)) preserve.add(key);
+  }
+}
+
+async function checkContainers(current: Map<string, ActiveAlert>, preserve: Set<string>): Promise<void> {
   // One inspect for every container — cheap enough once a minute.
   const psRes = await $`docker ps -aq`.quiet().nothrow().catch(() => null);
   let ids = psRes ? psRes.stdout.toString().trim() : '';
@@ -189,7 +238,13 @@ async function checkContainers(current: Map<string, ActiveAlert>): Promise<void>
   const useHost = !psRes || psRes.exitCode !== 0;
   if (useHost) {
     const res = await hostExec('docker ps -aq', { user: 'user', timeoutMs: 20_000 }).catch(() => null);
-    ids = res?.ok ? res.stdout.trim() : '';
+    if (!res || !res.ok) {
+      // Both docker paths failed — empty ids would be indistinguishable
+      // from "zero containers", so keep last tick's candidates.
+      preserveCheck('container:', preserve);
+      return;
+    }
+    ids = res.stdout.trim();
   }
   const seen = new Set<string>();
   if (ids) {
@@ -202,12 +257,18 @@ async function checkContainers(current: Map<string, ActiveAlert>): Promise<void>
           user: 'user',
           timeoutMs: 30_000,
         }).catch(() => null);
-        out = res?.ok ? res.stdout : '';
+        if (!res || !res.ok) {
+          preserveCheck('container:', preserve);
+          return;
+        }
+        out = res.stdout;
       } else {
-        out = await $`docker inspect ${list} --format ${fmt}`
-          .nothrow()
-          .text()
-          .catch(() => '');
+        const inspectRes = await $`docker inspect ${list} --format ${fmt}`.quiet().nothrow().catch(() => null);
+        if (!inspectRes || inspectRes.exitCode !== 0) {
+          preserveCheck('container:', preserve);
+          return;
+        }
+        out = inspectRes.stdout.toString();
       }
     }
     for (const line of out.split('\n').filter(Boolean)) {
@@ -237,7 +298,7 @@ async function checkContainers(current: Map<string, ActiveAlert>): Promise<void>
   }
 }
 
-async function checkSystemd(current: Map<string, ActiveAlert>, silent: Set<string>): Promise<void> {
+async function checkSystemd(current: Map<string, ActiveAlert>, silent: Set<string>, preserve: Set<string>): Promise<void> {
   const scopes: Array<{ scope: 'user' | 'system'; cmd: string; user: 'user' | 'root' }> = [
     {
       scope: 'user',
@@ -251,9 +312,12 @@ async function checkSystemd(current: Map<string, ActiveAlert>, silent: Set<strin
     },
   ];
   const failedNow = new Set<string>();
+  const failedScopes = new Set<string>();
   await Promise.all(scopes.map(async ({ scope, user, cmd }) => {
     const res = await hostExec(cmd, { user, timeoutMs: 20_000 });
-    if (!res.ok && !res.stdout) return;
+    // A failed probe can't be told apart from "no failed units" — keep last
+    // tick's candidates and don't prune the already-alerted set for it.
+    if (!res.ok && !res.stdout) { failedScopes.add(scope); return; }
     for (const line of res.stdout.split('\n').filter(Boolean)) {
       // Lines may start with a ● / * state marker — grab the token that
       // actually looks like a unit name.
@@ -278,31 +342,69 @@ async function checkSystemd(current: Map<string, ActiveAlert>, silent: Set<strin
       });
     }
   }));
+  for (const scope of failedScopes) {
+    preserveCheck(`systemd:${scope}:`, preserve);
+  }
   for (const k of knownFailedUnits.keys()) {
-    if (!failedNow.has(k)) knownFailedUnits.delete(k);
+    if (!failedNow.has(k) && !failedScopes.has(k.slice(0, k.indexOf(':')))) knownFailedUnits.delete(k);
   }
 }
 
 let smartctlPath: string | null | undefined; // undefined = not probed yet
+let smartctlProbeAt = 0;
 
-async function checkSmart(current: Map<string, ActiveAlert>): Promise<void> {
-  if (smartctlPath === undefined) {
-    const res = await hostExec('command -v smartctl', { user: 'root', timeoutMs: 10_000 });
-    smartctlPath = res.ok && res.stdout.trim() ? res.stdout.trim() : null;
+async function checkSmart(current: Map<string, ActiveAlert>, preserve: Set<string>): Promise<void> {
+  // Re-probe a failed/absent binary every 15 min — a transient hostExec error
+  // must not disable SMART monitoring for the process lifetime.
+  if (smartctlPath === undefined || (smartctlPath === null && Date.now() - smartctlProbeAt > 15 * 60_000)) {
+    smartctlProbeAt = Date.now();
+    // `|| true` keeps res.ok true when the binary is absent so smartctlPath
+    // becomes null and the 15-min retry gate engages — otherwise a missing
+    // binary is indistinguishable from a transport failure and re-probes
+    // every tick while preserved `smart:` alerts never clear.
+    const res = await hostExec('command -v smartctl || true', { user: 'root', timeoutMs: 10_000 });
+    if (!res.ok) { preserveCheck('smart:', preserve); return; }
+    smartctlPath = res.stdout.trim() || null;
   }
   if (!smartctlPath) return; // binary missing — skip silently
-  const res = await hostExec(`smartctl -H /dev/sda`, { user: 'root', timeoutMs: 15_000 });
-  if (!res.ok && !res.stdout) return;
-  const out = res.stdout;
-  const result = out.match(/overall-health[^:]*:\s*(\w+)/i)?.[1] || '';
-  if (result && result.toUpperCase() !== 'PASSED') {
-    current.set('smart:sda', {
-      key: 'smart:sda',
-      title: `SMART: /dev/sda ${result}`,
-      detail: 'El disco reporta degradación de salud — revisar smartctl -a /dev/sda',
-      since: Date.now(),
-      severity: 'critical',
-    });
+
+  // Enumerate every disk, not just /dev/sda: `smartctl --scan` covers
+  // SATA/SAS/NVMe/USB; a device glob is the fallback when scan finds nothing.
+  const scan = await hostExec(
+    `smartctl --scan 2>/dev/null || ls -1 /dev/sd[a-z] /dev/vd[a-z] /dev/hd[a-z] /dev/nvme[0-9]n[0-9] 2>/dev/null || true`,
+    { user: 'root', timeoutMs: 15_000 }
+  );
+  if (!scan.ok) { preserveCheck('smart:', preserve); return; }
+  const devices: { dev: string; type?: string }[] = [];
+  for (const line of scan.stdout.split('\n')) {
+    const m = line.match(/^\s*(\/dev\/[A-Za-z0-9_./-]+)(?:\s+-d\s+([a-zA-Z0-9,-]+))?/);
+    if (m && !devices.some((d) => d.dev === m[1])) devices.push({ dev: m[1], type: m[2] });
+    if (devices.length >= 8) break;
+  }
+  if (!devices.length) return; // no disks to probe — stale smart:* keys reconcile away
+
+  // One round-trip per tick: `smartctl -H` reads cached SMART data without
+  // waking the drives. A device with no verdict line is simply skipped —
+  // absence of output can't be told apart from "unknown" and must not alert.
+  const cmd = devices
+    .map((d) => `echo '==${d.dev}=='; smartctl -H${d.type ? ` -d ${d.type}` : ''} ${shq(d.dev)} 2>/dev/null | grep -i 'overall-health' || true`)
+    .join('; ');
+  const res = await hostExec(cmd, { user: 'root', timeoutMs: 60_000 });
+  if (!res.ok && !res.stdout) { preserveCheck('smart:', preserve); return; }
+  for (const part of res.stdout.split(/^==/m).filter(Boolean)) {
+    const nl = part.indexOf('\n');
+    const dev = (nl >= 0 ? part.slice(0, nl) : part).replace(/==\s*$/, '').trim();
+    const body = nl >= 0 ? part.slice(nl + 1) : '';
+    const result = body.match(/overall-health[^:]*:\s*(\w+)/i)?.[1] || '';
+    if (dev && result && result.toUpperCase() !== 'PASSED') {
+      current.set(`smart:${dev}`, {
+        key: `smart:${dev}`,
+        title: `SMART: ${dev} ${result}`,
+        detail: `El disco reporta degradación de salud — revisar smartctl -a ${dev}`,
+        since: Date.now(),
+        severity: 'critical',
+      });
+    }
   }
 }
 
@@ -313,14 +415,34 @@ async function tick(): Promise<void> {
   ticking = true;
   const current = new Map<string, ActiveAlert>();
   const silent = new Set<string>();
+  const preserve = new Set<string>();
   try {
-    await Promise.allSettled([
-      checkResources(current),
-      checkContainers(current),
-      checkSystemd(current, silent),
-      checkSmart(current),
-    ]);
-    reconcile(current, silent);
+    // Prefix of the alert keys each check owns ('' = resource alerts, which
+    // have no prefix separator).
+    const checks: Array<[string, Promise<void>]> = [
+      ['', checkResources(current, preserve)],
+      ['container:', checkContainers(current, preserve)],
+      ['systemd:', checkSystemd(current, silent, preserve)],
+      ['smart:', checkSmart(current, preserve)],
+    ];
+    const results = await Promise.allSettled(checks.map(([, p]) => p));
+    results.forEach((r, i) => {
+      // A check that blew up produced no candidates — absence here means
+      // "unknown", so keep its previous alerts out of the delete pass too.
+      if (r.status !== 'rejected') return;
+      const prefix = checks[i][0];
+      for (const key of lastCurrent.keys()) {
+        if (prefix ? key.startsWith(prefix) : !key.includes(':')) preserve.add(key);
+      }
+    });
+    reconcile(current, silent, preserve);
+    // Preserved alerts stay in `lastCurrent` so a check that keeps failing
+    // doesn't lose them next tick.
+    lastCurrent = new Map(current);
+    for (const key of preserve) {
+      const alert = active.get(key);
+      if (alert) lastCurrent.set(key, alert);
+    }
   } catch { /* a failing check must never kill the loop */ }
   ticking = false;
 }

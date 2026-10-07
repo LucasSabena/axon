@@ -1,6 +1,7 @@
 import { resolveHostPath, projectSearchRoots } from './host-storage';
-import { Hono } from 'hono';
-import { readFile, writeFile, mkdir, stat } from 'fs/promises';
+import { Hono, type Context } from 'hono';
+import { body as readBody } from './storage/http';
+import { readFile, writeFile, mkdir, stat, rename } from 'fs/promises';
 import { hostToContainer } from './host';
 import { recordEvent } from './events';
 import { SnapshotCache } from './snapshot-cache';
@@ -419,6 +420,9 @@ let customRecs: CustomAgentRec[] = [];
 let dismissedDirs = new Set<string>();
 let customDefs: AgentDef[] = [];
 
+const CUSTOM_NAME_OK = /^[\w áéíóúñü.-]{1,60}$/i;
+const CUSTOM_BIN_OK = /^[a-zA-Z0-9._-]{1,64}$/;
+
 function recToDef(rec: CustomAgentRec): AgentDef {
   return {
     id: rec.id,
@@ -447,10 +451,14 @@ function saveCustom(): Promise<void> {
   customWriteQ = customWriteQ.then(async () => {
     try {
       await mkdir(path.dirname(CUSTOM_FILE), { recursive: true });
+      // tmp+rename — a crash mid-write must not leave a half-truncated
+      // registry that the loader then parses as "no custom agents".
+      const tmp = `${CUSTOM_FILE}.${process.pid}.${Date.now()}.tmp`;
       await writeFile(
-        CUSTOM_FILE,
+        tmp,
         JSON.stringify({ agents: customRecs, dismissed: [...dismissedDirs] }, null, 2)
       );
+      await rename(tmp, CUSTOM_FILE);
     } catch { /* best-effort */ }
   });
   return customWriteQ;
@@ -461,7 +469,10 @@ async function loadCustom(): Promise<void> {
     const obj = JSON.parse(await readFile(CUSTOM_FILE, 'utf-8'));
     if (Array.isArray(obj?.agents)) {
       customRecs = obj.agents.filter(
+        // Re-validate on load: a tampered agents-custom.json must not flow
+        // unquoted into `command -v <bin>` shell calls.
         (r: CustomAgentRec) => r && typeof r.id === 'string' && typeof r.name === 'string' && typeof r.configRoot === 'string'
+          && (r.bin === undefined || (typeof r.bin === 'string' && CUSTOM_BIN_OK.test(r.bin)))
       );
     }
     if (Array.isArray(obj?.dismissed)) dismissedDirs = new Set(obj.dismissed.filter((d: unknown) => typeof d === 'string'));
@@ -592,9 +603,11 @@ export async function discoverAgents(): Promise<DiscoveredAgent[]> {
     { user: 'user', timeoutMs: 30_000 }
   );
   const out: DiscoveredAgent[] = [];
+  const seen = new Set<string>(); // overlapping roots can list a dir twice
   for (const line of scan.stdout.split('\n').filter(Boolean)) {
     const [dir, name, raw, bin] = line.split('\t');
-    if (!dir || !name || claimed.has(dir) || dismissedDirs.has(dir)) continue;
+    if (!dir || !name || claimed.has(dir) || dismissedDirs.has(dir) || seen.has(dir)) continue;
+    seen.add(dir);
     const markers = raw.trim().split(/\s+/).filter(Boolean);
     // weak "cfg" signal alone: only keep if the dir name looks agent-ish or
     // it has a matching binary — otherwise every app config would qualify.
@@ -608,12 +621,13 @@ export async function discoverAgents(): Promise<DiscoveredAgent[]> {
 
 // --- custom agent registration ---
 
-const CUSTOM_NAME_OK = /^[\w áéíóúñü.-]{1,60}$/i;
-const CUSTOM_BIN_OK = /^[a-zA-Z0-9._-]{1,64}$/;
-
 function slugify(s: string): string {
   return s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'agente';
 }
+
+// Serialize registrations: the uniqueness check + sniff + push must be
+// atomic or two concurrent POSTs can both pass the check and duplicate.
+let addCustomQ: Promise<unknown> = Promise.resolve();
 
 async function addCustomAgent(name: string, dir: string, bin: string): Promise<{ ok: boolean; error?: string; id?: string }> {
   if (!CUSTOM_NAME_OK.test(name)) return { ok: false, error: 'Nombre inválido' };
@@ -628,26 +642,30 @@ async function addCustomAgent(name: string, dir: string, bin: string): Promise<{
   // yet — the agent still counts as installed if its binary is on PATH)
   const slug = slugify(name);
   const configRoot = dir || `${home}/.config/${slug}`;
-  if (allDefs().some((d) => d.id === `custom-${slug}` || d.configRoot() === configRoot)) {
-    return { ok: false, error: 'Ya hay un agente con ese nombre o carpeta' };
-  }
-  const layout = await sniffAgentLayout(configRoot);
-  const rec: CustomAgentRec = {
-    id: `custom-${slug}`,
-    name,
-    bin: bin || undefined,
-    configRoot,
-    mcpPaths: layout.mcpPaths,
-    mcpFormat: layout.mcpFormat,
-    mcpKey: layout.mcpKey,
-    hasSkills: layout.hasSkills,
-  };
-  customRecs.push(rec);
-  rebuildCustomDefs();
-  dismissedDirs.delete(configRoot);
-  await saveCustom();
-  invalidateAgentsCache();
-  return { ok: true, id: rec.id };
+  const task = addCustomQ.then(async (): Promise<{ ok: boolean; error?: string; id?: string }> => {
+    if (allDefs().some((d) => d.id === `custom-${slug}` || d.configRoot() === configRoot)) {
+      return { ok: false, error: 'Ya hay un agente con ese nombre o carpeta' };
+    }
+    const layout = await sniffAgentLayout(configRoot);
+    const rec: CustomAgentRec = {
+      id: `custom-${slug}`,
+      name,
+      bin: bin || undefined,
+      configRoot,
+      mcpPaths: layout.mcpPaths,
+      mcpFormat: layout.mcpFormat,
+      mcpKey: layout.mcpKey,
+      hasSkills: layout.hasSkills,
+    };
+    customRecs.push(rec);
+    rebuildCustomDefs();
+    dismissedDirs.delete(configRoot);
+    await saveCustom();
+    invalidateAgentsCache();
+    return { ok: true, id: rec.id };
+  });
+  addCustomQ = task.then(() => undefined, () => undefined);
+  return task;
 }
 
 async function removeCustomAgent(id: string): Promise<{ ok: boolean; error?: string }> {
@@ -666,6 +684,7 @@ async function dismissCandidate(dir: string): Promise<{ ok: boolean; error?: str
   try{dir=await resolveHostPath(dir,{directory:true});}catch{return {ok:false,error:'Directorio no disponible'};}
   dismissedDirs.add(dir);
   await saveCustom();
+  invalidateAgentsCache(); // drops the dismissed row from the cached discovery list
   return { ok: true };
 }
 
@@ -673,10 +692,26 @@ async function dismissCandidate(dir: string): Promise<{ ok: boolean; error?: str
 
 const shq = (s: string) => `'${s.replace(/'/g, `'"'"'`)}'`;
 
+// Serialize read-modify-write cycles per file so concurrent toggles/settings
+// can't interleave and lose each other's edits (reuse of customWriteQ style).
+const fileWriteQ = new Map<string, Promise<unknown>>();
+async function withFileLocks<T>(paths: string[], work: () => Promise<T>): Promise<T> {
+  const keys = [...new Set(paths)].sort();
+  const prevs = keys.map((k) => fileWriteQ.get(k) ?? Promise.resolve());
+  const run = Promise.all(prevs.map((p) => p.catch(() => undefined))).then(work);
+  const tail = run.then(() => undefined, () => undefined);
+  for (const k of keys) fileWriteQ.set(k, tail);
+  void tail.then(() => { for (const k of keys) if (fileWriteQ.get(k) === tail) fileWriteQ.delete(k); });
+  return run;
+}
+
 async function writeHostText(hostPath: string, content: string): Promise<{ ok: boolean; error?: string }> {
   try{hostPath=await resolveHostPath(hostPath);}catch(e){return {ok:false,error:e instanceof Error?e.message:'Disco no disponible'};}
   await hostExec(`cp ${shq(hostPath)} ${shq(hostPath)}.axonbak 2>/dev/null`, { user: 'user', timeoutMs: 10_000 });
-  const proc = hostSpawnInteractive(`cat > ${shq(hostPath)}`, { user: 'user' });
+  // Write to a temp sibling and rename: an interrupted `cat >` would leave a
+  // truncated config, while mv is atomic on the same filesystem.
+  const tmp = `${hostPath}.axontmp-${process.pid}-${Date.now().toString(36)}`;
+  const proc = hostSpawnInteractive(`cat > ${shq(tmp)} && mv -f ${shq(tmp)} ${shq(hostPath)}; rc=$?; rm -f ${shq(tmp)} 2>/dev/null; exit $rc`, { user: 'user' });
   const stdin = proc.stdin as { write(d: string | Uint8Array): unknown; flush(): unknown; end(): void };
   try {
     for (let off = 0; off < content.length; off += 1 << 20) {
@@ -736,7 +771,179 @@ async function readJsonFile(hostPath: string): Promise<Record<string, unknown> |
   try { return JSON.parse(stripJsonComments(text)); } catch { return null; }
 }
 
-const SAFE_KEY = /^[a-zA-Z0-9][a-zA-Z0-9._@/ -]{0,120}$/;
+// --- JSONC-preserving edits ---
+// opencode.jsonc may carry // and /* */ comments; a blanket JSON.stringify on
+// mutation would destroy them. Instead, diff old/new documents and splice
+// each changed value into the original text (like tomlSetScalar does for
+// TOML). Unparseable shapes fall back to a full rewrite.
+
+interface JNode { s: number; e: number; entries?: { key: string; ks: number; node: JNode }[] }
+
+function skipJsoncWs(text: string, i: number): number {
+  for (;;) {
+    while (i < text.length && ' \t\r\n'.includes(text[i])) i++;
+    if (text[i] === '/' && text[i + 1] === '/') { while (i < text.length && text[i] !== '\n') i++; continue; }
+    if (text[i] === '/' && text[i + 1] === '*') { const end = text.indexOf('*/', i + 2); i = end < 0 ? text.length : end + 2; continue; }
+    return i;
+  }
+}
+
+function parseJsoncNode(text: string): JNode | null {
+  let i = 0;
+  const str = (): string | null => {
+    if (text[i] !== '"') return null;
+    let out = '';
+    i++;
+    while (i < text.length && text[i] !== '"') {
+      const c = text[i];
+      if (c === '\\') {
+        const esc = text[i + 1];
+        if (esc === 'u') { out += String.fromCharCode(parseInt(text.slice(i + 2, i + 6), 16) || 0); i += 6; continue; }
+        out += { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' }[esc] ?? esc;
+        i += 2;
+        continue;
+      }
+      out += c;
+      i++;
+    }
+    i++;
+    return out;
+  };
+  const val = (): JNode | null => {
+    i = skipJsoncWs(text, i);
+    const s = i;
+    const c = text[i];
+    if (c === '{') {
+      i++;
+      const entries: NonNullable<JNode['entries']> = [];
+      if (text[skipJsoncWs(text, i)] === '}') { i = skipJsoncWs(text, i) + 1; return { s, e: i, entries }; }
+      for (;;) {
+        i = skipJsoncWs(text, i);
+        const ks = i;
+        const key = str();
+        if (key == null) return null;
+        i = skipJsoncWs(text, i);
+        if (text[i] !== ':') return null;
+        i++;
+        const node = val();
+        if (!node) return null;
+        entries.push({ key, ks, node });
+        i = skipJsoncWs(text, i);
+        if (text[i] === ',') { i++; continue; }
+        if (text[i] === '}') { i++; return { s, e: i, entries }; }
+        return null;
+      }
+    }
+    if (c === '[') {
+      i++;
+      let depth = 1;
+      while (i < text.length && depth) {
+        const ch = text[i];
+        if (ch === '"') { i++; while (i < text.length && text[i] !== '"') i += text[i] === '\\' ? 2 : 1; i++; continue; }
+        if (ch === '/' && text[i + 1] === '/') { while (i < text.length && text[i] !== '\n') i++; continue; }
+        if (ch === '/' && text[i + 1] === '*') { const end = text.indexOf('*/', i + 2); i = end < 0 ? text.length : end + 2; continue; }
+        if (ch === '[' || ch === '{') depth++;
+        else if (ch === ']' || ch === '}') depth--;
+        i++;
+      }
+      return depth ? null : { s, e: i };
+    }
+    if (c === '"') { if (str() == null) return null; return { s, e: i }; }
+    const m = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|^true|^false|^null/.exec(text.slice(i));
+    if (!m) return null;
+    i += m[0].length;
+    return { s, e: i };
+  };
+  const root = val();
+  return root && skipJsoncWs(text, i) === text.length ? root : null;
+}
+
+const JSONC_REMOVE = Symbol('jsonc-remove');
+
+// Replace/insert/remove the value at a key path inside an object document.
+// Returns null when the file shape can't be navigated positionally.
+function jsoncEdit(text: string, path: string[], value: unknown): string | null {
+  if (!path.length || path.some((s) => !s)) return null;
+  const root = parseJsoncNode(text);
+  if (!root?.entries) return null;
+  let obj = root;
+  for (const seg of path.slice(0, -1)) {
+    const ent = obj.entries!.find((e) => e.key === seg);
+    if (!ent?.node.entries) return null;
+    obj = ent.node;
+  }
+  const key = path[path.length - 1];
+  const entries = obj.entries!;
+  const idx = entries.findIndex((e) => e.key === key);
+  if (value === JSONC_REMOVE) {
+    if (idx < 0) return text;
+    const ent = entries[idx];
+    let s = ent.ks;
+    let e = ent.node.e;
+    if (idx < entries.length - 1) {
+      e = skipJsoncWs(text, e);
+      if (text[e] === ',') e++;
+    } else if (idx > 0) {
+      // last member — remove the comma before it (keeps trailing comments)
+      const prevEnd = entries[idx - 1].node.e;
+      const comma = text.lastIndexOf(',', s);
+      if (comma > prevEnd) s = comma;
+    } else {
+      const after = skipJsoncWs(text, e);
+      if (text[after] === ',') e = after + 1;
+    }
+    return text.slice(0, s) + text.slice(e);
+  }
+  const lit = JSON.stringify(value);
+  if (idx >= 0) return text.slice(0, entries[idx].node.s) + lit + text.slice(entries[idx].node.e);
+  // insert as the last member, matching the file's own indentation
+  const member = `${JSON.stringify(key)}: ${lit}`;
+  if (!entries.length) return `${text.slice(0, obj.s + 1)}${member}${text.slice(obj.e - 1)}`;
+  const last = entries[entries.length - 1];
+  const gap = text.slice(obj.s + 1, entries[0].ks);
+  const sep = gap.match(/\n[ \t]*$/)?.[0] ?? (gap.trim() ? ' ' : gap || ' ');
+  const comma = text[skipJsoncWs(text, last.node.e)] === ',' ? '' : ',';
+  return `${text.slice(0, last.node.e)}${comma}${sep}${member}${text.slice(last.node.e)}`;
+}
+
+// Flatten the object-level differences between two parsed documents into a
+// list of (key path → new value | JSONC_REMOVE) edits.
+function diffJson(before: unknown, after: unknown, path: string[], out: { path: string[]; value: unknown }[]): void {
+  if (before === after) return;
+  const bObj = before !== null && typeof before === 'object' && !Array.isArray(before);
+  const aObj = after !== null && typeof after === 'object' && !Array.isArray(after);
+  if (bObj && aObj) {
+    const b = before as Record<string, unknown>;
+    const a = after as Record<string, unknown>;
+    for (const k of Object.keys(a)) diffJson(b[k], a[k], [...path, k], out);
+    for (const k of Object.keys(b)) if (!(k in a)) out.push({ path: [...path, k], value: JSONC_REMOVE });
+    return;
+  }
+  if (JSON.stringify(before) !== JSON.stringify(after)) out.push({ path, value: after });
+}
+
+// Write a JSON document; for .jsonc, splice just the changed values into the
+// existing text so comments and formatting survive. Falls back to a full
+// rewrite when the file can't be navigated positionally.
+async function writeJsonDoc(hostPath: string, json: unknown): Promise<{ ok: boolean; error?: string }> {
+  if (hostPath.endsWith('.jsonc')) {
+    const prev = await readText(hostPath);
+    let before: unknown = null;
+    if (prev != null) { try { before = JSON.parse(stripJsonComments(prev)); } catch { before = null; } }
+    if (prev != null && before && typeof before === 'object') {
+      const edits: { path: string[]; value: unknown }[] = [];
+      diffJson(before, json, [], edits);
+      let text: string | null = prev;
+      for (const ed of edits) text = text == null ? null : jsoncEdit(text, ed.path, ed.value);
+      if (text != null) return writeHostText(hostPath, text);
+    }
+  }
+  return writeHostText(hostPath, JSON.stringify(json, null, 2) + '\n');
+}
+
+// A leading '@' covers npm-scoped ids (@org/plugin) — still no leading
+// dots/underscores so __proto__ and dot-segments stay out.
+const SAFE_KEY = /^@?[a-zA-Z0-9][a-zA-Z0-9._@/ -]{0,120}$/;
 const okKey = (s: string) => SAFE_KEY.test(s) && !s.includes('..');
 
 // --- SKILL.md frontmatter ---
@@ -950,34 +1157,65 @@ async function scanSkills(def: AgentDef): Promise<AgentItem[]> {
   return items.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+// Credentials hide in more than `env`/`headers`: url query strings, userinfo
+// and flag args (--api-key x / KEY=v / -p x) all reach the browser otherwise.
+const SECRET_ARG_RE = /key|token|secret|pass|credential|authorization|bearer|auth/i;
+function scrubSecretText(v: string): string {
+  // userinfo (any scheme — wss://token@h leaks the same way https:// does),
+  // query params and #fragment key=values.
+  return v.replace(/([a-zA-Z][a-zA-Z0-9+\-.]*:\/\/)[^\s/@]+@/g, '$1•••@').replace(/([?&#][^=&\s"']+=)[^&\s"']+/g, '$1•••');
+}
+function maskArg(v: unknown, prev?: unknown): string {
+  const s = String(v);
+  if (SECRET_ARG_RE.test(String(prev ?? '')) || SECRET_ARG_RE.test(s.split('=')[0])) return '•••';
+  return scrubSecretText(s);
+}
+const maskArgs = (arr: unknown[]): string => arr.map((x, i) => maskArg(x, arr[i - 1])).join(' ');
+
 function mcpTarget(s: Record<string, unknown>): string {
   const url = (s.url ?? s.serverUrl ?? s.httpUrl) as string | undefined;
-  if (url) return url;
+  if (url) return scrubSecretText(url);
   const cmd = s.command as string | undefined;
   if (cmd) {
-    const args = Array.isArray(s.args) ? (s.args as string[]).join(' ') : '';
-    return `${cmd} ${args}`.trim().slice(0, 80);
+    // `command` may itself be a compound string carrying --flag SECRET pairs.
+    const args = Array.isArray(s.args) ? maskArgs(s.args) : '';
+    return maskArgs(`${cmd} ${args}`.trim().split(/\s+/)).slice(0, 80);
   }
-  if (Array.isArray(s.command)) return (s.command as string[]).join(' ').slice(0, 80);
+  if (Array.isArray(s.command)) return maskArgs(s.command).slice(0, 80);
   return '';
 }
 
 function mcpUrl(s: Record<string, unknown>): string | undefined {
   const url = (s.url ?? s.serverUrl ?? s.httpUrl) as string | undefined;
-  return url && /^https?:\/\//.test(url) ? url : undefined;
+  // Scrub credentials and query params — MCP URLs often carry ?key=… tokens.
+  return url && /^https?:\/\//.test(url) ? scrubSecretText(url) : undefined;
 }
 
-// Raw config for the drawer — values of headers/environment are replaced by
-// key names so secrets (Bearer tokens, API keys) never reach the client.
+// Raw config for the drawer — secret-looking values are masked at any depth,
+// and URLs/args are scrubbed of credentials and query parameters.
 function mcpRaw(s: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(s)) {
-    if ((k === 'headers' || k === 'environment' || k === 'env') && v && typeof v === 'object') {
-      out[k] = Object.keys(v as object);
-    } else {
-      out[k] = v;
+  const mask = (k: string, v: unknown): unknown => {
+    if (SECRET_KEY_RE.test(k)) return v && typeof v === 'object' ? Object.keys(v as object) : '•••';
+    // `headers` values are almost always the credential itself, often under a
+    // name the key-regex can't guess (X-Custom-Auth…) — mask every leaf.
+    if (/^headers?$/i.test(k) && v && typeof v === 'object' && !Array.isArray(v)) {
+      const o: Record<string, unknown> = {};
+      for (const [k2, x] of Object.entries(v as Record<string, unknown>)) {
+        o[k2] = typeof x === 'string' || x == null ? '•••' : mask(k2, x);
+      }
+      return o;
     }
-  }
+    if (Array.isArray(v)) return v.map((x, i) => (typeof x === 'string' ? maskArg(x, v[i - 1]) : mask('', x)));
+    if (v && typeof v === 'object') {
+      const o: Record<string, unknown> = {};
+      for (const [k2, x] of Object.entries(v as Record<string, unknown>)) o[k2] = mask(k2, x);
+      return o;
+    }
+    if (k === 'command' && typeof v === 'string') return maskArgs(v.split(/\s+/).filter(Boolean));
+    return typeof v === 'string' ? scrubSecretText(v) : v;
+  };
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(s)) out[k] = mask(k, v);
   return out;
 }
 
@@ -1001,11 +1239,16 @@ async function scanMcps(def: AgentDef): Promise<AgentItem[]> {
       const name = tomlUnquote(s.header.slice('mcp_servers.'.length));
       const body = s.lines.slice(s.start + 1, s.end).join('\n');
       const enabled = body.match(/^\s*enabled\s*=\s*(true|false)/m)?.[1] !== 'false';
-      const url = body.match(/^\s*url\s*=\s*"([^"]+)"/m)?.[1]
-        ?? body.match(/^\s*command\s*=\s*"([^"]+)"/m)?.[1] ?? '';
+      const rawUrl = body.match(/^\s*url\s*=\s*"([^"]+)"/m)?.[1];
+      const rawCmd = body.match(/^\s*command\s*=\s*"([^"]+)"/m)?.[1];
+      // A `command = "npx --api-key SECRET"` table leaks the flag pair the same
+      // way a JSON args array does — scrub it with the same arg masking.
+      const detail = rawUrl !== undefined
+        ? scrubSecretText(rawUrl)
+        : maskArgs((rawCmd ?? '').split(/\s+/).filter(Boolean));
       items.push({
-        kind: 'mcp', key: name, name, detail: url, enabled, toggleable: true, deletable: true,
-        url: /^https?:\/\//.test(url) ? url : undefined, file: m.paths()[0],
+        kind: 'mcp', key: name, name, detail, enabled, toggleable: true, deletable: true,
+        url: rawUrl && /^https?:\/\//.test(rawUrl) ? scrubSecretText(rawUrl) : undefined, file: m.paths()[0],
       });
     }
     return items;
@@ -1081,28 +1324,37 @@ async function scanPlugins(def: AgentDef): Promise<AgentItem[]> {
   if (def.plugins === 'opencode') {
     const root = `${H()}/.config/opencode`;
     const cli = await readHostJson<{ plugins?: string[] }>(`${root}/cli.json`);
-    const listed = new Map<string, boolean>(); // name → enabled
+    const listed = new Map<string, { enabled: boolean }>(); // basename → state (first wins)
+    const cliEntries: { clean: string; enabled: boolean }[] = [];
+    const cliSeen = new Set<string>();
     for (const entry of cli?.plugins ?? []) {
       const disabled = entry.startsWith('-');
       const p = disabled ? entry.slice(1) : entry;
-      listed.set(p.split('/').pop() || p, !disabled);
+      const base = p.split('/').pop() || p;
+      if (!listed.has(base)) listed.set(base, { enabled: !disabled });
+      // same-basename npm specs stay distinct via their full id as key
+      if (!cliSeen.has(p)) { cliSeen.add(p); cliEntries.push({ clean: p, enabled: !disabled }); }
     }
+    const seenKeys = new Set<string>();
     for (const f of await hostDirEntries(`${root}/plugins`)) {
       const m = f.match(/^(.+)\.ts(\.off)?$/);
-      const name = m ? m[1] : f.includes('.') ? null : f;
-      if (!name || name === 'node_modules') continue;
+      const dirOff = !m ? f.match(/^([^.]+)\.off$/) : null;
+      const name = m ? m[1] : dirOff ? dirOff[1] : f.includes('.') ? null : f;
+      if (!name || name === 'node_modules' || seenKeys.has(name)) continue;
+      seenKeys.add(name);
       const cliState = listed.get(name);
       items.push({
         kind: 'plugin', key: name, name, scope: m ? 'archivo' : 'local',
         detail: `${root}/plugins/${f}`, file: `${root}/plugins/${f}`,
-        enabled: cliState ?? !f.endsWith('.off'),
+        enabled: cliState?.enabled ?? !f.endsWith('.off'),
         toggleable: true, deletable: true,
       });
     }
-    for (const [name, enabled] of listed) {
-      if (!items.some((i) => i.key === name)) {
-        items.push({ kind: 'plugin', key: name, name, scope: 'cli', enabled, toggleable: true, deletable: true });
-      }
+    for (const { clean, enabled } of cliEntries) {
+      const base = clean.split('/').pop() || clean;
+      if (seenKeys.has(base)) continue;
+      seenKeys.add(base);
+      items.push({ kind: 'plugin', key: clean, name: base, scope: 'cli', enabled, toggleable: true, deletable: true });
     }
     return items;
   }
@@ -1190,7 +1442,8 @@ async function scanProviders(def: AgentDef): Promise<AgentItem[]> {
         enabled: true, toggleable: false, deletable: false,
       });
     }
-    return items;
+    // fall through — a custom ANTHROPIC_BASE_URL env provider must show up
+    // even when no OAuth account data exists in .claude.json
   }
   if (def.id === 'openchamber') {
     const gh = await readHostJson<{ user?: string; login?: string }>(`${H()}/.config/openchamber/github-auth.json`);
@@ -1417,11 +1670,12 @@ async function resolveEnvVar(name: string): Promise<string | undefined> {
 // --- writers ---
 
 async function writeOpencodeProvider(root: string, dataDir: string, p: ProviderDef): Promise<{ ok: boolean; error?: string; note?: string }> {
+  return withFileLocks([`${dataDir}/auth.json`, `${root}/opencode.jsonc`], async () => {
   if (p.apiKey) {
     const authPath = `${dataDir}/auth.json`;
     const auth = (await readJsonFile(authPath)) ?? {};
     auth[p.name] = { type: 'api', key: p.apiKey };
-    const w = await writeHostText(authPath, JSON.stringify(auth, null, 2) + '\n');
+    const w = await writeJsonDoc(authPath, auth);
     if (!w.ok) return w;
   }
   const cfgPath = `${root}/opencode.jsonc`;
@@ -1439,8 +1693,9 @@ async function writeOpencodeProvider(root: string, dataDir: string, p: ProviderD
   if (p.models?.length) next.models = Object.fromEntries(p.models.map((m) => [m, (cur.models as Record<string, unknown> | undefined)?.[m] ?? {}]));
   providers[p.name] = next;
   json.provider = providers;
-  const w = await writeHostText(cfgPath, JSON.stringify(json, null, 2) + '\n');
+  const w = await writeJsonDoc(cfgPath, json);
   return w.ok ? { ok: true, note: `guardado en auth.json + provider "${p.name}" en opencode.jsonc` } : w;
+  });
 }
 
 // Claude-compatible CLIs only take ONE anthropic-compatible provider, via
@@ -1450,17 +1705,20 @@ async function writeClaudeEnvProvider(root: string, p: ProviderDef): Promise<{ o
     return { ok: false, error: 'Solo acepta providers compatibles con la API de Anthropic' };
   }
   const settingsPath = `${root}/settings.json`;
+  return withFileLocks([settingsPath], async () => {
   const json = (await readJsonFile(settingsPath)) ?? {};
   const env = { ...((json.env ?? {}) as Record<string, string>) };
   if (p.baseUrl) env.ANTHROPIC_BASE_URL = p.baseUrl;
   if (p.apiKey) env.ANTHROPIC_AUTH_TOKEN = p.apiKey;
   json.env = env;
-  const w = await writeHostText(settingsPath, JSON.stringify(json, null, 2) + '\n');
+  const w = await writeJsonDoc(settingsPath, json);
   return w.ok ? { ok: true, note: 'ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN en settings.json' } : w;
+  });
 }
 
 async function writeTomlProvider(tomlPath: string, p: ProviderDef): Promise<{ ok: boolean; error?: string; note?: string }> {
   if (!p.baseUrl) return { ok: false, error: 'Necesita base_url — este agente no define providers sin endpoint' };
+  return withFileLocks([tomlPath], async () => {
   const text = (await readText(tomlPath)) ?? '';
   let out = tomlRemoveTable(text, 'model_providers', p.name) ?? text;
   const envKey = `${p.name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_API_KEY`;
@@ -1470,11 +1728,13 @@ async function writeTomlProvider(tomlPath: string, p: ProviderDef): Promise<{ ok
   return w.ok
     ? { ok: true, note: `La key va en la env var ${envKey} — exportala en tu shell (ej: ~/.bashrc)` }
     : w;
+  });
 }
 
 const ZED_NATIVE = new Set(['openai', 'anthropic', 'google', 'ollama', 'lmstudio', 'deepseek', 'mistral', 'openrouter', 'x_ai', 'copilot_chat', 'vercel']);
 
 async function writeZedProvider(settingsPath: string, p: ProviderDef): Promise<{ ok: boolean; error?: string; note?: string }> {
+  return withFileLocks([settingsPath], async () => {
   const json = (await readJsonFile(settingsPath)) ?? {};
   const lm = (json.language_models ?? {}) as Record<string, unknown>;
   const zedName = p.name.replace(/-/g, '_');
@@ -1493,13 +1753,15 @@ async function writeZedProvider(settingsPath: string, p: ProviderDef): Promise<{
     lm.openai_compatible = oc;
   }
   json.language_models = lm;
-  const w = await writeHostText(settingsPath, JSON.stringify(json, null, 2) + '\n');
+  const w = await writeJsonDoc(settingsPath, json);
   return w.ok
     ? { ok: true, note: 'en language_models — si Zed ignora api_key en settings, cargala una vez desde su UI' }
     : w;
+  });
 }
 
 async function writePiProvider(modelsPath: string, p: ProviderDef): Promise<{ ok: boolean; error?: string; note?: string }> {
+  return withFileLocks([modelsPath], async () => {
   const existing = await readHostJson<Record<string, unknown>[]>(modelsPath);
   const arr = Array.isArray(existing) ? existing : [];
   const entry = {
@@ -1512,8 +1774,9 @@ async function writePiProvider(modelsPath: string, p: ProviderDef): Promise<{ ok
   const i = arr.findIndex((m) => m.name === p.name);
   if (i >= 0) arr[i] = { ...arr[i], ...entry };
   else arr.push(entry);
-  const w = await writeHostText(modelsPath, JSON.stringify(arr, null, 2) + '\n');
+  const w = await writeJsonDoc(modelsPath, arr);
   return w.ok ? { ok: true, note: 'agregado a models.json' } : w;
+  });
 }
 
 export async function copyProvider(srcId: string, key: string, targetId: string): Promise<{ ok: boolean; error?: string; note?: string }> {
@@ -1577,7 +1840,8 @@ export async function checkProvider(agentId: string, key: string): Promise<Provi
   const p = def ? (await extractProviders(def)).find((x) => x.key === key) : undefined;
   const done = (r: Omit<ProviderCheck, 'at'>) => {
     const res = { ...r, at: Date.now() };
-    provCheckCache.set(cacheKey, res);
+    provCheckCache.delete(cacheKey); provCheckCache.set(cacheKey, res); // LRU-bump
+    if (provCheckCache.size > 100) provCheckCache.delete(provCheckCache.keys().next().value!);
     return res;
   };
   if (!p) return done({ state: 'unknown', msg: 'provider no encontrado' });
@@ -1641,6 +1905,7 @@ async function detectProgramsCached() {
 
 const detailCache = new SnapshotCache<AgentDetail | null>(10_000);
 const discoveryCache = new SnapshotCache<Awaited<ReturnType<typeof discoverAgents>>>(60_000, 1);
+const searchCache = new SnapshotCache<{ agent: string; agentName: string; kind: string; key: string; name: string; enabled: boolean }[]>(8_000, 25);
 let listGeneration = 0;
 let listCache: { at: number; data: AgentSummary[] } | null = null;
 let listInflight: Promise<AgentSummary[]> | null = null;
@@ -1652,6 +1917,7 @@ export function invalidateAgentsCache(): void {
   listInflight = null;
   detailCache.clear();
   discoveryCache.clear();
+  searchCache.clear();
 }
 
 // A GUI app with no CLI bin still counts as installed when it ships a
@@ -1780,6 +2046,7 @@ const NAME_OK = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,80}$/;
 
 async function toggleMcp(def: AgentDef, key: string, enabled: boolean): Promise<{ ok: boolean; error?: string }> {
   const m = def.mcp!;
+  return withFileLocks(m.paths(), async () => {
   if (m.format === 'toml') {
     const p = m.paths()[0];
     const text = await readText(p);
@@ -1795,10 +2062,11 @@ async function toggleMcp(def: AgentDef, key: string, enabled: boolean): Promise<
     for (const p of m.paths()) {
       const json = await readJsonFile(p);
       const mcp = (json?.mcp ?? {}) as Record<string, Record<string, unknown>>;
-      if (!mcp[key]) continue;
+      if (!Object.hasOwn(mcp, key) || !mcp[key] || typeof mcp[key] !== 'object') continue;
+      if (mcp[key].enabled === enabled) { found = true; continue; } // already in target state
       mcp[key].enabled = enabled;
       json!.mcp = mcp;
-      const w = await writeHostText(p, JSON.stringify(json, null, 2) + '\n');
+      const w = await writeJsonDoc(p, json);
       if (!w.ok) return w;
       found = true;
     }
@@ -1809,10 +2077,11 @@ async function toggleMcp(def: AgentDef, key: string, enabled: boolean): Promise<
   if (!json) return { ok: false, error: `No se pudo leer ${p}` };
   if (m.format === 'cursor') {
     const servers = (json.mcpServers ?? {}) as Record<string, Record<string, unknown>>;
-    if (!servers[key]) return { ok: false, error: `MCP "${key}" no encontrado` };
+    if (!Object.hasOwn(servers, key) || !servers[key] || typeof servers[key] !== 'object') return { ok: false, error: `MCP "${key}" no encontrado` };
+    if ((servers[key].disabled === true) === !enabled) return { ok: true };
     servers[key].disabled = !enabled;
     json.mcpServers = servers;
-    return writeHostText(p, JSON.stringify(json, null, 2) + '\n');
+    return writeJsonDoc(p, json);
   }
   // json-park / serverurl: move entry between <key> ⇄ _disabled<Key>
   const { servers: serversKey, parked: parkedKey } = mcpKeys(m);
@@ -1820,95 +2089,179 @@ async function toggleMcp(def: AgentDef, key: string, enabled: boolean): Promise<
   const parked = (json[parkedKey] ?? {}) as Record<string, Record<string, unknown>>;
   const from = enabled ? parked : servers;
   const to = enabled ? servers : parked;
-  if (!from[key]) return { ok: false, error: `MCP "${key}" no encontrado` };
+  if (!Object.hasOwn(from, key)) return Object.hasOwn(to, key) ? { ok: true } : { ok: false, error: `MCP "${key}" no encontrado` };
   to[key] = from[key];
   delete from[key];
   json[serversKey] = servers;
   if (Object.keys(parked).length) json[parkedKey] = parked;
   else delete json[parkedKey];
-  return writeHostText(p, JSON.stringify(json, null, 2) + '\n');
+  return writeJsonDoc(p, json);
+  });
+}
+
+// Entries in a plugins[] list are disabled by a '-' prefix and may be npm
+// specs (org/name) — match the exact entry first so same-basename specs
+// don't toggle each other.
+function pluginListIndex(list: string[], key: string): number | 'ambiguous' | -1 {
+  const clean = (e: string) => (e.startsWith('-') ? e.slice(1) : e);
+  const exact = list.findIndex((e) => clean(e) === key);
+  if (exact >= 0) return exact;
+  const hits = list.map((e, i) => (clean(e).split('/').pop() === key ? i : -1)).filter((i) => i >= 0);
+  return hits.length > 1 ? 'ambiguous' : hits[0] ?? -1;
+}
+
+function setPluginListEntry(list: string[], idx: number, enabled: boolean): boolean {
+  const cur = list[idx];
+  const next = enabled ? cur.replace(/^-/, '') : (cur.startsWith('-') ? cur : `-${cur}`);
+  if (next === cur) return false; // already in target state — no-op
+  list[idx] = next;
+  return true;
 }
 
 async function togglePlugin(def: AgentDef, key: string, enabled: boolean): Promise<{ ok: boolean; error?: string }> {
   if (def.plugins === 'codex-toml') {
     const path = def.mcp!.paths()[0];
-    const text = await readText(path);
-    if (text == null) return { ok: false, error: 'No se pudo leer config.toml' };
-    const out = tomlSetEnabled(text, 'plugins', key, enabled);
-    if (out == null) return { ok: false, error: `Plugin "${key}" no encontrado` };
-    return writeHostText(path, out);
+    return withFileLocks([path], async () => {
+      const text = await readText(path);
+      if (text == null) return { ok: false, error: 'No se pudo leer config.toml' };
+      const out = tomlSetEnabled(text, 'plugins', key, enabled);
+      if (out == null) return { ok: false, error: `Plugin "${key}" no encontrado` };
+      return writeHostText(path, out);
+    });
   }
   if (def.plugins === 'claude') {
     const path = `${H()}/.claude/settings.json`;
-    const json = (await readHostJson<Record<string, unknown>>(path)) ?? {};
-    const ep = (json.enabledPlugins ?? {}) as Record<string, boolean>;
-    if (!(key in ep)) return { ok: false, error: `Plugin "${key}" no encontrado` };
-    ep[key] = enabled;
-    json.enabledPlugins = ep;
-    return writeHostText(path, JSON.stringify(json, null, 2) + '\n');
+    return withFileLocks([path], async () => {
+      const json = (await readHostJson<Record<string, unknown>>(path)) ?? {};
+      const ep = (json.enabledPlugins ?? {}) as Record<string, boolean>;
+      if (!Object.hasOwn(ep, key)) return { ok: false, error: `Plugin "${key}" no encontrado` };
+      if (ep[key] === enabled) return { ok: true };
+      ep[key] = enabled;
+      json.enabledPlugins = ep;
+      return writeJsonDoc(path, json);
+    });
   }
   if (def.plugins === 'opencode') {
     const root = `${H()}/.config/opencode`;
-    // file-based plugin: plugins/<name>.ts ⇄ .ts.off ; dir plugin ⇄ dir.off
-    const tsPath = `${root}/plugins/${key}.ts`;
-    const offPath = `${tsPath}.off`;
-    if ((await hostExists(tsPath)) || (await hostExists(offPath))) {
-      const from = enabled ? offPath : tsPath;
-      const to = enabled ? tsPath : offPath;
+    const cliPath = `${root}/cli.json`;
+    const pfx = `${root}/plugins/${key}`;
+    return withFileLocks([cliPath, pfx], async () => {
+    // file/dir-based plugin: plugins/<name>.ts ⇄ .ts.off ; dir ⇄ dir.off
+    // The resolved parent must stay under the agent's own config root — for
+    // '/' keys (@org/name) the intermediate dir, for plain keys the plugins
+    // dir itself; either could be a planted symlink out of the tree.
+    if (!(await pathWithinRoot(def.configRoot(), pfx.slice(0, pfx.lastIndexOf('/'))))) {
+      return { ok: false, error: 'La carpeta de plugins es un symlink fuera del árbol del agente' };
+    }
+    const candidates = [`${pfx}.ts`, pfx];
+    for (const on of candidates) {
+      const off = `${on}.off`;
+      const hasOn = await hostExists(on);
+      const hasOff = await hostExists(off);
+      if (!hasOn && !hasOff) continue;
+      if (enabled === hasOn) return { ok: true }; // already in target state
+      const from = enabled ? off : on;
+      const to = enabled ? on : off;
+      // refuse to rename through a symlink (same guard as toggleSkill)
+      const l = await hostExec(`[ -L ${shq(from)} ] || [ -L ${shq(to)} ]`, { user: 'user', timeoutMs: 10_000 });
+      if (l.ok) return { ok: false, error: 'El plugin es un symlink — no se renombra' };
       const r = await hostExec(`mv ${shq(from)} ${shq(to)}`, { user: 'user', timeoutMs: 10_000 });
       return r.ok ? { ok: true } : { ok: false, error: r.stderr.slice(0, 300) };
     }
     // cli.json plugins array: '-' prefix disables
-    const cliPath = `${root}/cli.json`;
     const cli = await readHostJson<{ plugins?: string[] }>(cliPath);
     if (!cli?.plugins) return { ok: false, error: `Plugin "${key}" no encontrado` };
-    const idx = cli.plugins.findIndex((e) => (e.startsWith('-') ? e.slice(1) : e).split('/').pop() === key);
+    const idx = pluginListIndex(cli.plugins, key);
+    if (idx === 'ambiguous') return { ok: false, error: `Hay varios plugins con ese nombre — usá el id completo` };
     if (idx < 0) return { ok: false, error: `Plugin "${key}" no encontrado` };
-    const cur = cli.plugins[idx];
-    cli.plugins[idx] = enabled ? cur.replace(/^-/, '') : (cur.startsWith('-') ? cur : `-${cur}`);
-    return writeHostText(cliPath, JSON.stringify(cli, null, 2) + '\n');
+    if (!setPluginListEntry(cli.plugins, idx, enabled)) return { ok: true };
+    return writeJsonDoc(cliPath, cli);
+    });
   }
   if (def.plugins === 'openchamber') {
     const p = `${H()}/.config/openchamber/opencode.managed.json`;
-    const json = (await readJsonFile(p)) ?? {};
-    const plugins = (json.plugins ?? []) as string[];
-    const idx = plugins.findIndex((e) => (e.startsWith('-') ? e.slice(1) : e).split('/').pop() === key);
-    if (idx < 0) return { ok: false, error: `Plugin "${key}" no encontrado` };
-    const cur = plugins[idx];
-    plugins[idx] = enabled ? cur.replace(/^-/, '') : (cur.startsWith('-') ? cur : `-${cur}`);
-    json.plugins = plugins;
-    return writeHostText(p, JSON.stringify(json, null, 2) + '\n');
+    return withFileLocks([p], async () => {
+      const json = (await readJsonFile(p)) ?? {};
+      const plugins = (json.plugins ?? []) as string[];
+      const idx = pluginListIndex(plugins, key);
+      if (idx === 'ambiguous') return { ok: false, error: `Hay varios plugins con ese nombre — usá el id completo` };
+      if (idx < 0) return { ok: false, error: `Plugin "${key}" no encontrado` };
+      if (!setPluginListEntry(plugins, idx, enabled)) return { ok: true };
+      json.plugins = plugins;
+      return writeJsonDoc(p, json);
+    });
   }
   if (def.plugins === 'antigravity') {
     const path = `${H()}/.gemini/config/config.json`;
-    const json = (await readHostJson<Record<string, unknown>>(path)) ?? {};
-    const plugins = (json.plugins ?? {}) as Record<string, { enabled?: boolean }>;
-    if (!plugins[key]) return { ok: false, error: `Plugin "${key}" no encontrado` };
-    plugins[key].enabled = enabled;
-    json.plugins = plugins;
-    return writeHostText(path, JSON.stringify(json, null, 2) + '\n');
+    return withFileLocks([path], async () => {
+      const json = (await readHostJson<Record<string, unknown>>(path)) ?? {};
+      const plugins = (json.plugins ?? {}) as Record<string, { enabled?: boolean }>;
+      if (!Object.hasOwn(plugins, key) || !plugins[key] || typeof plugins[key] !== 'object') return { ok: false, error: `Plugin "${key}" no encontrado` };
+      if (plugins[key].enabled === enabled) return { ok: true };
+      plugins[key].enabled = enabled;
+      json.plugins = plugins;
+      return writeJsonDoc(path, json);
+    });
   }
   return { ok: false, error: 'Este agente no soporta gestión de plugins' };
+}
+
+// A skills dir that is itself a symlink (or nested under one) resolves outside
+// this agent's config root — rename/delete would then operate on files the
+// agent tree doesn't own. Refuse to act through it.
+async function skillsDirWithinRoot(def: AgentDef, dirPath: string): Promise<boolean> {
+  const r = await hostExec(
+    `d=$(realpath -m ${shq(dirPath)}) && c=$(realpath -m ${shq(def.configRoot())}/) && case "$d/" in "$c"*) exit 0;; *) exit 1;; esac`,
+    { user: 'user', timeoutMs: 10_000 });
+  return r.ok;
+}
+
+// Same symlink guard for a resolved path against an expected parent root —
+// covers npm-style keys ('@org/name') where an intermediate component could
+// be a planted symlink out of the plugins dir.
+async function pathWithinRoot(rootDir: string, target: string): Promise<boolean> {
+  const r = await hostExec(
+    `d=$(realpath -m ${shq(rootDir)}/) && t=$(realpath -m ${shq(target)}) && case "$t/" in "$d"*) exit 0;; *) exit 1;; esac`,
+    { user: 'user', timeoutMs: 10_000 });
+  return r.ok;
 }
 
 async function toggleSkill(def: AgentDef, key: string, enabled: boolean): Promise<{ ok: boolean; error?: string }> {
   const dir = def.skillsDirs?.[0];
   if (!dir) return { ok: false, error: 'Sin carpeta de skills' };
+  if (!okKey(key) || key.includes('/')) return { ok: false, error: 'Skill inválida' };
   const base = `${dir.path()}/${key}`;
   if (dir.toggle === 'codex-toml') {
     const path = def.mcp!.paths()[0];
-    const text = await readText(path);
-    if (text == null) return { ok: false, error: 'No se pudo leer config.toml' };
-    const out = tomlSkillConfigSet(text, `${base}/SKILL.md`, enabled);
-    return writeHostText(path, out);
+    return withFileLocks([path], async () => {
+      const text = await readText(path);
+      if (text == null) return { ok: false, error: 'No se pudo leer config.toml' };
+      const out = tomlSkillConfigSet(text, `${base}/SKILL.md`, enabled);
+      return writeHostText(path, out);
+    });
   }
-  const on = `${base}/SKILL.md`;
-  const off = `${base}/SKILL.md.off`;
-  const from = enabled ? off : on;
-  const to = enabled ? on : off;
-  if (!(await hostExists(from))) return { ok: false, error: `Skill "${key}" no encontrada` };
-  const r = await hostExec(`mv ${shq(from)} ${shq(to)}`, { user: 'user', timeoutMs: 10_000 });
-  return r.ok ? { ok: true } : { ok: false, error: r.stderr.slice(0, 300) };
+  return withFileLocks([base], async () => {
+    if (!(await skillsDirWithinRoot(def, dir.path()))) {
+      return { ok: false, error: 'La carpeta de skills es un symlink fuera del árbol del agente' };
+    }
+    const on = `${base}/SKILL.md`;
+    const off = `${base}/SKILL.md.off`;
+    const from = enabled ? off : on;
+    const to = enabled ? on : off;
+    if (!(await hostExists(from))) {
+      if (await hostExists(to)) return { ok: true }; // already in target state
+      return { ok: false, error: `Skill "${key}" no encontrada` };
+    }
+    // never rename through a symlink — a linked skill dir lives outside this
+    // agent's tree and mv would move a file inside the *target* directory.
+    const l = await hostExec(
+      `[ -L ${shq(base)} ] || [ -L ${shq(from)} ] || [ -L ${shq(to)} ]`,
+      { user: 'user', timeoutMs: 10_000 },
+    );
+    if (l.ok) return { ok: false, error: 'La skill es un symlink — no se renombra' };
+    const r = await hostExec(`mv ${shq(from)} ${shq(to)}`, { user: 'user', timeoutMs: 10_000 });
+    return r.ok ? { ok: true } : { ok: false, error: r.stderr.slice(0, 300) };
+  });
 }
 
 async function deleteItem(def: AgentDef, kind: string, key: string): Promise<{ ok: boolean; error?: string }> {
@@ -1916,18 +2269,30 @@ async function deleteItem(def: AgentDef, kind: string, key: string): Promise<{ o
     const dir = def.skillsDirs?.[0];
     if (!dir || !okKey(key) || key.includes('/')) return { ok: false, error: 'Skill inválida' };
     const base = `${dir.path()}/${key}`;
-    const r = await hostExec(`rm -rf ${shq(base)}`, { user: 'user', timeoutMs: 15_000 });
-    if (!r.ok) return { ok: false, error: r.stderr.slice(0, 300) };
-    // clean a stale codex [[skills.config]] entry if present
-    if (dir.toggle === 'codex-toml') {
-      const path = def.mcp!.paths()[0];
-      const text = await readText(path);
-      if (text != null) await writeHostText(path, tomlSkillConfigRemove(text, `${base}/SKILL.md`));
-    }
-    return { ok: true };
+    const tomlPath = dir.toggle === 'codex-toml' ? def.mcp!.paths()[0] : base;
+    return withFileLocks([base, tomlPath], async () => {
+      if (!(await skillsDirWithinRoot(def, dir.path()))) {
+        return { ok: false, error: 'La carpeta de skills es un symlink fuera del árbol del agente' };
+      }
+      // A linked skill (skills CLI symlink) is deleted by removing only the
+      // link — rm never follows it, but unlinking keeps the target intact.
+      const l = await hostExec(`[ -L ${shq(base)} ]`, { user: 'user', timeoutMs: 10_000 });
+      const r = l.ok
+        ? await hostExec(`rm -f ${shq(base)}`, { user: 'user', timeoutMs: 10_000 })
+        : await hostExec(`rm -rf -- ${shq(base)}`, { user: 'user', timeoutMs: 15_000 });
+      if (!r.ok) return { ok: false, error: r.stderr.slice(0, 300) };
+      // clean a stale codex [[skills.config]] entry if present
+      if (dir.toggle === 'codex-toml') {
+        const path = def.mcp!.paths()[0];
+        const text = await readText(path);
+        if (text != null) await writeHostText(path, tomlSkillConfigRemove(text, `${base}/SKILL.md`));
+      }
+      return { ok: true };
+    });
   }
   if (kind === 'mcp') {
     const m = def.mcp!;
+    return withFileLocks(m.paths(), async () => {
     if (m.format === 'toml') {
       const p = m.paths()[0];
       const text = await readText(p);
@@ -1941,10 +2306,10 @@ async function deleteItem(def: AgentDef, kind: string, key: string): Promise<{ o
       for (const p of m.paths()) {
         const json = await readJsonFile(p);
         const mcp = (json?.mcp ?? {}) as Record<string, unknown>;
-        if (!(key in mcp)) continue;
+        if (!Object.hasOwn(mcp, key)) continue;
         delete mcp[key];
         json!.mcp = mcp;
-        const w = await writeHostText(p, JSON.stringify(json, null, 2) + '\n');
+        const w = await writeJsonDoc(p, json);
         if (!w.ok) return w;
         found = true;
       }
@@ -1956,70 +2321,93 @@ async function deleteItem(def: AgentDef, kind: string, key: string): Promise<{ o
     const { servers: serversKey, parked: parkedKey } = mcpKeys(m);
     const servers = (json[serversKey] ?? {}) as Record<string, unknown>;
     const parked = (json[parkedKey] ?? {}) as Record<string, unknown>;
-    if (!(key in servers) && !(key in parked)) return { ok: false, error: `MCP "${key}" no encontrado` };
+    if (!Object.hasOwn(servers, key) && !Object.hasOwn(parked, key)) return { ok: false, error: `MCP "${key}" no encontrado` };
     delete servers[key];
     delete parked[key];
     json[serversKey] = servers;
     if (Object.keys(parked).length) json[parkedKey] = parked;
     else delete json[parkedKey];
-    return writeHostText(p, JSON.stringify(json, null, 2) + '\n');
+    return writeJsonDoc(p, json);
+    });
   }
   if (kind === 'plugin') {
     if (def.plugins === 'codex-toml') {
       const path = def.mcp!.paths()[0];
-      const text = await readText(path);
-      if (text == null) return { ok: false, error: 'No se pudo leer config.toml' };
-      const out = tomlRemoveTable(text, 'plugins', key);
-      if (out == null) return { ok: false, error: `Plugin "${key}" no encontrado` };
-      return writeHostText(path, out);
+      return withFileLocks([path], async () => {
+        const text = await readText(path);
+        if (text == null) return { ok: false, error: 'No se pudo leer config.toml' };
+        const out = tomlRemoveTable(text, 'plugins', key);
+        if (out == null) return { ok: false, error: `Plugin "${key}" no encontrado` };
+        return writeHostText(path, out);
+      });
     }
     if (def.plugins === 'claude') {
       const sPath = `${H()}/.claude/settings.json`;
-      const settings = (await readHostJson<Record<string, unknown>>(sPath)) ?? {};
-      const ep = (settings.enabledPlugins ?? {}) as Record<string, boolean>;
-      delete ep[key];
-      settings.enabledPlugins = ep;
-      const w1 = await writeHostText(sPath, JSON.stringify(settings, null, 2) + '\n');
-      if (!w1.ok) return w1;
       const iPath = `${H()}/.claude/plugins/installed_plugins.json`;
-      const inst = await readHostJson<{ plugins?: Record<string, unknown> }>(iPath);
-      if (inst?.plugins && key in inst.plugins) {
-        delete inst.plugins[key];
-        await writeHostText(iPath, JSON.stringify(inst, null, 2) + '\n');
-      }
-      return { ok: true };
+      return withFileLocks([sPath, iPath], async () => {
+        const settings = (await readHostJson<Record<string, unknown>>(sPath)) ?? {};
+        const ep = (settings.enabledPlugins ?? {}) as Record<string, boolean>;
+        delete ep[key];
+        settings.enabledPlugins = ep;
+        const w1 = await writeJsonDoc(sPath, settings);
+        if (!w1.ok) return w1;
+        const inst = await readHostJson<{ plugins?: Record<string, unknown> }>(iPath);
+        if (inst?.plugins && Object.hasOwn(inst.plugins, key)) {
+          delete inst.plugins[key];
+          await writeJsonDoc(iPath, inst);
+        }
+        return { ok: true };
+      });
     }
     if (def.plugins === 'opencode') {
       const root = `${H()}/.config/opencode`;
-      const r = await hostExec(`rm -rf ${shq(`${root}/plugins/${key}`)} ${shq(`${root}/plugins/${key}.ts`)} ${shq(`${root}/plugins/${key}.ts.off`)} 2>/dev/null`, { user: 'user', timeoutMs: 15_000 });
       const cliPath = `${root}/cli.json`;
-      const cli = await readHostJson<{ plugins?: string[] }>(cliPath);
-      if (cli?.plugins) {
-        const next = cli.plugins.filter((e) => (e.startsWith('-') ? e.slice(1) : e).split('/').pop() !== key);
-        if (next.length !== cli.plugins.length) {
-          cli.plugins = next;
-          await writeHostText(cliPath, JSON.stringify(cli, null, 2) + '\n');
+      return withFileLocks([cliPath, `${root}/plugins/${key}`], async () => {
+        const rmTargets = [`${root}/plugins/${key}`, `${root}/plugins/${key}.off`, `${root}/plugins/${key}.ts`, `${root}/plugins/${key}.ts.off`];
+        // The resolved parent must stay under the agent's config root — '/' keys
+        // traverse an intermediate dir; for plain keys that IS plugins/, which
+        // could itself be a planted symlink out of the tree.
+        if (!(await pathWithinRoot(def.configRoot(), `${root}/plugins/${key}`.split('/').slice(0, -1).join('/')))) {
+          return { ok: false, error: 'La carpeta de plugins es un symlink fuera del árbol del agente' };
         }
-      }
-      return r.ok ? { ok: true } : { ok: false, error: r.stderr.slice(0, 300) };
+        // symlinked entries are unlinked, never followed
+        const l = await hostExec(`for f in ${rmTargets.map(shq).join(' ')}; do [ -L "$f" ] && echo link; done`, { user: 'user', timeoutMs: 10_000 });
+        const r = l.stdout.includes('link')
+          ? await hostExec(`for f in ${rmTargets.map(shq).join(' ')}; do [ -L "$f" ] && rm -f "$f" || rm -rf "$f"; done 2>/dev/null`, { user: 'user', timeoutMs: 15_000 })
+          : await hostExec(`rm -rf ${rmTargets.map(shq).join(' ')} 2>/dev/null`, { user: 'user', timeoutMs: 15_000 });
+        const cli = await readHostJson<{ plugins?: string[] }>(cliPath);
+        if (cli?.plugins) {
+          const idx = pluginListIndex(cli.plugins, key);
+          if (typeof idx === 'number') {
+            cli.plugins.splice(idx, 1);
+            await writeJsonDoc(cliPath, cli);
+          }
+        }
+        return r.ok ? { ok: true } : { ok: false, error: r.stderr.slice(0, 300) };
+      });
     }
     if (def.plugins === 'openchamber') {
       const p = `${H()}/.config/openchamber/opencode.managed.json`;
-      const json = await readJsonFile(p);
-      const plugins = (json?.plugins ?? []) as string[];
-      const next = plugins.filter((e) => (e.startsWith('-') ? e.slice(1) : e).split('/').pop() !== key);
-      if (next.length === plugins.length) return { ok: false, error: `Plugin "${key}" no encontrado` };
-      json!.plugins = next;
-      return writeHostText(p, JSON.stringify(json, null, 2) + '\n');
+      return withFileLocks([p], async () => {
+        const json = await readJsonFile(p);
+        const plugins = (json?.plugins ?? []) as string[];
+        const idx = pluginListIndex(plugins, key);
+        if (typeof idx !== 'number') return { ok: false, error: `Plugin "${key}" no encontrado` };
+        plugins.splice(idx, 1);
+        json!.plugins = plugins;
+        return writeJsonDoc(p, json);
+      });
     }
     if (def.plugins === 'antigravity') {
       const path = `${H()}/.gemini/config/config.json`;
-      const json = (await readHostJson<Record<string, unknown>>(path)) ?? {};
-      const plugins = (json.plugins ?? {}) as Record<string, unknown>;
-      if (!(key in plugins)) return { ok: false, error: `Plugin "${key}" no encontrado` };
-      delete plugins[key];
-      json.plugins = plugins;
-      return writeHostText(path, JSON.stringify(json, null, 2) + '\n');
+      return withFileLocks([path], async () => {
+        const json = (await readHostJson<Record<string, unknown>>(path)) ?? {};
+        const plugins = (json.plugins ?? {}) as Record<string, unknown>;
+        if (!Object.hasOwn(plugins, key)) return { ok: false, error: `Plugin "${key}" no encontrado` };
+        delete plugins[key];
+        json.plugins = plugins;
+        return writeJsonDoc(path, json);
+      });
     }
     return { ok: false, error: 'Este agente no soporta gestión de plugins' };
   }
@@ -2033,9 +2421,14 @@ async function addSkill(def: AgentDef, name: string, desc: string, body: string)
   const base = `${dir.path()}/${name}`;
   if (await hostExists(base)) return { ok: false, error: 'Ya existe una skill con ese nombre' };
   const md = `---\nname: ${name}\ndescription: ${desc || `Skill ${name}`}\n---\n\n${body || `# ${name}\n`}\n`;
-  const r = await hostExec(`mkdir -p ${shq(base)}`, { user: 'user', timeoutMs: 10_000 });
-  if (!r.ok) return { ok: false, error: r.stderr.slice(0, 300) };
-  return writeHostText(`${base}/SKILL.md`, md);
+  return withFileLocks([base], async () => {
+    if (!(await skillsDirWithinRoot(def, dir.path()))) {
+      return { ok: false, error: 'La carpeta de skills es un symlink fuera del árbol del agente' };
+    }
+    const r = await hostExec(`mkdir -p ${shq(base)}`, { user: 'user', timeoutMs: 10_000 });
+    if (!r.ok) return { ok: false, error: r.stderr.slice(0, 300) };
+    return writeHostText(`${base}/SKILL.md`, md);
+  });
 }
 
 async function addMcp(def: AgentDef, name: string, url: string, command: string, args: string): Promise<{ ok: boolean; error?: string }> {
@@ -2045,6 +2438,7 @@ async function addMcp(def: AgentDef, name: string, url: string, command: string,
   if (!url && !command) return { ok: false, error: 'Indicá una URL (remoto) o un comando (stdio)' };
   if (url && !/^https?:\/\//.test(url)) return { ok: false, error: 'La URL debe empezar con http(s)://' };
 
+  return withFileLocks(m.paths(), async () => {
   if (m.format === 'toml') {
     const p = m.paths()[0];
     const text = (await readText(p)) ?? '';
@@ -2071,7 +2465,7 @@ async function addMcp(def: AgentDef, name: string, url: string, command: string,
       ? { type: 'remote', url, enabled: true }
       : { type: 'local', command: [command, ...(args ? args.split(/\s+/) : [])], enabled: true };
     json.mcp = mcp;
-    return writeHostText(p, JSON.stringify(json, null, 2) + '\n');
+    return writeJsonDoc(p, json);
   }
 
   const p = m.paths()[0];
@@ -2084,7 +2478,8 @@ async function addMcp(def: AgentDef, name: string, url: string, command: string,
   if (servers[name]) return { ok: false, error: 'Ya existe un MCP con ese nombre' };
   servers[name] = entry;
   json[serversKey] = servers;
-  return writeHostText(p, JSON.stringify(json, null, 2) + '\n');
+  return writeJsonDoc(p, json);
+  });
 }
 
 // --- visual settings (scalar top-level keys of each agent's config file) ---
@@ -2098,7 +2493,7 @@ interface SettingEntry {
   options?: string[]; // enum choices → dropdown
 }
 
-const SECRET_KEY_RE = /key|token|secret|password|credential|authorization|bearer/i;
+const SECRET_KEY_RE = /key|token|secret|pass|credential|authorization|bearer/i;
 
 function jsonSettingEntries(json: Record<string, unknown>): SettingEntry[] {
   return Object.entries(json).map(([key, v]) => {
@@ -2148,8 +2543,14 @@ function tomlSetScalar(text: string, key: string, value: unknown): string {
 }
 
 // Keys managed by dedicated tabs — the visual editor refuses to touch them
-// (they'd clobber nested structures anyway).
-const MANAGED_KEYS = new Set(['mcp', 'mcpServers', '_disabledMcpServers', 'plugins', 'enabledPlugins', 'skills', 'marketplaces', 'mcp_servers', 'provider']);
+// (they'd clobber nested structures anyway). Covers every per-agent
+// structured section: MCP pools, plugins, skills, providers, models…
+const MANAGED_KEYS = new Set([
+  'mcp', 'mcpServers', '_disabledMcpServers', 'mcp_servers', 'context_servers', 'servers',
+  'plugins', 'enabledPlugins', 'skills', 'marketplaces', 'hooks',
+  'provider', 'providers', 'model_providers', 'language_models', 'model_list',
+  'env', 'permissions', 'accounts', 'auth',
+]);
 
 async function getSettings(def: AgentDef): Promise<{ file: string; format: 'toml' | 'json'; entries: SettingEntry[] } | null> {
   if (!def.configFile) return null;
@@ -2204,22 +2605,44 @@ async function getSettings(def: AgentDef): Promise<{ file: string; format: 'toml
 async function setSetting(def: AgentDef, key: string, value: unknown): Promise<{ ok: boolean; error?: string }> {
   if (!def.configFile || !okKey(key)) return { ok: false, error: 'Key inválida' };
   const topKey = key.split('.')[0];
-  if (MANAGED_KEYS.has(topKey) && !key.includes('.')) {
-    return { ok: false, error: `La key "${key}" se gestiona en su propia pestaña` };
+  if (MANAGED_KEYS.has(topKey)) {
+    // nested leaves of managed sections are the vault's job, not this editor —
+    // but never let a bare key overwrite a whole managed section
+    if (!key.includes('.')) return { ok: false, error: `La key "${key}" se gestiona en su propia pestaña` };
   }
   if (value !== null && typeof value === 'object') return { ok: false, error: 'Solo valores escalares' };
   const file = def.configFile();
+  return withFileLocks([file], async () => {
   if (file.endsWith('.toml')) {
+    // the key is interpolated into a regex and into TOML output — bare-key
+    // syntax only, no quoting/escaping games
+    if (!/^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$/.test(key)) return { ok: false, error: 'Key inválida para TOML' };
     const text = await readText(file);
     if (text == null) return { ok: false, error: 'No se pudo leer el archivo de config' };
+    // a scalar write must not shadow an existing [table] — TOML would then
+    // carry both "key = v" and "[key]", which is invalid/ambiguous. Dotted
+    // keys also clash with tables at any prefix ([a] blocks a.b).
+    const prefixes = key.split('.').map((_, i, a) => a.slice(0, i + 1).join('.'));
+    if (tomlSections(text).some((s) => {
+      const h = s.header;
+      return prefixes.some((p) => h === p || tomlUnquote(h) === p) || h.startsWith(`${key}.`);
+    })) {
+      return { ok: false, error: `"${key}" es una sección — no se puede pisar con un escalar` };
+    }
     return writeHostText(file, tomlSetScalar(text, key, value));
   }
   const json = (await readJsonFile(file)) ?? {};
   if (key.includes('.')) {
     // nested path — vault writes (provider.X.options.apiKey)
     const parts = key.split('.');
+    if (parts.some((s) => !s || s === '__proto__' || s === 'constructor' || s === 'prototype')) {
+      return { ok: false, error: 'Ruta de clave inválida' };
+    }
     let node = json as Record<string, unknown>;
     for (const p of parts.slice(0, -1)) {
+      if (!Object.prototype.hasOwnProperty.call(node, p)) {
+        return { ok: false, error: `No existe el objeto "${p}" en la ruta` };
+      }
       const next = node[p];
       if (next === null || typeof next !== 'object' || Array.isArray(next)) {
         return { ok: false, error: `No existe el objeto "${p}" en la ruta` };
@@ -2228,9 +2651,16 @@ async function setSetting(def: AgentDef, key: string, value: unknown): Promise<{
     }
     node[parts[parts.length - 1]] = value;
   } else {
+    // never flatten an existing object/array section into a scalar, even when
+    // the section isn't on the managed list
+    const cur = json[key];
+    if (cur !== null && typeof cur === 'object') {
+      return { ok: false, error: `"${key}" es una sección gestionada — no se puede pisar con un escalar` };
+    }
     json[key] = value === '' ? '' : value;
   }
-  return writeHostText(file, JSON.stringify(json, null, 2) + '\n');
+  return writeJsonDoc(file, json);
+  });
 }
 
 // --- agent instruction docs (AGENTS.md, CLAUDE.md, rules…) ---
@@ -2412,7 +2842,7 @@ export async function createAgentDoc(dir: string): Promise<{ ok: boolean; error?
   if (await hostExists(path)) return { ok: false, error: 'Ya existe un AGENTS.md' };
   const content=Buffer.from(AGENTS_MD_TEMPLATE(dir.split('/').pop() || 'Proyecto')).toString('base64');
   const script='import os,sys,base64; fd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o644); f=os.fdopen(fd,"wb"); f.write(base64.b64decode(sys.argv[2])); f.close()';
-  const result=await hostExec(`python3 -c ${shq(script)} ${shq(path)} ${shq(content)}`,{user:'user',timeoutMs:10_000});
+  const result=await hostExec(`${shq(process.env.AXON_AGENT_PYTHON || 'python3')} -c ${shq(script)} ${shq(path)} ${shq(content)}`,{user:'user',timeoutMs:10_000});
   const r={ok:result.ok,error:'No se pudo crear el documento. Verificá permisos y que no exista.'};
   if (r.ok) docsCache = null;
   return r.ok ? { ok: true, path } : { ok: false, error: r.error };
@@ -2420,12 +2850,50 @@ export async function createAgentDoc(dir: string): Promise<{ ok: boolean; error?
 
 // --- remote MCP health check ---
 
+// scanMcps scrubs url/detail for the browser (••• in userinfo, every query
+// value) — a health check must curl the REAL configured endpoint, so the raw
+// URL is re-derived server-side and never leaves this process.
+async function mcpEndpointRaw(def: AgentDef, key: string): Promise<string | undefined> {
+  const m = def.mcp;
+  if (!m) return undefined;
+  const pick = (s: Record<string, unknown> | undefined) =>
+    (s?.url ?? s?.serverUrl ?? s?.httpUrl) as string | undefined;
+  if (m.format === 'toml') {
+    const text = (await readText(m.paths()[0])) ?? '';
+    // Same key derivation as scanMcps — a bare `[mcp_servers.a.b]` subtable
+    // must not be confused with the quoted server `[mcp_servers."a.b"]`.
+    const sec = tomlSections(text).find((s) => {
+      if (!s.header.startsWith('mcp_servers.')) return false;
+      const rest = s.header.slice('mcp_servers.'.length);
+      return !tomlTableName(rest).isSub && tomlUnquote(rest) === key;
+    });
+    if (!sec) return undefined;
+    return sec.lines.slice(sec.start + 1, sec.end).join('\n').match(/^\s*url\s*=\s*"([^"]+)"/m)?.[1];
+  }
+  if (m.format === 'opencode') {
+    for (const p of m.paths()) {
+      const json = await readJsonFile(p);
+      const s = (json?.mcp as Record<string, unknown> | undefined)?.[key];
+      if (s && typeof s === 'object') return pick(s as Record<string, unknown>);
+    }
+    return undefined;
+  }
+  const json = await readJsonFile(m.paths()[0]);
+  if (!json) return undefined;
+  const { servers: serversKey, parked: parkedKey } = mcpKeys(m);
+  const s = ((json[serversKey] ?? {}) as Record<string, Record<string, unknown>>)[key]
+    ?? ((json[parkedKey] ?? {}) as Record<string, Record<string, unknown>>)[key];
+  return pick(s);
+}
+
 async function mcpHealth(def: AgentDef, key: string): Promise<{ ok: boolean; error?: string; url?: string; code?: number; ms?: number; alive?: boolean }> {
   const items = await scanMcps(def);
   const it = items.find((i) => i.key === key);
   if (!it) return { ok: false, error: `MCP "${key}" no encontrado` };
   if (!it.url) return { ok: false, error: 'MCP local (stdio) — no hay URL para chequear' };
-  const r = await hostExec(`curl -sS -o /dev/null -m 6 -w '%{http_code} %{time_total}' ${shq(it.url)} 2>/dev/null`, { user: 'user', timeoutMs: 12_000 });
+  const raw = await mcpEndpointRaw(def, key);
+  if (!raw || !/^https?:\/\//.test(raw)) return { ok: false, error: 'No se pudo leer la URL configurada del MCP' };
+  const r = await hostExec(`curl -sS -o /dev/null -m 6 -w '%{http_code} %{time_total}' ${shq(raw)} 2>/dev/null`, { user: 'user', timeoutMs: 12_000 });
   const [codeS, timeS] = r.stdout.trim().split(/\s+/);
   const code = parseInt(codeS, 10) || 0;
   const ms = Math.round((parseFloat(timeS) || 0) * 1000);
@@ -2489,8 +2957,13 @@ async function restoreBackup(def: AgentDef, bakPath: string): Promise<{ ok: bool
   const allowed = new Set(agentManagedFiles(def).map((f) => `${f}.axonbak`));
   if (!allowed.has(bakPath)) return { ok: false, error: 'Backup fuera de los archivos gestionados' };
   const src = bakPath.replace(/\.axonbak$/, '');
-  const r = await hostExec(`cp ${shq(bakPath)} ${shq(src)}`, { user: 'user', timeoutMs: 15_000 });
-  return r.ok ? { ok: true } : { ok: false, error: r.stderr.slice(0, 300) };
+  return withFileLocks([src], async () => {
+    // Copy to a temp sibling then rename — a failed/interrupted cp must not
+    // leave the live config truncated.
+    const tmp = `${src}.axonbak-tmp-${process.pid}-${Date.now().toString(36)}`;
+    const r = await hostExec(`cp ${shq(bakPath)} ${shq(tmp)} && mv -fT ${shq(tmp)} ${shq(src)}; rc=$?; rm -f ${shq(tmp)}; exit $rc`, { user: 'user', timeoutMs: 15_000 });
+    return r.ok ? { ok: true } : { ok: false, error: r.stderr.slice(0, 300) };
+  });
 }
 
 // --- friendly labels for known setting keys ---
@@ -2549,6 +3022,11 @@ async function fetchJsonSchema(url: string): Promise<Record<string, unknown> | n
   const r = await hostExec(`curl -fsSL --max-time 12 ${shq(url)} 2>/dev/null`, { user: 'user', timeoutMs: 18_000 });
   let data: Record<string, unknown> | null = null;
   try { if (r.ok && r.stdout) data = JSON.parse(r.stdout); } catch { /* bad schema json */ }
+  // Unbounded growth: config-declared $schema URLs are attacker-controlled.
+  if (schemaCache.size >= 64) {
+    const oldest = schemaCache.keys().next().value;
+    if (oldest !== undefined) schemaCache.delete(oldest);
+  }
   schemaCache.set(url, { at: Date.now(), data });
   return data;
 }
@@ -2618,6 +3096,13 @@ function flattenSecrets(obj: Record<string, unknown>, prefix: string, depth: num
 
 // --- routes ---
 
+// Bounded JSON body — readBody() streams with a 300 KB cap regardless of the
+// Content-Length header; failures degrade to {} so routes keep their existing
+// "missing field" 400 behavior.
+async function reqJson<T extends Record<string, unknown>>(c: Context): Promise<T> {
+  try { return (await readBody(c)) as T; } catch { return {} as T; }
+}
+
 export function registerAgentRoutes(app: Hono): void {
   registerAgentContext(app,H,()=>allDefs().flatMap(d=>{const label=(d.id+' '+d.name).toLowerCase(),agent=['codex','claude','gemini'].find(a=>label.includes(a));return agent?[{agent,root:d.configRoot()}]:[];}));
   registerAgentArchives(app, {
@@ -2628,9 +3113,12 @@ export function registerAgentRoutes(app: Hono): void {
   const changes: Record<string, string> = { settings: 'Configuración editada', toggle: 'Integración actualizada', delete: 'Integración eliminada', 'add-skill': 'Skill agregada', 'add-mcp': 'MCP agregado', 'restore-backup': 'Respaldo restaurado' };
   app.use('/api/agents/*', async (c, next) => {
     await next();
-    if (c.req.method !== 'GET' && c.res.status < 300) invalidateAgentsCache();
     const match = c.req.path.match(/^\/api\/agents\/([^/]+)\/([^/]+)$/);
-    if (c.req.method !== 'POST' || !match || !changes[match[2]] || c.res.status >= 300) return;
+    // only real mutations drop the cache — read-only POST probes (mcp-health,
+    // provider check) must not invalidate every cached agent snapshot
+    if (c.req.method !== 'POST' || !match || !changes[match[2]]) return;
+    if (c.res.status < 300) invalidateAgentsCache();
+    if (c.res.status >= 300) return;
     const def = agentById(match[1]);
     if (def) recordEvent('agent', `${def.name}: ${changes[match[2]]}`, undefined,
       { section: 'agents', params: { id: def.id, tab: ['settings','restore-backup'].includes(match[2]) ? 'config' : match[2]==='add-mcp' ? 'mcp' : 'skill' } });
@@ -2649,19 +3137,19 @@ export function registerAgentRoutes(app: Hono): void {
   });
 
   app.post('/api/agents-discovered/add', async (c) => {
-    const { name, dir, bin } = await c.req.json<{ name?: string; dir?: string; bin?: string }>().catch(() => ({} as { name?: string; dir?: string; bin?: string }));
+    const { name, dir, bin } = await reqJson<{ name?: string; dir?: string; bin?: string }>(c);
     const r = await addCustomAgent((name || '').trim(), (dir || '').trim().replace(/\/+$/, ''), (bin || '').trim());
     return r.ok ? c.json(r) : c.json({ ok: false, error: r.error }, 400);
   });
 
   app.post('/api/agents-discovered/dismiss', async (c) => {
-    const { dir } = await c.req.json<{ dir?: string }>().catch(() => ({} as { dir?: string }));
+    const { dir } = await reqJson<{ dir?: string }>(c);
     const r = await dismissCandidate((dir || '').trim().replace(/\/+$/, ''));
     return r.ok ? c.json(r) : c.json({ ok: false, error: r.error }, 400);
   });
 
   app.post('/api/agents-discovered/remove', async (c) => {
-    const { id } = await c.req.json<{ id?: string }>().catch(() => ({} as { id?: string }));
+    const { id } = await reqJson<{ id?: string }>(c);
     const r = await removeCustomAgent(id || '');
     return r.ok ? c.json(r) : c.json({ ok: false, error: r.error }, 400);
   });
@@ -2672,28 +3160,34 @@ export function registerAgentRoutes(app: Hono): void {
   });
 
   app.post('/api/agent-docs/create', async (c) => {
-    const { dir } = await c.req.json<{ dir?: string }>().catch(() => ({} as { dir?: string }));
+    const { dir } = await reqJson<{ dir?: string }>(c);
     const r = await createAgentDoc(dir || '');
     if(r.ok)recordEvent('agent','Documento de agente creado',r.path,{section:'agents',params:{id:'__docs'}});
     return r.ok ? c.json({ ok: true, path: r.path }) : c.json({ ok: false, error: r.error }, 400);
   });
 
   app.get('/api/agents-search', async (c) => {
-    const q = (c.req.query('q') || '').toLowerCase().trim();
+    const q = (c.req.query('q') || '').toLowerCase().trim().slice(0, 80);
     if (q.length < 2) return c.json({ ok: true, matches: [] });
-    const results: { agent: string; agentName: string; kind: string; key: string; name: string; enabled: boolean }[] = [];
-    await Promise.all(allDefs().map(async (def) => {
-      const hasBin = def.bin ? (await hostExec(`command -v ${def.bin}`, { user: 'user', timeoutMs: 10_000 })).ok : false;
-      const hasConfig = await hostExists(def.configRoot());
-      if (!hasBin && !hasConfig && !def.shared) return;
-      const [skills, mcps, plugins] = await Promise.all([scanSkills(def), scanMcps(def), scanPlugins(def)]);
-      for (const it of [...skills, ...mcps, ...plugins]) {
-        if (it.name.toLowerCase().includes(q) || it.key.toLowerCase().includes(q)) {
-          results.push({ agent: def.id, agentName: def.name, kind: it.kind, key: it.key, name: it.name, enabled: it.enabled });
+    // keystroke-heavy endpoint: TTL + single-flight via SnapshotCache keeps a
+    // burst of keystrokes from spawning a full fs scan per letter; the entry
+    // cap bounds the distinct queries remembered.
+    const matches = await searchCache.get(q, async () => {
+      const results: { agent: string; agentName: string; kind: string; key: string; name: string; enabled: boolean }[] = [];
+      await Promise.all(allDefs().map(async (def) => {
+        const hasBin = def.bin ? (await hostExec(`command -v ${def.bin}`, { user: 'user', timeoutMs: 10_000 })).ok : false;
+        const hasConfig = await hostExists(def.configRoot());
+        if (!hasBin && !hasConfig && !def.shared) return;
+        const [skills, mcps, plugins] = await Promise.all([scanSkills(def), scanMcps(def), scanPlugins(def)]);
+        for (const it of [...skills, ...mcps, ...plugins]) {
+          if (it.name.toLowerCase().includes(q) || it.key.toLowerCase().includes(q)) {
+            results.push({ agent: def.id, agentName: def.name, kind: it.kind, key: it.key, name: it.name, enabled: it.enabled });
+          }
         }
-      }
-    }));
-    return c.json({ ok: true, matches: results.slice(0, 40) });
+      }));
+      return results.slice(0, 40);
+    });
+    return c.json({ ok: true, matches });
   });
 
   app.get('/api/agents-matrix', async (c) => {
@@ -2704,7 +3198,7 @@ export function registerAgentRoutes(app: Hono): void {
   app.post('/api/agents/:id/mcp-health', async (c) => {
     const def = agentById(c.req.param('id'));
     if (!def) return c.json({ ok: false, error: 'Agente desconocido' }, 404);
-    const { key } = await c.req.json<{ key?: string }>().catch(() => ({} as { key?: string }));
+    const { key } = await reqJson<{ key?: string }>(c);
     const r = await mcpHealth(def, key || '');
     return r.ok ? c.json(r) : c.json(r, 400);
   });
@@ -2734,7 +3228,7 @@ export function registerAgentRoutes(app: Hono): void {
   app.post('/api/agents/:id/providers/:key/copy', async (c) => {
     const def = agentById(c.req.param('id'));
     if (!def) return c.json({ ok: false, error: 'Agente desconocido' }, 404);
-    const { target } = await c.req.json<{ target?: string }>().catch(() => ({} as { target?: string }));
+    const { target } = await reqJson<{ target?: string }>(c);
     if (!target) return c.json({ ok: false, error: 'Falta el agente destino' }, 400);
     const r = await copyProvider(def.id, c.req.param('key'), target);
     if (r.ok) { invalidateAgentsCache(); const destination=agentById(target);if(destination)recordEvent('agent',`${destination.name}: Provider copiado desde ${def.name}`,undefined,{section:'agents',params:{id:target,tab:'provider'}}); }
@@ -2750,7 +3244,7 @@ export function registerAgentRoutes(app: Hono): void {
   app.post('/api/agents/:id/restore-backup', async (c) => {
     const def = agentById(c.req.param('id'));
     if (!def) return c.json({ ok: false, error: 'Agente desconocido' }, 404);
-    const { path } = await c.req.json<{ path?: string }>().catch(() => ({} as { path?: string }));
+    const { path } = await reqJson<{ path?: string }>(c);
     const r = await restoreBackup(def, path || '');
     if (r.ok) { invalidateAgentsCache(); docsCache = null; }
     return r.ok ? c.json({ ok: true }) : c.json({ ok: false, error: r.error }, 400);
@@ -2767,7 +3261,7 @@ export function registerAgentRoutes(app: Hono): void {
   app.post('/api/agents/:id/settings', async (c) => {
     const def = agentById(c.req.param('id'));
     if (!def) return c.json({ ok: false, error: 'Agente desconocido' }, 404);
-    const { key, value } = await c.req.json<{ key: string; value: unknown }>().catch(() => ({ key: '', value: undefined }));
+    const { key, value } = await reqJson<{ key: string; value: unknown }>(c);
     const r = await setSetting(def, key || '', value);
     return r.ok ? c.json({ ok: true }) : c.json({ ok: false, error: r.error }, 400);
   });
@@ -2787,7 +3281,7 @@ export function registerAgentRoutes(app: Hono): void {
   app.post('/api/agents/:id/toggle', async (c) => {
     const def = agentById(c.req.param('id'));
     if (!def) return c.json({ ok: false, error: 'Agente desconocido' }, 404);
-    const { kind, key, enabled } = await c.req.json<{ kind: string; key: string; enabled: boolean }>().catch(() => ({ kind: '', key: '', enabled: false }));
+    const { kind, key, enabled } = await reqJson<{ kind: string; key: string; enabled: boolean }>(c);
     if (!okKey(key)) return c.json({ ok: false, error: 'Clave inválida' }, 400);
     const r =
       kind === 'mcp' ? await toggleMcp(def, key, !!enabled)
@@ -2801,7 +3295,7 @@ export function registerAgentRoutes(app: Hono): void {
   app.post('/api/agents/:id/delete', async (c) => {
     const def = agentById(c.req.param('id'));
     if (!def) return c.json({ ok: false, error: 'Agente desconocido' }, 404);
-    const { kind, key } = await c.req.json<{ kind: string; key: string }>().catch(() => ({ kind: '', key: '' }));
+    const { kind, key } = await reqJson<{ kind: string; key: string }>(c);
     if (!okKey(key)) return c.json({ ok: false, error: 'Clave inválida' }, 400);
     const r = await deleteItem(def, kind, key);
     if (r.ok) invalidateAgentsCache();
@@ -2811,7 +3305,7 @@ export function registerAgentRoutes(app: Hono): void {
   app.post('/api/agents/:id/add-skill', async (c) => {
     const def = agentById(c.req.param('id'));
     if (!def) return c.json({ ok: false, error: 'Agente desconocido' }, 404);
-    const { name, desc, body } = await c.req.json<{ name: string; desc?: string; body?: string }>().catch(() => ({ name: '', ids: undefined as string[] | undefined, desc: undefined as string | undefined, body: undefined as string | undefined, url: undefined as string | undefined, command: undefined as string | undefined, args: undefined as string | undefined }));
+    const { name, desc, body } = await reqJson<{ name: string; desc?: string; body?: string }>(c);
     const r = await addSkill(def, name || '', desc || '', body || '');
     if (r.ok) invalidateAgentsCache();
     return r.ok ? c.json({ ok: true }) : c.json({ ok: false, error: r.error }, 400);
@@ -2820,7 +3314,7 @@ export function registerAgentRoutes(app: Hono): void {
   app.post('/api/agents/:id/add-mcp', async (c) => {
     const def = agentById(c.req.param('id'));
     if (!def) return c.json({ ok: false, error: 'Agente desconocido' }, 404);
-    const { name, url, command, args } = await c.req.json<{ name: string; url?: string; command?: string; args?: string }>().catch(() => ({ name: '', ids: undefined as string[] | undefined, desc: undefined as string | undefined, body: undefined as string | undefined, url: undefined as string | undefined, command: undefined as string | undefined, args: undefined as string | undefined }));
+    const { name, url, command, args } = await reqJson<{ name: string; url?: string; command?: string; args?: string }>(c);
     const r = await addMcp(def, name || '', url || '', command || '', args || '');
     if (r.ok) invalidateAgentsCache();
     return r.ok ? c.json({ ok: true }) : c.json({ ok: false, error: r.error }, 400);

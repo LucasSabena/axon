@@ -165,8 +165,16 @@
   border: 1px solid var(--border);
 }
 #tab-compose .cp-banner-ok { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
-#tab-compose .cp-banner-warn { background: var(--danger-soft); color: var(--danger); }
+/* Warnings no son errores: usan los tokens de advertencia, no los de danger. */
+#tab-compose .cp-banner-warn { background: var(--warn-soft); color: var(--warn); }
 #tab-compose .cp-banner-err { background: var(--danger-soft); color: var(--danger); border-color: var(--danger); }
+
+#tab-compose .cp-dirty-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--warn);
+  display: inline-block; flex-shrink: 0;
+  margin-left: -4px; /* queda pegada a la ruta */
+}
 
 #cp-ed-text {
   flex: 1; min-height: 40vh; resize: none;
@@ -200,12 +208,21 @@
   white-space: pre-wrap; word-break: break-word;
 }
 
-/* ---------- Fallback job modal ---------- */
-#tab-compose .cp-comparison { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; flex:1; min-height:0; overflow:auto; }
-#tab-compose .cp-comparison section { display:flex; flex-direction:column; min-width:0; min-height:160px; }
-#tab-compose .cp-comparison h3 { font-size:0.84rem; margin:0 0 8px; }
+/* ---------- Diff (comparar borrador) ---------- */
+#tab-compose .cp-comparison { display:flex; flex-direction:column; gap:8px; flex:1; min-height:0; }
+#tab-compose .cp-diff-title { font-size:0.84rem; margin:0; flex-shrink:0; }
+#tab-compose .cp-diff { flex:1; min-height:160px; }
+#tab-compose .cp-diff span { display:block; white-space:pre-wrap; word-break:break-word; }
+#tab-compose .cp-diff-add { background: var(--ok-soft); color: var(--ok); }
+#tab-compose .cp-diff-del { background: var(--danger-soft); color: var(--danger); }
+#tab-compose .cp-diff-ctx { color: var(--text-faint); }
+#tab-compose .cp-diff-fold { display:block; color: var(--text-faint); font-style:italic; padding:2px 0; }
 #tab-compose .cp-comparison pre:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
-@media(max-width:640px) { #tab-compose .cp-comparison { grid-template-columns:minmax(0,1fr); } }
+#tab-compose .cp-expiry { font-size:0.78rem; color:var(--warn); margin:2px 0; }
+#tab-compose .cp-svc-actions { white-space:nowrap; }
+#tab-compose .cp-svc-actions .btn-inline { padding:3px 8px; font-size:0.74rem; margin-right:4px; }
+
+/* ---------- Fallback job modal ---------- */
 .cp-modal .cp-job-log {
   font-family: var(--font-mono);
   font-size: 0.74rem; line-height: 1.45;

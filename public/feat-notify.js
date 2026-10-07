@@ -60,6 +60,8 @@
   document.addEventListener('click',e=>{if(open&&!panel.contains(e.target)&&!bell.contains(e.target)&&!e.target.closest('.modal'))toggle(false);});
   document.addEventListener('keydown',e=>{if(e.key==='Escape'&&open)toggle(false);});
   addEventListener('resize',()=>{if(open)position();});
+  // The panel is position:fixed — keep it anchored to the bell while the page scrolls.
+  addEventListener('scroll',()=>{if(open)position();},{capture:true,passive:true});
   function connect(){
     if(!signedIn||stream)return;
     stream=new EventSource('/api/events/stream');

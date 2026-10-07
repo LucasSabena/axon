@@ -1,7 +1,9 @@
 // Build-time stamp; only versioned vendor assets are cached per release.
-const CACHE = 'axon-1102fbc1dafc';
+const CACHE = 'axon-bfcc884f7596';
 
-self.addEventListener('install', (e) => e.waitUntil(self.skipWaiting()));
+// A new release stays "waiting" until the user accepts the reload bar —
+// swapping the shell mid-session could strand open edits and jobs.
+self.addEventListener('message', (e) => { if (e.data === 'axon:skip-waiting') self.skipWaiting(); });
 self.addEventListener('activate', (e) => e.waitUntil(
   caches.keys().then(keys => Promise.all(keys.filter(k => k.startsWith('axon-') && k !== CACHE).map(k => caches.delete(k)))).then(() => clients.claim())
 ));
@@ -12,8 +14,11 @@ const OFFLINE_HTML = `<!doctype html><html lang="es"><head><meta charset="utf-8"
 <style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#080c10;color:#c9d4de;font-family:system-ui,sans-serif;text-align:center}
 .c{max-width:26rem;padding:2rem}.spin{width:32px;height:32px;margin:0 auto 1rem;border:3px solid #26323d;border-top-color:#5ea1ff;border-radius:50%;animation:s 1s linear infinite}
 @keyframes s{to{transform:rotate(360deg)}}p{line-height:1.5;color:#8b99a7}</style></head>
-<body><div class="c"><div class="spin"></div><p id="m">Axon no responde — probablemente se está actualizando. Reintentando automáticamente…</p></div>
-<script>setTimeout(()=>location.reload(),5000)</script></body></html>`;
+<body><div class="c"><div class="spin"></div><p id="m">Axon no responde — probablemente se está actualizando. Reintentando automáticamente…</p>
+<button onclick="location.reload()" style="margin-top:1rem;padding:8px 18px;border:1px solid #26323d;border-radius:8px;background:transparent;color:#c9d4de;font:inherit;cursor:pointer">Reintentar ahora</button></div>
+<script>// Backoff exponencial (1.5s→24s, tope 30s) persistente entre recargas.
+var n=0;try{n=+sessionStorage.getItem('axon:offline-retry')||0;sessionStorage.setItem('axon:offline-retry',n+1)}catch(e){}
+setTimeout(function(){location.reload()},Math.min(1500*Math.pow(2,n),30000))</script></body></html>`;
 
 const offlinePage = () => new Response(OFFLINE_HTML, { status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
 

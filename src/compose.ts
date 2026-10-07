@@ -1,14 +1,14 @@
 import { resolveHostPath, projectSearchRoots } from './host-storage';
 import { Hono } from 'hono';
-import { $ } from 'bun';
-import { hostExec, hostSpawnInteractive, hostToContainer, containerToHost, HOST_USER } from './host';
-import { runJob } from './jobs';
-import { ComposeDrafts } from './compose-drafts';
+import { hostExec, hostToContainer, containerToHost, HOST_USER } from './host';
+import { runJob, cancelJob } from './jobs';
+import { ComposeDrafts, composeSyntax } from './compose-drafts';
 import {ComposeReleases} from './compose-releases';
+import {MaintenanceError} from './storage/types';
 import {actor,textField} from './storage/http';
 import { hash } from './storage/policy';
 import { protect, body as maintenanceBody, only } from './storage/http';
-import { realpath, stat, open } from 'node:fs/promises';
+import { realpath, stat, open, readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 
 // ---------------------------------------------------------------------------
@@ -65,8 +65,24 @@ async function resolveComposePath(input: string | undefined | null): Promise<{ p
     return { error: 'Ruta inválida' };
   }
   if (!/\.ya?ml$/i.test(p)) return { error: 'Solo se aceptan archivos .yml / .yaml' };
+  // Los stacks viven en homes, /opt o discos montados — un *.yml bajo árboles
+  // del sistema (/etc/cloud.cfg, /usr/lib/…yaml) no es un compose editable.
+  if (/^\/(etc|usr|boot|bin|sbin|lib|lib64|proc|sys|dev|run)(\/|$)/.test(p)) {
+    return { error: 'La ruta está bajo un directorio del sistema; Compose solo edita stacks en homes, /opt o discos montados' };
+  }
 
-  try{return {path:await resolveHostPath(p)};}catch(e){return {error:e instanceof Error?e.message:'Ruta inválida'};}
+  try {
+    const resolved = await resolveHostPath(p);
+    // Re-check on the REAL path: a symlinked `x.yaml` may resolve to a file
+    // with any extension; reads below hit the resolved target, not `p`.
+    if (!/\.ya?ml$/i.test(resolved)) return { error: 'Solo se aceptan archivos .yml / .yaml' };
+    if (/^\/(etc|usr|boot|bin|sbin|lib|lib64|proc|sys|dev|run)(\/|$)/.test(resolved)) {
+      return { error: 'La ruta real está bajo un directorio del sistema' };
+    }
+    return { path: resolved };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : 'Ruta inválida' };
+  }
 }
 
 // Resolve the real location of a host path (for dedup); falls back to the input.
@@ -78,51 +94,104 @@ async function resolveReal(p: string): Promise<string> {
   }
 }
 
-// Write text to a host path. The host fs is mounted read-only at /hostfs, so
-// bytes are streamed through stdin of a host-side `cat > dest` (nsenter).
-async function writeHostFile(
-  hostPath: string,
-  buf: Buffer
-): Promise<{ ok: boolean; error?: string; detail?: string }> {
+// Run a docker subcommand: in-container CLI first, host fallback ONLY when the
+// in-container CLI is missing (exit 127 / "command not found") — a real exit≠0
+// from the daemon or the compose file is a definitive answer, and retrying it
+// blindly on the host would just double the failure (and once duplicated a
+// wedged-daemon timeout into a second hang).
+// `stdin` feeds the in-container spawn directly; on the host path the content
+// travels base64-encoded inside the command line (bounded by callers to 256KB).
+async function dockerSpawn(
+  containerArgv: string[],
+  hostCmd: string,
+  opts: { stdin?: string; timeoutMs?: number } = {}
+): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  let timedOut = false;
+  const hostFallback = async (stderr: string): Promise<{ ok: boolean; stdout: string; stderr: string }> => {
+    const feed = opts.stdin !== undefined ? `printf %s ${shq(Buffer.from(opts.stdin, 'utf8').toString('base64'))} | base64 -d | ` : '';
+    const hostRes = await hostExec(`${feed}${hostCmd}`, { user: 'user', timeoutMs: 60_000 });
+    if (hostRes.ok) return { ok: true, stdout: hostRes.stdout, stderr: hostRes.stderr };
+    return { ok: false, stdout: '', stderr: `${stderr} | host: ${hostRes.stderr || hostRes.stdout || `exit ${hostRes.code}`}` };
+  };
+  let proc: ReturnType<typeof Bun.spawn>;
   try {
-    const proc = hostSpawnInteractive(`cat > ${shq(hostPath)}`, { user: 'user' });
-    const stdin = proc.stdin as {
-      write(d: Uint8Array | string): number | Promise<number>;
-      flush(): number | Promise<number>;
-      end(): void;
-    };
-    try {
-      for (let off = 0; off < buf.length; off += 1 << 20) {
-        await stdin.write(buf.subarray(off, off + (1 << 20)));
-      }
-      await stdin.flush();
-    } catch { /* shell may have failed the redirect — report below */ }
-    try { stdin.end(); } catch { /* already closed */ }
-    const [code, stderr] = await Promise.all([
-      proc.exited,
+    proc = Bun.spawn(containerArgv, {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      ...(opts.stdin !== undefined ? { stdin: new Blob([opts.stdin]) } : {}),
+    });
+  } catch (e) {
+    // The docker binary is absent in-container (ENOENT) — host fallback.
+    return hostFallback(`spawn: ${e instanceof Error ? e.message : e}`);
+  }
+  const timer = setTimeout(() => {
+    timedOut = true;
+    try { proc.kill('SIGKILL'); } catch { /* already gone */ }
+  }, opts.timeoutMs ?? 15_000);
+  try {
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(proc.stdout as ReadableStream<Uint8Array>).text(),
       new Response(proc.stderr as ReadableStream<Uint8Array>).text(),
+      proc.exited,
     ]);
-    if (code === 0) return { ok: true };
-    return {
-      ok: false,
-      error: 'No se pudo escribir el archivo',
-      detail: stderr.trim().slice(0, 500) || `exit ${code}`,
-    };
-  } catch (err) {
-    return { ok: false, error: 'No se pudo escribir el archivo', detail: String(err) };
+    if (code === 0) return { ok: true, stdout, stderr };
+    const missing = !timedOut && (code === 127 || /command not found|: not found|no such file/i.test(stderr));
+    if (!missing) return { ok: false, stdout, stderr };
+    return hostFallback(stderr);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
-// Run a docker subcommand: in-container CLI first, host fallback.
-// (Copy of the helper in src/docker-ops.ts.)
-async function dockerCmd(cmd: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-  const res = await $`bash -c ${'docker ' + cmd}`.quiet().nothrow();
-  const stdout = res.stdout.toString();
-  const stderr = res.stderr.toString();
-  if (res.exitCode === 0) return { ok: true, stdout, stderr };
-  const hostRes = await hostExec(`docker ${cmd}`, { user: 'user', timeoutMs: 60_000 });
-  if (hostRes.ok) return { ok: true, stdout: hostRes.stdout, stderr: hostRes.stderr };
-  return { ok: false, stdout, stderr: `${stderr} | host: ${hostRes.stderr || hostRes.stdout || `exit ${hostRes.code}`}` };
+async function dockerCmd(cmd: string, opts: { stdin?: string; timeoutMs?: number } = {}): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  return dockerSpawn(['bash', '-c', `docker ${cmd}`], `docker ${cmd}`, opts);
+}
+
+// `docker compose` on a file that exists on the HOST: in-container the same
+// file is reachable via the read-only /hostfs mount (fine for read-only
+// subcommands like config/ps); the hostExec fallback gets the real path.
+// `args` must be literal-safe (no quoting needed) — only call sites below.
+async function dockerComposeFile(hostPath: string, args: string[], opts: { timeoutMs?: number } = {}): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  return dockerSpawn(['docker', 'compose', '-f', hostToContainer(hostPath), ...args], `docker compose -f ${shq(hostPath)} ${args.join(' ')}`, opts);
+}
+
+// `docker compose config -q` on arbitrary YAML text piped via stdin. The
+// project directory is passed explicitly so env_file/relative paths resolve
+// against the real stack dir (via /hostfs in-container).
+async function dockerComposeCheck(hostPath: string, content: string, extra: string[] = []): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  const dir = path.posix.dirname(hostPath);
+  return dockerSpawn(
+    ['docker', 'compose', '-f', '-', '--project-directory', hostToContainer(dir), ...extra],
+    `docker compose -f - --project-directory ${shq(dir)} ${extra.join(' ')}`,
+    { stdin: content, timeoutMs: 45_000 }
+  );
+}
+
+// Env keys whose rendered values must never leave the process (interpolated
+// secrets). Covers `KEY: value` (map form) and `- KEY=value` (list form).
+const SENSITIVE_KEY = /(?:^|_)(?:PASSWORD|PASSWD|PASS|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY|SECRET_?KEY|CREDENTIALS?|AUTH|SESSION_?KEY|CERT|PWD)(?:_|$)/i;
+function maskSecrets(yamlText: string): string {
+  return yamlText
+    .split('\n')
+    .map((line) => {
+      const m = line.match(/^(\s*-?\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*[:=]\s*)(.*?)\s*(#.*)?$/);
+      if (!m || !SENSITIVE_KEY.test(m[2])) return line;
+      const val = (m[4] || '').trim();
+      // Already a placeholder (${VAR}) or empty/null — nothing to hide.
+      if (!val || val === 'null' || val === '~' || /^\$\{?/.test(val)) return line;
+      return `${m[1]}${m[2]}${m[3]}********`;
+    })
+    .join('\n');
+}
+
+// Líneas WARN que docker compose emite por stderr (env vars sin definir, etc).
+function dockerWarnings(stderr: string): string[] {
+  return stderr
+    .split('\n')
+    .map((s) => s.trim())
+    .filter((s) => /^WARN\b|level=warn/i.test(s))
+    .map((s) => s.replace(/^WARN\[\d+\]\s*/, '').replace(/level=warning msg="/, '').replace(/"$/, ''))
+    .slice(0, 20);
 }
 
 interface ComposeService {
@@ -150,25 +219,35 @@ interface ComposeProject {
 }
 
 function labelVal(labels: string, key: string): string {
-  // Labels arrive as a comma-joined `k=v,k=v` string; values stop at the next
-  // comma (config_files is itself comma-separated, so this yields the first).
-  return labels.match(new RegExp(`${key.replace(/\./g, '\\.')}=([^,]+)`))?.[1] || '';
+  // Labels arrive as a comma-joined `k=v,k=v` string; a value containing a
+  // comma cannot survive that format, so the label is skipped rather than
+  // returning a truncated (possibly hostile) prefix.
+  const m = labels.match(new RegExp(`(?:^|,)${key.replace(/\./g, '\\.')}=([^,]*)`));
+  return m?.[1] || '';
 }
 
-// Cheap YAML skim: service names = 2-space keys under a top-level `services:`.
-// Only used to decorate dormant stacks; preview/validation use `docker compose`.
+// Cheap YAML skim: service names = keys one indent level below a top-level
+// `services:`. Only used to decorate dormant stacks; preview/validation use
+// `docker compose`. Indent width is not fixed (2 vs 4 spaces) and keys may
+// be quoted.
 function parseServiceNames(yaml: string): string[] {
   const names: string[] = [];
   let inServices = false;
+  let svcIndent = -1;
   for (const line of yaml.split('\n')) {
-    if (/^services:\s*(#.*)?$/.test(line)) {
+    if (/^services\s*:\s*(#.*)?$/.test(line)) {
       inServices = true;
       continue;
     }
     if (!inServices) continue;
     if (/^\S/.test(line) && line.trim()) break; // next top-level key
-    const m = line.match(/^ {2}([A-Za-z0-9_.-]+):\s*(#.*)?$/);
-    if (m) names.push(m[1]);
+    // Any `key:` at the first indent under `services:` is a service name —
+    // inline values (`web: {}`) and quoted keys count too.
+    const m = line.match(/^(\s+)(?:["']([A-Za-z0-9_.-]+)["']|([A-Za-z0-9_.-]+))\s*:\s*(?:\S.*)?$/);
+    if (!m) continue;
+    const indent = m[1].replace(/\t/g, '  ').length;
+    if (svcIndent < 0) svcIndent = indent;
+    if (indent === svcIndent) names.push(m[2] || m[3]);
   }
   return names;
 }
@@ -235,6 +314,9 @@ interface ComposeDeps {
   releases?: ComposeReleases;
   getNotes?: () => Record<string, string> | undefined;
   setNote?: (key: string, note: string) => Promise<void> | void;
+  // Reports a running/interrupted compose release — lifecycle ops must not
+  // interleave with a worker's `docker compose` calls.
+  busyGuard?: () => Promise<string | null> | string | null;
 }
 
 async function readHead(hostPath: string, maxBytes: number): Promise<string> {
@@ -270,9 +352,10 @@ export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
     // replace it with a fallback below if the layout isn't recognized.
     const [ps, findRes, memById] = await Promise.all([
       dockerCmd(`ps -a --format '{{json .}}'`),
+      // head -41 (uno más que el cap) para detectar e informar el truncado.
       projectSearchRoots([await homeDir(),'/opt']).then((roots) =>
         hostExec(
-          `find ${roots.map(shq).join(' ')||'/nonexistent'} -maxdepth 4 \\( -name node_modules -o -name .git \\) -prune -o -type f \\( -name 'docker-compose.y*ml' -o -name 'compose.y*ml' \\) -print 2>/dev/null | head -40`,
+          `find ${roots.map(shq).join(' ')||'/nonexistent'} -maxdepth 4 \\( -name node_modules -o -name .git \\) -prune -o -type f \\( -name 'docker-compose.y*ml' -o -name 'compose.y*ml' \\) -print 2>/dev/null | head -41`,
           { user: 'user', timeoutMs: 15_000 }
         )
       ),
@@ -292,8 +375,9 @@ export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
           const service = labelVal(labels, 'com.docker.compose.service');
           const workingDir = labelVal(labels, 'com.docker.compose.project.working_dir');
           const configRaw = labelVal(labels, 'com.docker.compose.project.config_files');
-          // config_files is a list of yml paths (comma- or colon-separated) — take first.
-          const configFile = configRaw.split(/[,:]/).map((f) => f.trim()).filter(Boolean)[0] || '';
+          // config_files is a comma-separated list of yml paths — take the
+          // first. Never split on ':' — it corrupts paths containing one.
+          const configFile = configRaw.split(',').map((f) => f.trim()).filter(Boolean)[0] || '';
 
           const g = projects.get(project) || {
             project,
@@ -319,43 +403,65 @@ export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
     }
 
     // 2) Dormant stacks: compose files on disk with no containers. Searched
-    // under $HOME and /opt (find -maxdepth 3, node_modules/.git pruned),
+    // under $HOME and /opt (find -maxdepth 4, node_modules/.git pruned),
     // capped at 40 hits.
-    const found = findRes.ok ? findRes.stdout.split('\n').map((s) => s.trim()).filter(Boolean).slice(0, 40) : [];
+    const foundLines = findRes.ok ? findRes.stdout.split('\n').map((s) => s.trim()).filter(Boolean) : [];
+    const filesTruncated = foundLines.length > 40;
+    const found = foundLines.slice(0, 40);
 
-    for (const f of found) {
-      try {
-        // Must still pass the same allowlist the editor enforces.
-        const r = await resolveComposePath(f);
-        if (!r.path) continue;
-        const real = await resolveReal(r.path);
-        if (knownFiles.has(real)) continue;
-        // Skip files that already belong to a container-derived project.
-        let dup = false;
-        for (const p of projects.values()) {
-          if (p.configFile && (await resolveReal(p.configFile)) === real) { dup = true; break; }
-        }
-        if (dup) continue;
-        knownFiles.add(real);
+    // Resolve + realpath every candidate in parallel (was sequential per file:
+    // ~2 syscalls × 40 files added noticeable latency to the panel load).
+    const candidates = (
+      await Promise.all(
+        found.map(async (f) => {
+          try {
+            // Must still pass the same allowlist the editor enforces.
+            const r = await resolveComposePath(f);
+            if (!r.path) return null;
+            return { real: await resolveReal(r.path) };
+          } catch {
+            return null;
+          }
+        })
+      )
+    ).filter((x): x is { real: string } => !!x);
 
-        const workingDir = path.posix.dirname(real);
-        const head = await readHead(real, 64 * 1024);
-        const services = parseServiceNames(head).map((name) => ({
-          name,
-          container: '',
-          status: 'stopped',
-        }));
-        projects.set(`disk:${real}`, {
-          project: path.posix.basename(workingDir),
-          workingDir,
-          configFile: real,
-          services,
-          path: real,
-          source: 'disk',
-          description: parseDescription(head) || undefined,
-        });
-      } catch { /* unreadable / vanished file — skip */ }
+    // Real paths of container-derived projects, resolved once in parallel.
+    const projectReals = new Set(
+      await Promise.all(
+        [...projects.values()].map((p) => (p.configFile ? resolveReal(p.configFile) : Promise.resolve('')))
+      )
+    );
+
+    const accepted: string[] = [];
+    for (const c of candidates) {
+      if (knownFiles.has(c.real) || projectReals.has(c.real)) continue;
+      knownFiles.add(c.real);
+      accepted.push(c.real);
     }
+
+    await Promise.all(
+      accepted.map(async (real) => {
+        try {
+          const workingDir = path.posix.dirname(real);
+          const head = await readHead(real, 64 * 1024);
+          const services = parseServiceNames(head).map((name) => ({
+            name,
+            container: '',
+            status: 'stopped',
+          }));
+          projects.set(`disk:${real}`, {
+            project: path.posix.basename(workingDir),
+            workingDir,
+            configFile: real,
+            services,
+            path: real,
+            source: 'disk',
+            description: parseDescription(head) || undefined,
+          });
+        } catch { /* unreadable / vanished file — skip */ }
+      })
+    );
 
     // 3) Decorate: live memory per container + file-derived descriptions.
     // cgroup gives full ids; `docker ps` shows the 12-char prefix — match by
@@ -383,28 +489,36 @@ export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
         }
       }
     }
-    for (const p of projects.values()) {
-      let total = 0;
-      for (const s of p.services) {
-        const mem = s.container ? memByName.get(s.container) : null;
-        if (mem) { s.mem = mem.text; s.memBytes = mem.bytes; total += mem.bytes; }
-      }
-      if (total > 0) { p.memBytes = total; p.mem = fmtBytes(total); }
-      if (!p.description && p.configFile) {
-        const head = await readHead(p.configFile, 32 * 1024);
-        const d = parseDescription(head);
-        if (d) p.description = d;
-      }
-      const key = p.configFile || p.path;
-      if (key && notes[key]) p.note = notes[key];
-    }
+    await Promise.all(
+      [...projects.values()].map(async (p) => {
+        let total = 0;
+        for (const s of p.services) {
+          const mem = s.container ? memByName.get(s.container) : null;
+          if (mem) { s.mem = mem.text; s.memBytes = mem.bytes; total += mem.bytes; }
+        }
+        if (total > 0) { p.memBytes = total; p.mem = fmtBytes(total); }
+        if (!p.description && p.configFile) {
+          // configFile comes from a container label — forged values could point
+          // at any host file whose head would leak via this API. Only read it
+          // when it passes the same mount-aware policy as editor paths.
+          const vr = await resolveComposePath(p.configFile).catch(() => ({ path: undefined }));
+          if (vr.path) {
+            const head = await readHead(vr.path, 32 * 1024);
+            const d = parseDescription(head);
+            if (d) p.description = d;
+          }
+        }
+        const key = p.configFile || p.path;
+        if (key && notes[key]) p.note = notes[key];
+      })
+    );
 
     const list = Array.from(projects.values()).sort((a, b) => {
       const ra = a.services.some((s) => s.status === 'running') ? 0 : 1;
       const rb = b.services.some((s) => s.status === 'running') ? 0 : 1;
       return ra - rb || a.project.localeCompare(b.project);
     });
-    return c.json({ ok: true, projects: list, dockerError });
+    return c.json({ ok: true, projects: list, dockerError, filesTruncated });
   });
 
   // ---------- User note per stack ({key: compose file path, note}) ----------
@@ -491,6 +605,46 @@ export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
     return c.json({ok:true,...deps.drafts.discard(body.path,body.revision)});
   });
 
+  // ---------- Docker-validate a draft / arbitrary content via stdin ----------
+  app.post('/api/compose/validate', async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const r = await resolveComposePath(body?.path);
+    if (!r.path) return fail(c, 403, r.error!);
+    // Prioridad: contenido enviado (editor sin guardar) > borrador > disco.
+    let content: string;
+    let source: 'editor' | 'borrador' | 'disco';
+    if (typeof body?.content === 'string') {
+      if (Buffer.byteLength(body.content, 'utf8') > MAX_SAVE_BYTES) {
+        return fail(c, 413, `El contenido supera el límite de ${MAX_SAVE_BYTES / 1024} KB`);
+      }
+      content = body.content;
+      source = 'editor';
+    } else {
+      const draft = deps.drafts?.get(r.path);
+      if (draft) {
+        content = draft.content;
+        source = 'borrador';
+      } else {
+        content = await readHead(r.path, MAX_READ_BYTES + 1);
+        source = 'disco';
+        if (Buffer.byteLength(content, 'utf8') > MAX_READ_BYTES) return fail(c, 413, 'El archivo es demasiado grande');
+        if (!content.trim()) return fail(c, 404, 'El archivo está vacío o no se pudo leer');
+      }
+    }
+    const local = composeSyntax(content);
+    if (!local.ok) return c.json({ ok: true, valid: false, source, error: local.error, warnings: [], services: [] });
+    const res = await dockerComposeCheck(r.path, content, ['config', '-q']);
+    const warnings = dockerWarnings(res.stderr);
+    return c.json({
+      ok: true,
+      valid: res.ok,
+      source,
+      error: res.ok ? undefined : (res.stderr || res.stdout || 'docker compose config falló').trim().slice(0, 4000),
+      warnings,
+      services: local.services,
+    });
+  });
+
   // ---------- Preview: rendered config + service status ----------
   app.post('/api/compose/preview', async (c) => {
     let body: any;
@@ -503,18 +657,45 @@ export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
     if (!r.path) return fail(c, 403, r.error!);
 
     const draft = deps.drafts?.preview(r.path, await readHead(r.path, MAX_READ_BYTES));
-    if (draft) return c.json({ok: true, path: r.path, draft: true, rendered: draft.after, renderedTruncated: false,
-      services: draft.draft.services.map(name => ({name, status: 'borrador', image: '', ports: '', container: ''})),
-      error: 'Borrador de Axon, todavía sin aplicar. ' + draft.blockers.join(' '),
-      before: draft.before, changedOnHost: draft.changedOnHost});
+    if (draft) {
+      // El borrador no existe en el host: se valida/renderiza vía stdin.
+      // `--no-interpolate` evita expandir secrets del entorno; maskSecrets
+      // cubre los valores hardcodeados.
+      const [check, render] = await Promise.all([
+        dockerComposeCheck(r.path, draft.after, ['config', '-q']),
+        dockerComposeCheck(r.path, draft.after, ['config', '--no-interpolate']),
+      ]);
+      const renderedRaw = render.ok ? render.stdout : '';
+      return c.json({
+        ok: true,
+        path: r.path,
+        draft: true,
+        rendered: render.ok ? maskSecrets(renderedRaw.slice(0, MAX_RENDER_BYTES)) : draft.after,
+        renderedTruncated: render.ok && render.stdout.length > MAX_RENDER_BYTES,
+        dockerValidated: check.ok,
+        services: draft.draft.services.map(name => ({name, status: 'borrador', image: '', ports: '', container: ''})),
+        warnings: dockerWarnings(check.stderr),
+        error: (check.ok ? '' : (check.stderr || 'docker compose config falló').trim().slice(0, 4000) + '\n')
+          + 'Borrador de Axon, todavía sin aplicar. ' + draft.blockers.join(' '),
+        before: draft.before,
+        changedOnHost: draft.changedOnHost,
+      });
+    }
 
-    const cfg = await dockerCmd(`compose -f ${shq(r.path)} config`);
-    const rendered = cfg.stdout.slice(0, MAX_RENDER_BYTES);
+    // `config -q` valida interpolando (detecta env faltantes) sin volcarlas;
+    // `--no-interpolate` produce la salida visible sin expandir secrets.
+    const [cfg, check, psRes] = await Promise.all([
+      dockerComposeFile(r.path, ['config', '--no-interpolate'], { timeoutMs: 45_000 }),
+      dockerComposeFile(r.path, ['config', '-q'], { timeoutMs: 45_000 }),
+      dockerComposeFile(r.path, ['ps', '--format', 'json'], { timeoutMs: 30_000 }),
+    ]);
+    const renderedRaw = cfg.stdout.slice(0, MAX_RENDER_BYTES);
+    const rendered = maskSecrets(renderedRaw);
     const renderedTruncated = cfg.stdout.length > MAX_RENDER_BYTES;
+    const warnings = dockerWarnings(check.stderr);
 
     // Service status rows — `ps --format json` emits a JSON array on newer
     // compose and one JSON object per line on older versions.
-    const psRes = await dockerCmd(`compose -f ${shq(r.path)} ps --format json`);
     const byService = new Map<string, any>();
     if (psRes.ok && psRes.stdout.trim()) {
       const raw = psRes.stdout.trim();
@@ -544,11 +725,15 @@ export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
       }
     }
 
-    // Declared services so dormant stacks still show a table.
-    const declared: string[] = [];
-    const svcRes = cfg.ok ? await dockerCmd(`compose -f ${shq(r.path)} config --services`) : { ok: false, stdout: '' };
-    if (svcRes.ok) {
-      for (const n of svcRes.stdout.split('\n').map((s) => s.trim()).filter(Boolean)) declared.push(n);
+    // Declared services so dormant stacks still show a table. Parsed from the
+    // RAW render (before masking — masked values could break YAML); if that
+    // fails, fall back to `config --services`.
+    let declared: string[] = cfg.ok ? composeSyntax(renderedRaw).services : [];
+    if (!declared.length && cfg.ok) {
+      const svcRes = await dockerComposeFile(r.path, ['config', '--services']);
+      if (svcRes.ok) {
+        for (const n of svcRes.stdout.split('\n').map((s) => s.trim()).filter(Boolean)) declared.push(n);
+      }
     }
     const services = declared.length
       ? declared.map((name) => byService.get(name) || { name, container: '', image: '', ports: '', status: '', statusText: '' })
@@ -560,15 +745,93 @@ export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
       rendered,
       renderedTruncated,
       services,
-      error: cfg.ok ? undefined : (cfg.stderr || cfg.stdout || 'docker compose config falló').trim().slice(0, 4000),
+      warnings,
+      error: check.ok ? undefined : (check.stderr || check.stdout || 'docker compose config falló').trim().slice(0, 4000),
     });
   });
 
   // ---------- Job-runnable lifecycle ops ----------
+
+  // Per-path mutex: concurrent up/down/pull on the same compose file can
+  // interleave docker operations. The Job object is mutated in place by the
+  // runner, so `status` here reflects live state.
+  const lifecycleLocks = new Map<string, ReturnType<typeof runJob>>();
+  // Jobs emitidos por este módulo — la cancelación solo puede tocar estos.
+  const composeJobIds = new Set<string>();
+
+  function pruneLifecycle() {
+    if (lifecycleLocks.size > 200 || composeJobIds.size > 200) {
+      for (const [k, j] of lifecycleLocks) {
+        if (j.status !== 'running') { lifecycleLocks.delete(k); composeJobIds.delete(j.id); }
+      }
+    }
+  }
+
+  // Exclusión mutua en la otra dirección: un apply/rollback de release no
+  // puede arrancar mientras un lifecycle job corre sobre el mismo archivo.
+  deps.releases?.onBeforeExecute(async (id) => {
+    const rec = deps.releases?.peek(id);
+    const p = rec?.status?.path;
+    const running = p ? lifecycleLocks.get(p) : undefined;
+    if (running && running.status === 'running') {
+      throw new MaintenanceError(`Hay una operación compose en curso (${running.title}); esperá a que termine`, 409);
+    }
+  });
+
+  // Cancelar un job emitido por Compose (up/down/pull/service).
+  app.post('/api/compose/job/:id/cancel', (c) => {
+    const id = c.req.param('id');
+    if (!composeJobIds.has(id)) return fail(c, 404, 'Job de Compose no encontrado');
+    if (!cancelJob(id)) return fail(c, 409, 'El job ya no está en ejecución');
+    return c.json({ ok: true });
+  });
+
+  // Returns an error string if this file is Axon's own deployment stack.
+  async function selfStackBlock(hostPath: string): Promise<string | null> {
+    // Self-stack guard: `down`/`up`/`pull` on Axon's own deployment compose
+    // would kill or recreate this very process. The file must be readable to
+    // verify it doesn't declare the axon service. The deployment manifest is
+    // generated as JSON (valid YAML), so check both the YAML service listing
+    // and the JSON/container_name spellings.
+    try {
+      const yaml = await readFile(hostToContainer(hostPath), 'utf8');
+      if (parseServiceNames(yaml).includes('axon')
+        || /container_name["']?\s*:\s*["']?axon(?=["'\s}]|$)/m.test(yaml)
+        || /"services"\s*:\s*\{\s*"axon"\s*:/.test(yaml)) {
+        return 'Operación rechazada: este stack gestiona la propia instancia de Axon';
+      }
+      return null;
+    } catch {
+      return 'No se pudo leer el archivo compose para verificarlo';
+    }
+  }
+
+  function startComposeJob(rPath: string, label: string, args: string, timeoutMs: number) {
+    const dirName = path.posix.basename(path.posix.dirname(rPath)) || rPath;
+    const cmd = `docker compose -f ${shq(rPath)} ${args}`;
+    const job = runJob(`compose ${label}: ${dirName}`, [
+      {
+        label: `docker compose ${label}`,
+        cmd,
+        user: 'user',
+        timeoutMs,
+        // El usuario del host puede no tener docker en PATH ni pertenecer al
+        // grupo docker — root en el host es el equivalente del fallback
+        // hostExec que usan las lecturas.
+        fallback: { cmd, user: 'root' },
+      },
+    ]);
+    lifecycleLocks.set(rPath, job);
+    composeJobIds.add(job.id);
+    pruneLifecycle();
+    return job;
+  }
+
   async function composeJob(
     c: any,
     verb: 'up' | 'down' | 'pull',
-    args: string
+    args: string,
+    timeoutMs: number
   ) {
     let body: any;
     try {
@@ -582,23 +845,54 @@ export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
     const r = await resolveComposePath(body?.path);
     if (!r.path) return fail(c, 403, r.error!);
 
+    const selfBlock = await selfStackBlock(r.path);
+    if (selfBlock) return fail(c, 403, selfBlock);
+
     if (verb === 'up' && deps.drafts?.get(r.path)) return fail(c, 409, 'Hay un borrador sin aplicar. Compará y resolvé sus precondiciones antes de iniciar el stack.');
     if (verb === 'up') {
-      const validation = await dockerCmd(`compose -f ${shq(r.path)} config -q`);
-      if (!validation.ok) return fail(c, 409, 'La configuración actual no pasó la validación de Docker Compose');
+      const validation = await dockerComposeFile(r.path, ['config', '-q']);
+      if (!validation.ok) return fail(c, 409, 'La configuración actual no pasó la validación de Docker Compose', { detail: (validation.stderr || '').slice(0, 2000) });
     }
-    const dirName = path.posix.basename(path.posix.dirname(r.path)) || r.path;
-    const job = runJob(`compose ${verb}: ${dirName}`, [
-      {
-        label: `docker compose ${verb}`,
-        cmd: `docker compose -f ${shq(r.path)} ${args}`,
-        user: 'user',
-      },
-    ]);
-    return c.json({ ok: true, job });
+    const releaseHold = await deps.busyGuard?.();
+    if (releaseHold) return fail(c, 409, releaseHold);
+    const active = lifecycleLocks.get(r.path);
+    if (active && active.status === 'running') {
+      return fail(c, 409, 'Ya hay una operación Compose en curso para esta ruta');
+    }
+    return c.json({ ok: true, job: startComposeJob(r.path, verb, args, timeoutMs) });
   }
 
-  app.post('/api/compose/up', (c) => composeJob(c, 'up', 'up -d'));
-  app.post('/api/compose/down', (c) => composeJob(c, 'down', 'down'));
-  app.post('/api/compose/pull', (c) => composeJob(c, 'pull', 'pull'));
+  app.post('/api/compose/up', (c) => composeJob(c, 'up', 'up -d', 30 * 60_000));
+  app.post('/api/compose/down', (c) => composeJob(c, 'down', 'down', 10 * 60_000));
+  app.post('/api/compose/pull', (c) => composeJob(c, 'pull', 'pull', 45 * 60_000));
+
+  // ---------- Per-service actions (start / stop / restart) ----------
+  app.post('/api/compose/service', async (c) => {
+    let body: any;
+    try {
+      body = await c.req.json();
+    } catch {
+      return fail(c, 400, 'Cuerpo JSON inválido');
+    }
+    const action = String(body?.action || '');
+    if (!['start', 'stop', 'restart'].includes(action)) return fail(c, 400, 'Acción desconocida');
+    const service = String(body?.service || '');
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(service)) return fail(c, 400, 'Servicio inválido');
+    const r = await resolveComposePath(body?.path);
+    if (!r.path) return fail(c, 403, r.error!);
+
+    // En el stack propio cualquier mutación por servicio puede tumbar el panel
+    // (container_name puede llamarse axon bajo otro nombre de servicio).
+    const selfBlock = await selfStackBlock(r.path);
+    if (selfBlock) return fail(c, 403, selfBlock);
+
+    const releaseHold = await deps.busyGuard?.();
+    if (releaseHold) return fail(c, 409, releaseHold);
+    const active = lifecycleLocks.get(r.path);
+    if (active && active.status === 'running') {
+      return fail(c, 409, 'Ya hay una operación Compose en curso para esta ruta');
+    }
+    const job = startComposeJob(r.path, `${action} ${service}`, `${action} ${shq(service)}`, 10 * 60_000);
+    return c.json({ ok: true, job });
+  });
 }

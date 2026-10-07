@@ -9,7 +9,9 @@ await mkdir(path.join(dir,'scan-fixture'));
 await mkdir(path.join(dir,'external-drive'));
 await writeFile(path.join(dir,'scan-fixture','cache-demo.bin'),new Uint8Array(32768));
 await writeFile(path.join(dir,'scan-fixture','nota.txt'),'Fixture de QA. No es un archivo personal.');
-const env={...process.env,AXON_QA_ROOT:dir,AXON_PUBLIC_ORIGIN:'http://127.0.0.1:3459',CONFIG_PATH:path.join(dir,'config.json'),PORT:'3459',AXON_BIND_HOST:'127.0.0.1',HOST_USER:userInfo().username,PROJECT_SCAN_DIRS:dir,SESSION_SECRET:crypto.randomUUID()};
+// QA_PORT lets several isolated instances run in parallel (one per QA agent).
+const port=process.env.QA_PORT||'3459';
+const env={...process.env,AXON_QA_ROOT:dir,AXON_PUBLIC_ORIGIN:`http://127.0.0.1:${port}`,CONFIG_PATH:path.join(dir,'config.json'),PORT:port,AXON_BIND_HOST:'127.0.0.1',HOST_USER:userInfo().username,PROJECT_SCAN_DIRS:dir,SESSION_SECRET:crypto.randomUUID()};
 for(const key of Object.keys(env))if(/^(CLOUDFLARE_|CF_)/.test(key))delete (env as Record<string,string|undefined>)[key];
 process.env.SESSION_SECRET=env.SESSION_SECRET;
 const {hashPassword}=await import('../src/auth');
@@ -20,7 +22,7 @@ await mkdir(path.join(legacy,'legacy-project'));await writeFile(path.join(legacy
 await writeFile(path.join(legacy,'.manifest.json'),JSON.stringify(['legacy-note','legacy-project'].map(id=>({id,orig:path.join(dir,'media',id),ts:Date.now()-86400000}))));
 await writeFile(env.CONFIG_PATH,JSON.stringify({auth:{username:'qa',passwordHash:await hashPassword('axon-local-qa')},domains:[],projects:[{id:'qa-project',name:'Proyecto de prueba',cwd:path.join(dir,'scan-fixture'),type:'node',autoDetect:false}],settings:{hostUser:env.HOST_USER,scanDirs:[dir],scanIntervalMs:5000}}));
 await writeFile(path.join(dir,'library/state.json'),JSON.stringify({roots:[path.join(dir,'media')],uploadRoot:path.join(dir,'media'),shareBase:'',favorites:[],collections:[],shares:[]}));
-console.log(`QA: http://127.0.0.1:3459 | usuario qa | contraseña axon-local-qa | datos ${dir}`);
+console.log(`QA: http://127.0.0.1:${port} | usuario qa | contraseña axon-local-qa | datos ${dir}`);
 console.log('QA aislado: operaciones de host y WebSockets bloqueados por backend. Almacenamiento y operaciones de archivos sólo modifican fixtures propias.');
 const child=Bun.spawn(['bun','--no-env-file','run','src/index.ts'],{stdout:'inherit',stderr:'inherit',env});
 const stop=()=>child.kill('SIGTERM');process.on('SIGINT',stop);process.on('SIGTERM',stop);

@@ -37,7 +37,8 @@ export async function scanRoots(projects: {cwd:string;name:string}[]=[]): Promis
   for(const v of (await availableStorage()).disks)if(v.path&&v.path!=='/'&&v.readable){
     roots.push({id:'disk-'+v.id,path:v.path,title:`${v.name} · ${v.path} (revisión)`,adapterId:'review',depth:0});
     const shared=await lstat(hostToContainer(path.join(v.path,'.Trash'))).catch(()=>null);
-    const trashDirs=[path.join(v.path,`.Trash-${account[2]}`),...(shared?.isDirectory()&&(shared.mode&0o1000)?[path.join(v.path,'.Trash',account[2])]:[])];
+    // freedesktop: a shared volume trash dir must be root-owned AND sticky.
+    const trashDirs=[path.join(v.path,`.Trash-${account[2]}`),...(shared?.isDirectory()&&shared.uid===0&&(shared.mode&0o1000)?[path.join(v.path,'.Trash',account[2])]:[])];
     for(const [i,dir] of trashDirs.entries()){
       const info=await lstat(hostToContainer(dir)).catch(()=>null);
       if(info?.isDirectory()&&info.uid===Number(account[2])&&!(info.mode&0o077))roots.push({id:`trash-${v.id}-${i}`,path:path.join(dir,'files'),title:`Papelera de ${v.name} · ${dir}`,adapterId:'trash-xdg',trashTop:v.path});

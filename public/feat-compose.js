@@ -21,6 +21,7 @@
   };
 
   let sec = null;
+  let navBypass = false; // permite el re-click programático tras confirmar salir
   const el = (id) => sec && sec.querySelector('#' + id);
 
   // ---------- Data ----------
@@ -36,6 +37,9 @@
       if (nc) nc.textContent = S.projects.length || '';
       if (data.dockerError && !S.projects.length) {
         setState('No se pudo consultar docker — solo se muestran archivos en disco (si los hay)');
+      }
+      if (data.filesTruncated) {
+        toast('Se encontraron más de 40 archivos compose en los discos; se muestran los primeros 40', 'warn', '', 7000);
       }
     } catch (err) {
       setState('No se pudo cargar la lista de stacks');
@@ -143,6 +147,8 @@
       ta.value = S.savedValue;
       ta.readOnly = S.readOnly;
       el('cp-ed-save').disabled = S.readOnly;
+      updateDirty();
+      updateUpButton();
 
       const flag = el('cp-ed-flag');
       if (data.truncated) {
@@ -162,6 +168,23 @@
 
   function isDirty() {
     return S.editing && el('cp-ed-text').value !== S.savedValue;
+  }
+
+  // Punto junto a la ruta mientras haya cambios sin guardar en el borrador.
+  function updateDirty() {
+    const d = el('cp-ed-dirty');
+    if (d) d.classList.toggle('hidden', !isDirty());
+  }
+
+  // Con borrador pendiente el servidor rechaza `up` (levantaría el archivo del
+  // host, no el borrador) — se deshabilita con tooltip explicativo.
+  function updateUpButton() {
+    const b = el('cp-ed-up');
+    if (!b) return;
+    b.disabled = S.readOnly || !!S.draft;
+    b.title = S.draft
+      ? 'Hay un borrador sin aplicar: "up" usaría el archivo del host y el servidor lo rechaza. Resolvé el borrador primero.'
+      : 'docker compose up -d sobre el archivo del host';
   }
 
   async function closeEditor() {
@@ -190,6 +213,8 @@
       });
       S.savedValue = el('cp-ed-text').value;
       S.revision = res.revision; S.draft = !!res.draft;
+      updateDirty();
+      updateUpButton();
       await releaseHistory();
       el('cp-ed-discard').disabled = !S.draft;
       if (res.validation && res.validation.ok === false) {
@@ -207,23 +232,29 @@
     }
   }
 
-  // Validates the file on disk via the save-less preview endpoint.
+  // Valida con `docker compose config -q` el contenido EXACTO del editor
+  // (incluye cambios sin guardar) — el servidor lo pasa por stdin.
   async function validateEditor() {
     if (!S.editing) return;
-    if (isDirty()) {
-      banner('cp-ed-banner', 'warn', 'Hay cambios sin guardar. Guardá el borrador para comparar la versión revisada.');
-    }
     const btn = el('cp-ed-validate');
     btn.disabled = true;
     try {
-      const res = await api('/api/compose/preview', { method: 'POST', body: { path: S.editing } });
-      if (res.draft) {
-        banner('cp-ed-banner', 'warn', res.error || 'Borrador guardado. Falta validar Docker Compose antes de aplicar.');
-      } else if (res.error) {
-        banner('cp-ed-banner', 'err', `"docker compose config" falló:\n${res.error}`);
-      } else {
+      // En solo-lectura el textarea está truncado: se valida el archivo del
+      // disco (o el borrador) sin mandar contenido.
+      const res = await api('/api/compose/validate', {
+        method: 'POST',
+        body: S.readOnly ? { path: S.editing } : { path: S.editing, content: el('cp-ed-text').value },
+      });
+      if (res.valid) {
         const n = (res.services || []).length;
-        banner('cp-ed-banner', 'ok', `Config válida — ${n} servicio${n === 1 ? '' : 's'} declarado${n === 1 ? '' : 's'}.`);
+        const warns = (res.warnings || []).join('\n');
+        banner(
+          'cp-ed-banner',
+          warns ? 'warn' : 'ok',
+          `docker compose config OK — ${n} servicio${n === 1 ? '' : 's'} declarado${n === 1 ? '' : 's'}.${warns ? '\n' + warns : ''}`
+        );
+      } else {
+        banner('cp-ed-banner', 'err', `"docker compose config" falló:\n${res.error || 'error desconocido'}`);
       }
     } catch (err) {
       banner('cp-ed-banner', 'err', err.message || 'No se pudo validar');
@@ -248,7 +279,8 @@
       const res = await api('/api/compose/preview', { method: 'POST', body: { path: p } });
       el('cp-pv-rendered').textContent =
         (res.rendered || '') + (res.renderedTruncated ? '\n…(salida truncada a 200KB)…\n' : '') || '(vacío)';
-      if (res.error) banner('cp-pv-banner', res.draft ? 'warn' : 'err', `${res.draft ? 'Borrador sin aplicar' : 'Docker Compose no validado'}:\n${res.error}`);
+      if (res.error) banner('cp-pv-banner', res.draft && res.dockerValidated !== false ? 'warn' : 'err', `${res.draft ? 'Borrador sin aplicar' : 'Docker Compose no validado'}:\n${res.error}`);
+      else if ((res.warnings || []).length) banner('cp-pv-banner', 'warn', res.warnings.join('\n'));
       const rows = (res.services || [])
         .map(
           (s) => `<tr>
@@ -256,16 +288,73 @@
             <td class="mono">${esc(s.image || '—')}</td>
             <td class="mono">${esc(s.ports || '—')}</td>
             <td><span class="cp-chip ${s.status === 'running' ? 'cp-on' : 'cp-off'}"><span class="cp-dot"></span>${esc(s.statusText || s.status || 'sin contenedor')}</span></td>
+            <td class="cp-svc-actions">${s.status === 'running' ? `<button class="btn-secondary btn-inline cp-svc-act" data-svc="${esc(s.name)}" data-act="restart" title="docker compose restart ${esc(s.name)}">Reiniciar</button><button class="btn-secondary btn-inline cp-svc-act" data-svc="${esc(s.name)}" data-act="stop" title="docker compose stop ${esc(s.name)}">Parar</button>` : s.container ? `<button class="btn-secondary btn-inline cp-svc-act" data-svc="${esc(s.name)}" data-act="start" title="docker compose start ${esc(s.name)}">Iniciar</button>` : ''}</td>
           </tr>`
         )
         .join('');
-      el('cp-pv-tbody').innerHTML = rows || '<tr><td colspan="4" class="listener-note">Sin servicios</td></tr>';
+      el('cp-pv-tbody').innerHTML = rows || '<tr><td colspan="5" class="listener-note">Sin servicios</td></tr>';
       refreshIcons();
     } catch (err) {
       el('cp-pv-rendered').textContent = '';
       banner('cp-pv-banner', 'err', err.message || 'No se pudo generar el preview');
       errToast(err);
     }
+  }
+
+  // Diff real línea a línea: prefijo/sufijo común + LCS sobre el bloque
+  // central (cap de celdas para archivos grandes → bloque único del/add).
+  function diffLines(a, b) {
+    const A = String(a).split('\n'), B = String(b).split('\n');
+    let start = 0;
+    while (start < A.length && start < B.length && A[start] === B[start]) start++;
+    let endA = A.length - 1, endB = B.length - 1;
+    while (endA >= start && endB >= start && A[endA] === B[endB]) { endA--; endB--; }
+    const n = endA - start + 1, m = endB - start + 1;
+    const out = [];
+    for (let i = 0; i < start; i++) out.push({ t: ' ', v: A[i] });
+    if (n * m <= 1500000) {
+      const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+      for (let i = n - 1; i >= 0; i--)
+        for (let j = m - 1; j >= 0; j--)
+          dp[i][j] = A[start + i] === B[start + j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      let i = 0, j = 0;
+      while (i < n && j < m) {
+        if (A[start + i] === B[start + j]) { out.push({ t: ' ', v: A[start + i] }); i++; j++; }
+        else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ t: '-', v: A[start + i] }); i++; }
+        else { out.push({ t: '+', v: B[start + j] }); j++; }
+      }
+      while (i < n) { out.push({ t: '-', v: A[start + i] }); i++; }
+      while (j < m) { out.push({ t: '+', v: B[start + j] }); j++; }
+    } else {
+      for (let i = start; i <= endA; i++) out.push({ t: '-', v: A[i] });
+      for (let j = start; j <= endB; j++) out.push({ t: '+', v: B[j] });
+    }
+    for (let i = endA + 1; i < A.length; i++) out.push({ t: ' ', v: A[i] });
+    return out;
+  }
+
+  function renderDiff(a, b) {
+    const rows = diffLines(a, b);
+    const line = (l) => `<span class="cp-diff-${l.t === '+' ? 'add' : l.t === '-' ? 'del' : 'ctx'}">${esc(l.t + ' ' + l.v) || ' '}</span>`;
+    let html = '', ctx = [];
+    const flush = () => {
+      if (!ctx.length) return;
+      if (ctx.length > 8) {
+        html += ctx.slice(0, 3).map(line).join('\n')
+          + `\n<span class="cp-diff-fold">  ⋯ ${ctx.length - 6} líneas sin cambios ⋯</span>\n`
+          + ctx.slice(-3).map(line).join('\n');
+      } else {
+        html += ctx.map(line).join('\n');
+      }
+      ctx = [];
+    };
+    for (const l of rows) {
+      if (l.t === ' ') { ctx.push(l); continue; }
+      flush();
+      html += (html ? '\n' : '') + line(l);
+    }
+    flush();
+    return html || '<span class="cp-diff-ctx">  (archivos idénticos)</span>';
   }
 
   async function compareDraft() {
@@ -280,13 +369,12 @@
       el('cp-pv-path').textContent=S.editing;
       el('cp-pv-tbody').innerHTML='';
       el('cp-pv-rendered').classList.add('hidden');
-      el('cp-pv-before').textContent=comparison.before;
-      el('cp-pv-after').textContent=comparison.after;
+      el('cp-pv-diff').innerHTML=renderDiff(comparison.before, comparison.after);
       el('cp-pv-comparison').classList.remove('hidden');
       banner('cp-pv-banner','warn',(comparison.changedOnHost?'El archivo del host cambió desde que creaste el borrador. Revisá el conflicto antes de continuar.\n':'El archivo desplegable sigue intacto.\n')+comparison.blockers.join(' '));
       showView('preview');
       await releaseHistory();
-      el('cp-pv-before').focus();
+      el('cp-pv-diff').focus();
     } catch(err) { banner('cp-ed-banner','err',err.message||'No se pudo comparar el borrador'); }
   }
 
@@ -306,8 +394,14 @@
     let panel=el('cp-release-history');
     if(!panel){panel=document.createElement('section');panel.id='cp-release-history';panel.className='maint-panel';sec.append(panel);}
     try{
-      const result=await api('/api/compose/releases',{fresh:true});
-      panel.innerHTML=`<h3>Aplicación y recuperación de Compose</h3><p>Guardá un borrador y prepará una revisión. Se validan Docker, imágenes y contenedores; sólo se reinician los servicios que ya estaban encendidos. No se eliminan huérfanos ni volúmenes. Recuperar configuración no revierte datos o migraciones de la aplicación.</p><button id="cp-release-prepare" class="btn-primary" ${S.editing&&S.draft?'':'disabled'}>Preparar aplicación del borrador</button><div role="status" id="cp-release-status"></div>${result.operations.map(op=>`<article><h4>${op.retire?'Retirada de '+esc(op.retire)+' · ':''}${esc({planned:'Revisión preparada',running:'Aplicando',verified:'Aplicación verificada',interrupted:'Interrumpido: revisar',restored:'Configuración recuperada'}[op.state]||op.state)} · ${esc(op.project)}</h4><p class="maint-path">${esc(op.path)}</p><p>${esc(op.message)}</p><ul>${op.changed.map(s=>`<li>${esc(s.name)}: ${s.fields.map(esc).join(', ')} · imagen ${esc(s.image)}</li>`).join('')}</ul><p>Se reinician: ${op.active.map(esc).join(', ')||'ninguno'}. Permanecen apagados: ${op.inactive.map(esc).join(', ')||'ninguno'}.</p>${op.state==='planned'?`<button class="btn-primary" data-release="${esc(op.id)}" data-digest="${esc(op.digest)}" data-action="apply" data-retire="${esc(op.retire||'')}">${op.retire?'Confirmar esta retirada':'Confirmar esta aplicación'}</button>`:''}${op.canRollback&&op.state!=='running'?`<button class="btn-secondary" data-release="${esc(op.id)}" data-digest="${esc(op.digest)}" data-action="rollback">Recuperar configuración e imágenes anteriores</button>`:''}<button class="btn-secondary" data-release-refresh="${esc(op.id)}">Comprobar estado</button></article>`).join('')}`;
+      const result=await api('/api/compose/releases');
+      // Las operaciones son globales; editando un archivo se muestran las suyas
+      // (el resto sigue visible en la vista de lista).
+      const ops=result.operations||[];
+      const shown=S.editing?ops.filter(op=>op.path===S.editing):ops;
+      const hiddenCount=ops.length-shown.length;
+      const expiry=(op)=>op.state==='planned'&&op.expiresAt?`<p class="cp-expiry">La revisión vence en ${Math.max(0,Math.ceil((op.expiresAt-Date.now())/60000))} min.</p>`:'';
+      panel.innerHTML=`<h3>Aplicación y recuperación de Compose</h3><p>Guardá un borrador y prepará una revisión. Se validan Docker, imágenes y contenedores; sólo se reinician los servicios que ya estaban encendidos. No se eliminan huérfanos ni volúmenes. Recuperar configuración no revierte datos o migraciones de la aplicación.</p><button id="cp-release-prepare" class="btn-primary" ${S.editing&&S.draft?'':'disabled'}>Preparar aplicación del borrador</button><div role="status" id="cp-release-status"></div>${shown.map(op=>`<article><h4>${op.retire?'Retirada de '+esc(op.retire)+' · ':''}${esc({planned:'Revisión preparada',running:'Aplicando',verified:'Aplicación verificada',interrupted:'Interrumpido: revisar',restored:'Configuración recuperada'}[op.state]||op.state)} · ${esc(op.project)}</h4><p class="maint-path">${esc(op.path)}</p>${expiry(op)}<p>${esc(op.message)}</p><ul>${op.changed.map(s=>`<li>${esc(s.name)}: ${s.fields.map(esc).join(', ')} · imagen ${esc(s.image)}</li>`).join('')}</ul><p>Se reinician: ${op.active.map(esc).join(', ')||'ninguno'}. Permanecen apagados: ${op.inactive.map(esc).join(', ')||'ninguno'}.</p>${op.state==='planned'?`<button class="btn-primary" data-release="${esc(op.id)}" data-digest="${esc(op.digest)}" data-action="apply" data-retire="${esc(op.retire||'')}">${op.retire?'Confirmar esta retirada':'Confirmar esta aplicación'}</button>`:''}${op.canRollback&&op.state!=='running'?`<button class="btn-secondary" data-release="${esc(op.id)}" data-digest="${esc(op.digest)}" data-action="rollback">Recuperar configuración e imágenes anteriores</button>`:''}<button class="btn-secondary" data-release-refresh="${esc(op.id)}">Comprobar estado</button></article>`).join('')}${hiddenCount?`<p class="listener-note">${hiddenCount} operación${hiddenCount===1?'':'es'} de otros archivos no ${hiddenCount===1?'se muestra':'se muestran'} en esta vista.</p>`:''}`;
       el('cp-release-prepare').onclick=async()=>{if(isDirty()){el('cp-release-status').textContent='Guardá los cambios antes de preparar la revisión';return;}try{await api('/api/compose/releases',{method:'POST',body:{path:S.editing}});await releaseHistory();}catch(e){el('cp-release-status').textContent=e.message;}};
       panel.querySelectorAll('[data-release]').forEach(b=>b.onclick=async()=>{const rollback=b.dataset.action==='rollback';if(!await confirmDialog(rollback?'Recuperar configuración':b.dataset.retire?'Retirar '+b.dataset.retire:'Aplicar esta selección',rollback?'Se restaura la configuración y las imágenes previas de los servicios indicados. Los datos no se revierten.':b.dataset.retire?'Se retira sólo el servicio y su contenedor. Los datos, volúmenes e imágenes se conservan; el resto del stack no cambia.':'Se publica la configuración revisada y se reinician únicamente los servicios encendidos indicados.','Confirmar'))return;b.disabled=true;try{await api(`/api/compose/releases/${b.dataset.release}/${b.dataset.action}`,{method:'POST',body:{digest:b.dataset.digest}});await releaseHistory();}catch(e){el('cp-release-status').textContent=e.message;}});
       panel.querySelectorAll('[data-release-refresh]').forEach(b=>b.onclick=async()=>{try{await api(`/api/compose/releases/${b.dataset.releaseRefresh}`,{fresh:true});await releaseHistory();}catch(e){el('cp-release-status').textContent=e.message;}});
@@ -337,6 +431,7 @@
           <h3 id="cp-job-title"></h3>
           <pre id="cp-job-log" class="cp-job-log"></pre>
           <div class="modal-actions">
+            <button type="button" id="cp-job-cancel" class="btn-danger">Cancelar</button>
             <button type="button" id="cp-job-close" class="btn-secondary">Cerrar</button>
           </div>
         </div>`;
@@ -344,6 +439,14 @@
       $('#cp-job-close').addEventListener('click', () => m.classList.add('hidden'));
       m.addEventListener('click', (e) => { if (e.target === m) m.classList.add('hidden'); });
     }
+    const cancelBtn = $('#cp-job-cancel');
+    cancelBtn.classList.remove('hidden');
+    cancelBtn.disabled = false;
+    cancelBtn.onclick = async () => {
+      cancelBtn.disabled = true;
+      try { await api(`/api/compose/job/${jobId}/cancel`, { method: 'POST', body: {} }); }
+      catch (err) { errToast(err); cancelBtn.disabled = false; }
+    };
     $('#cp-job-title').textContent = title || 'Ejecutando';
     $('#cp-job-log').textContent = 'Iniciando…';
     m.classList.remove('hidden');
@@ -357,11 +460,29 @@
         if (atBottom) pre.scrollTop = pre.scrollHeight;
         if (job.status !== 'running') {
           clearInterval(poll);
-          toast(job.status === 'ok' ? `${job.title} completado` : `${job.title} falló`, job.status === 'ok' ? 'ok' : 'error');
+          cancelBtn.classList.add('hidden');
+          toast(job.status === 'ok' ? `${job.title} completado` : job.cancelled ? `${job.title} cancelado` : `${job.title} falló`, job.status === 'ok' ? 'ok' : job.cancelled ? 'warn' : 'error');
           load();
         }
       } catch { clearInterval(poll); }
     }, 1000);
+  }
+
+  async function doService(path, service, action) {
+    const labels = { start: 'Iniciar', stop: 'Parar', restart: 'Reiniciar' };
+    const ok = await confirmDialog(
+      `${labels[action] || action} ${service}`,
+      `Corre "docker compose ${action} ${service}" con ${path.split('/').pop()}.`,
+      labels[action] || 'Confirmar'
+    );
+    if (!ok) return;
+    try {
+      const res = await api('/api/compose/service', { method: 'POST', body: { path, service, action } });
+      showJob(res.job, `compose ${action}`);
+      setTimeout(load, 2000);
+    } catch (err) {
+      errToast(err);
+    }
   }
 
   async function doUp(path) {
@@ -436,20 +557,20 @@
       </div>
       <div id="cp-editor" class="cp-editor hidden">
         <div class="cp-editor-bar">
-          <span class="mono cp-editor-path" id="cp-ed-path"></span>
+          <span class="mono cp-editor-path" id="cp-ed-path"></span><span id="cp-ed-dirty" class="cp-dirty-dot hidden" title="Cambios sin guardar"></span>
           <span class="badge badge-other hidden" id="cp-ed-flag"></span>
           <div class="section-actions">
-            <button id="cp-ed-validate" class="btn-secondary" title="docker compose config (sin guardar)">${icon('check-circle-2')} Validar</button>
+            <button id="cp-ed-validate" class="btn-secondary" title="docker compose config sobre el contenido del editor">${icon('check-circle-2')} Validar</button>
             <button id="cp-ed-save" class="btn-primary">${icon('save')} Guardar borrador</button>
             <button id="cp-ed-compare" class="btn-secondary">${icon('columns-2')} Comparar borrador</button>
             <button id="cp-ed-discard" class="btn-secondary" disabled>Descartar borrador</button>
-            <button id="cp-ed-up" class="btn-secondary" title="docker compose up -d después de guardar">${icon('play')} Up -d</button>
+            <button id="cp-ed-up" class="btn-secondary" title="docker compose up -d sobre el archivo del host">${icon('play')} Up -d</button>
             <button id="cp-ed-back" class="btn-secondary">${icon('arrow-left')} Volver</button>
           </div>
         </div>
         <div id="cp-ed-banner" class="cp-banner hidden"></div>
-        <textarea id="cp-ed-text" class="mono" spellcheck="false" wrap="off"></textarea>
-        <p class="listener-note">Ctrl/Cmd+S guarda el borrador. Comparar muestra el archivo del host y la revisión guardada. La validación local del borrador no equivale a validar Docker ni aplicar.</p>
+        <textarea id="cp-ed-text" class="mono" spellcheck="false" wrap="off" aria-label="Contenido del archivo compose"></textarea>
+        <p class="listener-note">Ctrl/Cmd+S guarda el borrador. Tab/Shift+Tab indentan. Comparar muestra el diff entre el archivo del host y la revisión guardada. La validación usa <code>docker compose config</code> real; el borrador nunca se aplica solo.</p>
       </div>
       <div id="cp-preview" class="cp-preview hidden">
         <div class="cp-editor-bar">
@@ -464,15 +585,15 @@
           <div class="table-wrapper cp-pv-tablewrap">
             <table class="data-table" id="cp-pv-table">
               <thead>
-                <tr><th>Servicio</th><th>Imagen</th><th>Puertos</th><th>Estado</th></tr>
+                <tr><th>Servicio</th><th>Imagen</th><th>Puertos</th><th>Estado</th><th>Acciones</th></tr>
               </thead>
               <tbody id="cp-pv-tbody"></tbody>
             </table>
           </div>
           <pre id="cp-pv-rendered" class="cp-rendered mono"></pre>
           <div id="cp-pv-comparison" class="cp-comparison hidden">
-            <section><h3>Archivo actual del host</h3><pre id="cp-pv-before" class="cp-rendered mono" tabindex="0" aria-label="Archivo actual del host"></pre></section>
-            <section><h3>Borrador guardado</h3><pre id="cp-pv-after" class="cp-rendered mono" tabindex="0" aria-label="Borrador guardado"></pre></section>
+            <h3 class="cp-diff-title">Diff: archivo del host → borrador guardado</h3>
+            <pre id="cp-pv-diff" class="cp-rendered cp-diff mono" tabindex="0" aria-label="Diff entre el archivo del host y el borrador"></pre>
           </div>
         </div>
       </div>`;
@@ -520,15 +641,19 @@
         desc.replaceChildren(input);
         input.focus();
         input.setSelectionRange(input.value.length, input.value.length);
+        let committing = false;
         const commit = async () => {
+          if (committing) return; // Enter and blur can both fire — commit once.
+          committing = true;
           const note = input.value.trim();
           try {
             await api('/api/compose/note', { method: 'POST', body: { key, note } });
             if (p) p.note = note || undefined;
+            render();
           } catch (err) {
+            committing = false; // keep the input so the typed text isn't lost
             toast(err.message || 'No se pudo guardar la nota', 'error', '', 3000);
           }
-          render();
         };
         input.addEventListener('keydown', (ev) => {
           if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
@@ -557,6 +682,10 @@
     el('cp-ed-back').addEventListener('click', closeEditor);
     el('cp-ed-up').addEventListener('click', async () => {
       if (!S.editing) return;
+      if (S.draft) {
+        banner('cp-ed-banner', 'warn', 'Hay un borrador sin aplicar: "up" usaría el archivo del host. Descartalo o prepará su aplicación desde el historial de revisiones.');
+        return;
+      }
       if (isDirty()) {
         const ok = await confirmDialog(
           'Guardar antes de levantar',
@@ -570,15 +699,77 @@
       doUp(S.editing);
     });
 
+    el('cp-ed-text').addEventListener('input', updateDirty);
     el('cp-ed-text').addEventListener('keydown', (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
         saveEditor();
+        return;
       }
+      // Tab indents with two spaces (YAML); Shift+Tab dedents. With a
+      // multi-line selection every covered line is (de)indented.
+      if (e.key !== 'Tab' || e.target.readOnly) return;
+      e.preventDefault();
+      const ta = e.target;
+      const s = ta.selectionStart, en = ta.selectionEnd, v = ta.value;
+      const firstLine = v.lastIndexOf('\n', s - 1) + 1;
+      const nl = v.indexOf('\n', en);
+      const lastEnd = nl === -1 ? v.length : nl;
+      const region = v.slice(firstLine, lastEnd);
+      if (!e.shiftKey) {
+        if (s === en) {
+          ta.setRangeText('  ', s, en, 'end');
+        } else {
+          const lines = region.split('\n');
+          ta.setRangeText(lines.map((l) => '  ' + l).join('\n'), firstLine, lastEnd);
+          ta.selectionStart = s + 2;
+          ta.selectionEnd = en + lines.length * 2;
+        }
+      } else {
+        const out = region.split('\n').map((l) => l.replace(/^( {1,2}|\t)/, '')).join('\n');
+        ta.setRangeText(out, firstLine, lastEnd);
+        const firstIndent = (v.slice(firstLine, s).match(/^( {1,2}|\t)/) || [''])[0].length;
+        ta.selectionStart = Math.max(firstLine, s - firstIndent);
+        ta.selectionEnd = Math.max(ta.selectionStart, en - (region.length - out.length));
+      }
+      updateDirty();
     });
+
+    // Dirty-guard de navegación: recarga/cierre real (beforeunload) y clicks a
+    // otras pestañas de la shell mientras el editor está sucio.
+    window.addEventListener('beforeunload', (e) => {
+      if (isDirty()) { e.preventDefault(); e.returnValue = ''; }
+    });
+    document.addEventListener(
+      'click',
+      (e) => {
+        if (navBypass || !S.editing || !sec.classList.contains('active')) return;
+        const ta = el('cp-ed-text');
+        if (!ta || ta.value === S.savedValue) return;
+        const btn = e.target.closest('.tab-btn');
+        if (!btn || btn.dataset.tab === 'compose') return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        confirmDialog(
+          'Cambios sin guardar',
+          `Hay cambios sin guardar en el borrador de ${S.editing.split('/').pop()}.`,
+          'Salir sin guardar'
+        ).then((ok) => {
+          if (!ok) return;
+          navBypass = true;
+          try { btn.click(); } finally { navBypass = false; }
+        });
+      },
+      true
+    );
 
     el('cp-pv-back').addEventListener('click', () => { showView('list'); load(); });
     el('cp-pv-edit').addEventListener('click', () => openEditor(el('cp-pv-path').textContent));
+    el('cp-pv-tbody').addEventListener('click', (e) => {
+      const b = e.target.closest('.cp-svc-act');
+      if (!b) return;
+      doService(el('cp-pv-path').textContent, b.dataset.svc, b.dataset.act);
+    });
 
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && S.editing && sec.classList.contains('active')) {

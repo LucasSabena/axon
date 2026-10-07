@@ -28,11 +28,9 @@
   const el=id=>panel.querySelector('#'+id);
   let preferences={};try{preferences=JSON.parse(localStorage.getItem('axon:cloud-view:v1'))||{};}catch{}
   const views=['list','details','grid'],sorts=['name','type','size','modified'];
-  const S={provider:'dropbox',providers:[],sourcesNav:0,crumbs:null,status:null,location:'account',path:'',entries:[],cursor:null,filter:'',view:views.includes(preferences?.view)?preferences.view:'details',sort:sorts.includes(preferences?.sort)?preferences.sort:'name',order:preferences?.order==='desc'?'desc':'asc',sel:new Set(),item:null,nav:0,poll:0,jobs:[],uploads:[],busy:false,local:null};
-  async function request(url,body){
-    const r=await fetch(url,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    const d=await r.json().catch(()=>({error:'No se pudo leer la respuesta'}));if(!r.ok || d.ok===false)throw new Error(d.error||'No se pudo completar la acción');return d;
-  }
+  const S={provider:'dropbox',providers:[],sourcesNav:0,crumbs:null,status:null,location:'account',path:'',entries:[],cursor:null,filter:'',view:views.includes(preferences?.view)?preferences.view:'details',sort:sorts.includes(preferences?.sort)?preferences.sort:'name',order:preferences?.order==='desc'?'desc':'asc',sel:new Set(),item:null,nav:0,poll:0,jobs:[],uploads:[],busy:false,local:null,rates:new Map(),jobsKey:'',expanding:0};
+  // Shared transport: no-store, JSON normalization, 401 → session-expired.
+  const request=(url,body)=>api(url,body===undefined?{}:{method:'POST',body});
   const message=(text,error=false)=>{el('cloud-message').textContent=text;el('cloud-message').classList.toggle('cloud-error',error);el('cloud-message').setAttribute('role',error?'alert':'status');};
   function params(){return {source:S.provider,location:S.location,cloudPath:S.path,q:S.filter||null,item:S.item||null,view:S.view,sort:S.sort,order:S.order};}
   function saveView(){try{localStorage.setItem('axon:cloud-view:v1',JSON.stringify({view:S.view,sort:S.sort,order:S.order}));}catch{}window.AxonNavigation.update('files',params());}
@@ -76,7 +74,7 @@
   function updateSelection(){
     const entries=visible().filter(e=>e.downloadable),checked=entries.filter(e=>S.sel.has(e.path)).length;
     el('cloud-select-all').checked=!!entries.length&&checked===entries.length;el('cloud-select-all').indeterminate=checked>0&&checked<entries.length;
-    const count=visible().length;el('cloud-count').textContent=(S.sel.size?S.sel.size+' seleccionado'+(S.sel.size===1?'':'s')+' · ':'')+(S.filter?count+' de '+S.entries.length:S.entries.length)+' elemento'+(S.entries.length===1?'':'s')+(S.cursor?' · hay más por cargar':'');
+    const count=visible().length;el('cloud-count').textContent=(S.sel.size?S.sel.size+' seleccionado'+(S.sel.size===1?'':'s')+' · ':'')+(S.filter?count+' de '+S.entries.length:S.entries.length)+' elemento'+(S.entries.length===1?'':'s')+(S.cursor?(S.filter?' · buscando en toda la carpeta…':' · hay más por cargar'):'');
     el('cloud-save').disabled=!S.sel.size||S.busy||S.jobs.some(j=>['planning','running'].includes(j.state));
   }
   function renderList(){
@@ -100,7 +98,7 @@
     closePreview();if(!e)return;const box=el('cloud-preview'),ext=e.name.split('.').pop().toLowerCase(),url=base+'/stream?'+query(e.path),nav=S.nav;box.hidden=false;
     box.innerHTML=`<div class="cloud-preview-head"><h3>${esc(e.name)}</h3><a class="btn-secondary" href="${esc(url+'&download=1')}">${icon('download')} Descargar a mi computadora</a><button type="button" class="icon-btn" aria-label="Cerrar vista previa">${icon('x')}</button></div><div class="cloud-preview-body"></div><p class="listener-note">La vista previa trae contenido desde ${esc(name())}. Guardar en un disco crea una copia en el servidor.</p>`;
     box.querySelector('button').onclick=()=>void go({item:null});const body=box.querySelector('.cloud-preview-body');refreshIcons();
-    if(!e.downloadable){body.textContent='Este documento se abre o exporta desde '+name()+'.';const link=box.querySelector('a');if(e.webUrl&&new URL(e.webUrl).origin==='https://drive.google.com'){link.href=e.webUrl;link.textContent='Abrir en Google Drive';link.target='_blank';link.rel='noopener noreferrer';}else link.remove();return;}
+    if(!e.downloadable){body.textContent='Este documento se abre o exporta desde '+name()+'.';const link=box.querySelector('a');let web=null;try{web=e.webUrl?new URL(e.webUrl):null;}catch{web=null;}if(web?.origin==='https://drive.google.com'){link.href=e.webUrl;link.textContent='Abrir en Google Drive';link.target='_blank';link.rel='noopener noreferrer';}else link.remove();return;}
     if(['png','jpg','jpeg','gif','webp','avif','bmp'].includes(ext)){const img=document.createElement('img');img.alt=e.name;img.src=url;img.onerror=()=>message('No se pudo cargar la imagen. Reintentá la vista previa.',true);body.append(img);}
     else if(['mp4','m4v','webm','mp3','m4a','ogg','oga','wav','flac','opus'].includes(ext)){const media=document.createElement(['mp4','m4v','webm'].includes(ext)?'video':'audio');media.controls=true;media.preload='metadata';media.src=url;media.onerror=()=>message('No se pudo reproducir este formato. Podés guardar una copia.',true);body.append(media);}
     else if(ext==='pdf'){const frame=document.createElement('iframe');frame.title='Vista previa de '+e.name;frame.src=url;body.append(frame);}
@@ -109,30 +107,40 @@
     }else body.textContent='Este formato no tiene vista previa en el navegador. Podés guardar una copia para abrirlo con una aplicación.';
   }
   async function restore(p,snapshot){
-    const nav=++S.nav;S.provider=Object.hasOwn(names,p.source)?p.source:'dropbox';base='/api/files/'+S.provider;S.crumbs=null;S.jobs=[];S.uploads=[];el('cloud-jobs').replaceChildren();clearTimeout(S.poll);closePreview();S.local ||= window.AxonFilesLocal.params();sec.classList.add('fm-cloud-mode');panel.hidden=false;
+    const nav=++S.nav;S.provider=Object.hasOwn(names,p.source)?p.source:'dropbox';base='/api/files/'+S.provider;S.crumbs=null;S.jobs=[];S.uploads=[];S.jobsKey='';el('cloud-jobs').replaceChildren();clearTimeout(S.poll);closePreview();S.local ||= window.AxonFilesLocal.params();sec.classList.add('fm-cloud-mode');panel.hidden=false;
     tabs.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.source===S.provider)));
     S.location=p.location||'account';S.path=p.cloudPath||'';S.filter=p.q||'';S.item=p.item||null;S.view=views.includes(p.view)?p.view:S.view;S.sort=sorts.includes(p.sort)?p.sort:S.sort;S.order=['asc','desc'].includes(p.order)?p.order:S.order;S.sel=new Set();S.entries=[];S.cursor=null;S.busy=true;el('cloud-browser').hidden=true;el('cloud-filter').value=S.filter;message('Consultando '+name()+'…');panel.querySelector('h2').textContent=name();await refreshSources();
     try{
       const d=await request(base+'/status');if(nav!==S.nav)return;S.status=d;
       if(d.connected&&!d.sources.some(s=>s.id===S.location)){S.location='account';S.path='';S.item=null;}
       renderConnection();
-      if(d.connected&&d.visible!==false){el('cloud-list').textContent='Cargando carpeta…';el('cloud-list').setAttribute('aria-busy','true');const page=await request(base+'/list?'+query(S.path));if(nav!==S.nav)return;if(S.provider==='dropbox'){const status=await request(base+'/status');if(nav!==S.nav)return;S.status=status;renderConnection();}S.entries=page.entries;S.cursor=page.cursor;S.crumbs=page.breadcrumbs||null;S.sel=new Set((snapshot?.sel||[]).filter(path=>S.entries.some(e=>e.path===path)));breadcrumbs();S.busy=false;renderList();await preview(S.entries.find(e=>e.path===S.item||e.name===S.item));}
+      if(d.connected&&d.visible!==false){el('cloud-list').textContent='Cargando carpeta…';el('cloud-list').setAttribute('aria-busy','true');const page=await request(base+'/list?'+query(S.path));if(nav!==S.nav)return;if(S.provider==='dropbox'&&!d.appFolder){const status=await request(base+'/status');if(nav!==S.nav)return;S.status=status;renderConnection();}S.entries=page.entries;S.cursor=page.cursor;S.crumbs=page.breadcrumbs||null;S.sel=new Set((snapshot?.sel||[]).filter(path=>S.entries.some(e=>e.path===path)));breadcrumbs();S.busy=false;renderList();await preview(S.entries.find(e=>e.path===S.item||e.name===S.item));}
       if(nav!==S.nav)return;
-      message(p.connection==='failed'?'No se pudo conectar la cuenta. Revisá la configuración y volvé a intentar.':p.connection==='cancelled'?'Conexión cancelada.':'',p.connection==='failed');
+      const reason={expirada:'La autorización expiró. Volvé a conectar.',conflicto:'La conexión cambió o fue cancelada. Volvé a intentar.',limite:'La plataforma limitó los intentos. Esperá un momento y reintentá.',plataforma:'La plataforma no respondió. Revisá su estado y reintentá.'}[p.reason];
+      message(p.connection==='failed'?(reason||'No se pudo conectar la cuenta. Revisá la configuración y volvé a intentar.'):p.connection==='cancelled'?'Conexión cancelada.':'',p.connection==='failed');
       window.AxonNavigation.update('files',params());if(d.connected)await pollJobs();if(snapshot?.top)panel.scrollTop=snapshot.top;
     }catch(e){if(nav===S.nav){message(e.message,true);el('cloud-list').textContent='No se pudo cargar la carpeta. Usá Actualizar para reintentar.';}}
     finally{if(nav===S.nav){S.busy=false;el('cloud-list').setAttribute('aria-busy','false');updateSelection();}}
   }
+  function rate(j){
+    const prev=S.rates.get(j.id),now=Date.now();let text='';
+    if(['planning','running'].includes(j.state)&&j.bytes>0){
+      if(prev&&now>prev.t&&j.received>prev.r){const bps=(j.received-prev.r)/((now-prev.t)/1000);if(bps>0){const eta=Math.max(0,Math.round((j.bytes-j.received)/bps));text=' · '+size(bps)+'/s · quedan ~'+(eta<60?eta+'s':eta<3600?Math.round(eta/60)+'m':Math.round(eta/3600)+'h');}}
+      S.rates.set(j.id,{r:j.received,t:now});
+    }else S.rates.delete(j.id);
+    return text;
+  }
   function renderJobs(){
-    const labels={planning:'Revisando selección',running:'Copiando',complete:'Copia completa',failed:'Copia fallida',cancelled:'Cancelada',interrupted:'Interrumpida'};
-    el('cloud-jobs').innerHTML=S.jobs.length?'<h3>Copias al servidor</h3>'+S.jobs.slice(0,8).map(j=>`<article><div class="cloud-job-head"><strong>${esc(labels[j.state])}</strong><span>${size(j.received)} / ${size(j.bytes)}</span></div><p class="cloud-job-dest">${esc(j.directory)}${j.names.length?' · '+esc(j.names.join(', ')):''}</p>${j.state==='running'?`<progress value="${j.received}" max="${Math.max(1,j.bytes)}" aria-label="Progreso de copia"></progress>`:''}${j.error?`<p class="cloud-error">${esc(j.error)}</p>`:''}${j.published.length?`<p class="listener-note">Guardado: ${esc(j.published.join(', '))}</p>`:''}${['planning','running'].includes(j.state)?`<button type="button" class="btn-secondary" data-cancel="${esc(j.id)}">Cancelar copia</button>`:j.state==='complete'?`<button type="button" class="btn-secondary" data-folder="${esc(j.directory)}">Abrir carpeta del servidor</button>`:''}</article>`).join(''):'';
+    const labels={planning:'Revisando selección',running:'Copiando',complete:'Copia completa',partial:'Copia parcial',failed:'Copia fallida',cancelled:'Cancelada',interrupted:'Interrumpida'};
+    el('cloud-jobs').innerHTML=S.jobs.length?'<h3>Copias al servidor</h3>'+S.jobs.slice(0,8).map(j=>`<article><div class="cloud-job-head"><strong>${esc(labels[j.state]||j.state)}</strong><span>${size(j.received)} / ${size(j.bytes)}${esc(rate(j))}</span></div><p class="cloud-job-dest">${esc(j.directory)}${j.names.length?' · '+esc(j.names.join(', ')):''}</p>${j.state==='running'?`<progress value="${j.received}" max="${Math.max(1,j.bytes)}" aria-label="Progreso de copia"></progress>`:''}${j.error?`<p class="cloud-error">${esc(j.error)}</p>`:''}${j.failed?.length?`<p class="cloud-error">Sin copiar: ${esc(j.failed.map(f=>f.name+(f.error?' ('+f.error+')':'')).join(' · '))}</p>`:''}${j.published.length?`<p class="listener-note">Guardado: ${esc(j.published.join(', '))}</p>`:''}${['planning','running'].includes(j.state)?`<button type="button" class="btn-secondary" data-cancel="${esc(j.id)}">Cancelar copia</button>`:''}${j.retryable?`<button type="button" class="btn-secondary" data-retry="${esc(j.id)}">Reintentar pendientes</button>`:''}${j.published.length?`<button type="button" class="btn-secondary" data-folder="${esc(j.directory)}">Abrir carpeta del servidor</button>`:''}</article>`).join(''):'';
     if(S.uploads.length)el('cloud-jobs').insertAdjacentHTML('beforeend','<h3>Subidas de agentes</h3>'+S.uploads.slice(0,8).map(u=>`<article><div class="cloud-job-head"><strong>${esc({starting:'Preparando',running:'Subiendo',committing:'Publicando',complete:'Guardado en '+name(),failed:'Falló',cancelled:'Cancelada',uncertain:'Revisar publicación'}[u.state]||u.state)}</strong><span>${size(u.received)} / ${size(u.size)}</span></div><p class="cloud-job-dest">${esc(u.agent)} · ${esc(u.path)}</p>${u.state==='running'?`<progress value="${u.received}" max="${Math.max(1,u.size)}" aria-label="Progreso de subida"></progress>`:''}${u.error?`<p class="cloud-error">${esc(u.error)}</p>`:''}${u.state==='complete'?`<button type="button" class="btn-secondary" data-upload-path="${esc(u.path)}">Ver archivo en ${esc(name())}</button>`:''}</article>`).join(''));
     el('cloud-jobs').querySelectorAll('[data-upload-path]').forEach(b=>b.onclick=()=>void go({cloudPath:b.dataset.uploadPath.slice(0,b.dataset.uploadPath.lastIndexOf('/')),location:'account',item:b.dataset.uploadPath}));
     el('cloud-jobs').querySelectorAll('[data-cancel]').forEach(b=>b.onclick=()=>action(b,async()=>{await request(base+'/downloads/'+b.dataset.cancel+'/cancel',{});await pollJobs();}));
+    el('cloud-jobs').querySelectorAll('[data-retry]').forEach(b=>b.onclick=()=>action(b,async()=>{await request(base+'/downloads/'+b.dataset.retry+'/retry',{});await pollJobs();}));
     el('cloud-jobs').querySelectorAll('[data-folder]').forEach(b=>b.onclick=()=>void window.AxonNavigation.go(window.AxonNavigation.url('files',{path:b.dataset.folder})));
   }
   async function pollJobs(){
-    clearTimeout(S.poll);const nav=S.nav;try{const [data,uploads]=await Promise.all([request(base+'/downloads'),S.status?.uploadSupported?request(base+'/uploads'):Promise.resolve({jobs:[]})]);if(nav!==S.nav)return;S.jobs=data.jobs;S.uploads=uploads.jobs;renderJobs();updateSelection();}catch(e){if(nav!==S.nav)return;message('No se pudo actualizar el estado de las copias. '+e.message,true);}
+    clearTimeout(S.poll);const nav=S.nav;try{const [data,uploads]=await Promise.all([request(base+'/downloads'),S.status?.uploadSupported?request(base+'/uploads'):Promise.resolve({jobs:[]})]);if(nav!==S.nav)return;S.jobs=data.jobs;S.uploads=uploads.jobs;const key=JSON.stringify([S.jobs,S.uploads]);if(key!==S.jobsKey){S.jobsKey=key;renderJobs();}updateSelection();}catch(e){if(nav!==S.nav)return;if(e.status===401)return;message('No se pudo actualizar el estado de las copias. '+e.message,true);}
     if(!panel.hidden)S.poll=setTimeout(()=>void pollJobs(),(S.jobs.some(j=>['planning','running'].includes(j.state))||S.uploads.some(j=>['starting','running','committing'].includes(j.state)))?1500:10000);
   }
   async function chooseDestination(){
@@ -160,7 +168,17 @@
   tabs.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;if(b.hasAttribute('data-connections')){void window.AxonNavigation.go('/configuracion?section=connections');return;}if(b.dataset.source==='server')void window.AxonNavigation.go(window.AxonNavigation.url('files',S.local||{path:window.AxonFilesLocal.location()}));else if(Object.hasOwn(names,b.dataset.source)){if(!sec.classList.contains('fm-cloud-mode'))S.local=window.AxonFilesLocal.params();void go({source:b.dataset.source,location:'account',cloudPath:'',item:null,q:null});}});
   el('cloud-refresh').onclick=()=>void restore(params());
   el('cloud-location').onchange=()=>void go({location:el('cloud-location').value,cloudPath:'',item:null,q:null});
-  el('cloud-filter').oninput=()=>{S.filter=el('cloud-filter').value;renderList();window.AxonNavigation.update('files',params());};
+  el('cloud-filter').oninput=()=>{S.filter=el('cloud-filter').value;if(!S.filter)S.expanding++;renderList();window.AxonNavigation.update('files',params());void expandForFilter();};
+  // The filter would otherwise only match the first page: keep paging while it
+  // is active so remote folders don't produce false negatives.
+  async function expandForFilter(){
+    if(!S.filter||!S.cursor)return;const nav=S.nav,ticket=++S.expanding;
+    while(S.cursor&&S.filter&&nav===S.nav&&ticket===S.expanding){
+      try{const page=await request(base+'/list?'+query(S.path,{cursor:S.cursor}));if(nav!==S.nav||ticket!==S.expanding)return;const paths=new Set(S.entries.map(e=>e.path));S.entries.push(...page.entries.filter(e=>!paths.has(e.path)));S.cursor=page.cursor;renderList();}
+      catch(e){if(nav===S.nav&&ticket===S.expanding)message(e.message,true);return;}
+      if(S.entries.length>50000)return;
+    }
+  }
   panel.querySelectorAll('[data-cloud-view]').forEach(b=>b.onclick=()=>{S.view=b.dataset.cloudView;renderList();saveView();});
   el('cloud-sort').onchange=()=>{S.sort=el('cloud-sort').value;renderList();saveView();};
   el('cloud-order').onclick=()=>{S.order=S.order==='asc'?'desc':'asc';renderList();saveView();};

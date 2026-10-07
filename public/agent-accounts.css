@@ -1,9 +1,13 @@
 .ag-accounts { padding:12px 0; border-bottom:1px solid var(--border); margin-bottom:12px; }
 .ag-accounts-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px; }
 .ag-account-list { margin:12px 0; }
-.ag-account-row { display:flex; align-items:center; justify-content:space-between; gap:12px; border-top:1px solid var(--border); padding:12px 8px; }
+/* Single owner for .ag-account-row (agent-usage.css used to redefine it as
+   grid — the winner depended on stylesheet load order). flex-wrap keeps the
+   same look: identity + actions on one line, usage block full-width below. */
+.ag-account-row { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px; border-top:1px solid var(--border); padding:12px 8px; }
+.ag-account-usage { flex:1 1 100%; min-width:0; }
 .ag-account-active { background:var(--accent-soft); }
-.ag-account-identity { display:flex; align-items:center; gap:8px; min-width:0; }
+.ag-account-identity { display:flex; align-items:center; gap:8px; min-width:0; flex:1; }
 .ag-account-identity > div { min-width:0; }
 .ag-account-identity strong { margin-right:8px; overflow-wrap:anywhere; }
 .ag-account-identity small { display:block; color:var(--text-dim); overflow-wrap:anywhere; margin-top:4px; }

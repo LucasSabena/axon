@@ -2,14 +2,16 @@ import { resolveHostPath, hostVolumes } from './host-storage';
 import type {FileTransfers} from './file-transfers';
 import {reviewLibraryMove,movedReference,type TransferReview} from './library-transfer-review';
 import {actor as maintenanceActor} from './storage/http';
+import {MaintenanceError} from './storage/types';
 import {volumeForPath,volumeContains} from './file-volumes';
+import { getConnInfo } from 'hono/bun';
 import type { Context, Hono, MiddlewareHandler } from 'hono';
 import { readdir, stat, readFile, writeFile, mkdir, realpath, rename as fsRename } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import * as zlib from 'node:zlib';
 import * as path from 'node:path';
-import { hostExec, hostSpawn, hostSpawnInteractive, hostToContainer, containerToHost, HOST_USER } from './host';
+import { hostExec, hostSpawn, hostSpawnInteractive, killHostProc, hostToContainer, containerToHost, HOST_USER } from './host';
 import { registerLibraryTools, hasTranscript, transcriptVtt, type LibCtx } from './library-tools';
 import { purgeCachePrefixes } from './cloudflare';
 import { canonicalRoots, canonicalLibraryFile } from './library-paths';
@@ -94,7 +96,10 @@ const THUMB_SIZE = 512;
 const VIEW_SIZE = 2048;
 const CHUNK_MAX = 64 * 1024 * 1024;
 const RESCAN_MS = 20 * 60 * 1000;
-const ACTIVE_RESCAN_MS = 20_000;
+// Live folder watches already pick up edits; the open-tab poll only forces a
+// full walk when the index went stale (used to be ~20 s of near-continuous
+// rescanning while the tab stayed open).
+const ACTIVE_RESCAN_MS = 5 * 60_000;
 const SKIP_DIRS = new Set(['node_modules', '__MACOSX', '$RECYCLE.BIN', 'System Volume Information', 'lost+found', 'venv', '__pycache__']);
 
 // ---------- Kinds ----------
@@ -182,6 +187,11 @@ const thumbSet = new Set<string>();
 const failSet = new Set<string>();
 const viewSet = new Set<string>();
 const webSet = new Set<string>();
+// View/transcode failures don't persist .fail markers — they cool down so a
+// broken render can't be requeued on every anonymous share page request.
+const viewFails = new Map<string, number>();
+const webFails = new Map<string, number>();
+const RENDER_RETRY_MS = 10 * 60_000;
 
 let stateWriteQueue = Promise.resolve();
 let indexWriteQueue = Promise.resolve();
@@ -190,8 +200,8 @@ const liveWatch = new LibraryLiveWatch(hostToContainer, refreshChangedPaths);
 let stateTimer: ReturnType<typeof setTimeout> | null = null;
 let indexTimer: ReturnType<typeof setTimeout> | null = null;
 
-function saveState(): void {
-  rev++;
+function saveState(bumpRev = true): void {
+  if (bumpRev) rev++;
   if (stateTimer) return;
   stateTimer = setTimeout(() => {
     stateTimer = null;
@@ -293,6 +303,7 @@ function ensureReady(): Promise<void> {
 // ---------- Path guards ----------
 
 function under(p: string, root: string): boolean {
+  if (!root) return false;
   return p === root || p.startsWith(root.endsWith('/') ? root : root + '/');
 }
 
@@ -305,16 +316,17 @@ async function resolveInRoots(input: string): Promise<string | null> {
   p = path.posix.resolve(p);
   const roots = [...state.roots, state.uploadRoot];
   try{await hostVolumes.roots(p);}catch{return null;}
-  if (!roots.some((r) => under(p, r))) return null;
+  const realRoots = await Promise.all(roots.map(async (r) => {
+    try { return containerToHost(await realpath(hostToContainer(r))); } catch { return r; }
+  }));
+  // Shares keep paths under symlinked roots in their resolved spelling.
+  if (!roots.some((r) => under(p, r)) && !realRoots.some((r) => under(p, r))) return null;
   let probe = p;
   const tail: string[] = [];
   while (true) {
     try {
       const real = containerToHost(await realpath(hostToContainer(probe)));
       const full = tail.length ? path.posix.join(real, ...tail.reverse()) : real;
-      const realRoots = await Promise.all(roots.map(async (r) => {
-        try { return containerToHost(await realpath(hostToContainer(r))); } catch { return r; }
-      }));
       try{await hostVolumes.roots(full);}catch{return null;}
       return realRoots.some((r) => under(full, r)) ? p : null;
     } catch {
@@ -371,6 +383,7 @@ async function scanOnce(): Promise<void> {
   try {
     const found = new Map<string, Item>();
     const foundDirs = new Set<string>();
+    const staleParts: string[] = [];
     const roots = [...new Set([state.uploadRoot, ...state.roots])];
     const mapper = { toContainer: hostToContainer, toHost: containerToHost };
     const realRoots = await canonicalRoots(roots, mapper);
@@ -388,7 +401,10 @@ async function scanOnce(): Promise<void> {
         const files: string[] = [];
         const links: string[] = [];
         for (const d of ents) {
-          if (d.name.startsWith('.')) continue;
+          if (d.name.startsWith('.')) {
+            if (d.name.endsWith('.axonpart')) staleParts.push(`${dir}/${d.name}`);
+            continue;
+          }
           const hp = `${dir}/${d.name}`;
           if (d.isDirectory()) {
             if (!SKIP_DIRS.has(d.name) && hp !== cacheHost) stack.push(hp);
@@ -415,6 +431,15 @@ async function scanOnce(): Promise<void> {
           }
         }
       }
+    }
+    // Part files whose upload never finished and whose tracker was lost on a
+    // restart get swept once they're a day old.
+    const tracked = new Set([...uploads.values()].map((u) => u.part));
+    for (const hp of staleParts) {
+      if (tracked.has(hp)) continue;
+      const st = await stat(hostToContainer(hp)).catch(() => null);
+      if (st?.isFile() && st.mtimeMs < Date.now() - 24 * 3600_000)
+        hostExec(`rm -f -- ${shq(hp)}`, { user: 'user', timeoutMs: 5000 }).catch(() => {});
     }
     const changed = foundDirs.size !== directories.size || [...foundDirs].some(p => !directories.has(p)) || found.size !== items.size || [...found.values()].some(it => {
       const previous = items.get(it.id);
@@ -499,10 +524,17 @@ async function exifBatch(batch: Item[]): Promise<void> {
     await stdin.flush();
   } catch { /* reported via empty output */ }
   try { stdin.end(); } catch { /* closed */ }
-  const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* gone */ } }, 120_000);
-  const out = await new Response(proc.stdout as ReadableStream).text();
-  await proc.exited;
-  clearTimeout(timer);
+  const timer = setTimeout(() => killHostProc(proc), 120_000);
+  let out = '';
+  try {
+    out = await new Response(proc.stdout as ReadableStream).text();
+    await proc.exited;
+  } catch {
+    killHostProc(proc);
+    try { await proc.exited; } catch { /* gone */ }
+  } finally {
+    clearTimeout(timer);
+  }
   let rows: Record<string, unknown>[] = [];
   try { rows = JSON.parse(out || '[]'); } catch { /* keep empty */ }
   const meta = new Map(rows.map((r) => [String(r.SourceFile), r]));
@@ -671,9 +703,11 @@ function ensureThumb(it: Item, hi: boolean): Promise<boolean> {
 
 function ensureView(it: Item): Promise<boolean> {
   if (viewSet.has(it.tk)) return Promise.resolve(true);
+  if (Date.now() - (viewFails.get(it.tk) || 0) < RENDER_RETRY_MS) return Promise.resolve(false);
   return enqueue(`v:${it.tk}`, async () => {
     const ok = await renderTo(it, 'views', VIEW_SIZE);
-    if (ok) viewSet.add(it.tk);
+    if (ok) { viewSet.add(it.tk); viewFails.delete(it.tk); }
+    else viewFails.set(it.tk, Date.now());
     return ok;
   }, true);
 }
@@ -688,9 +722,13 @@ function ensureWeb(it: Item): Transcode {
   if (webSet.has(it.tk)) return { state: 'done', pct: 100 };
   const cur = transcodes.get(it.tk);
   if (cur && cur.state !== 'error') return cur;
+  // A failed transcode cools down before retrying so share pages don't requeue
+  // the same ffmpeg crash on every request.
+  if (Date.now() - (webFails.get(it.tk) || 0) < RENDER_RETRY_MS)
+    return cur || { state: 'error', pct: 0, error: 'No se pudo preparar el video' };
   const tc: Transcode = { state: 'queued', pct: 0 };
   transcodes.set(it.tk, tc);
-  tcChain = tcChain.then(() => runTranscode(it, tc)).catch(() => { tc.state = 'error'; tc.error = 'No se pudo preparar el video'; });
+  tcChain = tcChain.then(() => runTranscode(it, tc)).catch(() => { tc.state = 'error'; tc.error = 'No se pudo preparar el video'; webFails.set(it.tk, Date.now()); });
   return tc;
 }
 
@@ -704,8 +742,13 @@ async function runTranscode(it: Item, tc: Transcode): Promise<void> {
     `nice -n 10 ffmpeg -nostdin -v error -y -i ${shq(it.p)} -map 0:v:0 -map 0:a:0? ${encoding.video} ${encoding.audio} ` +
     `-movflags +faststart -threads 8 -progress pipe:1 -nostats ${shq(part)} ` +
     `&& mv -f ${shq(part)} ${shq(out)}`;
-  const proc = hostSpawn(cmd, { user: 'user' });
-  const stderr = new Response(proc.stderr as ReadableStream).text();
+  // Remote `timeout` bounds the whole ffmpeg tree; the local watchdog only
+  // backstops the wrapper (a wedged ffmpeg must not serialize tcChain forever).
+  const proc = hostSpawn(cmd, { user: 'user', timeoutSec: 3600 });
+  const watchdog = setTimeout(() => killHostProc(proc), 3_660_000);
+  // Attach the catch now: a dead stderr stream on the success path must not
+  // surface as an unhandled rejection.
+  const stderr = new Response(proc.stderr as ReadableStream).text().catch(() => '');
   const dur = it.d || 0;
   const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
   const dec = new TextDecoder();
@@ -725,13 +768,16 @@ async function runTranscode(it: Item, tc: Transcode): Promise<void> {
     }
   } catch { /* stream closed */ }
   const code = await proc.exited;
+  clearTimeout(watchdog);
   if (code === 0) {
     rev++;
     webSet.add(it.tk);
+    webFails.delete(it.tk);
     tc.state = 'done';
     tc.pct = 100;
   } else {
     tc.state = 'error';
+    webFails.set(it.tk, Date.now());
     tc.error = (await stderr).trim().slice(-400) || `exit ${code}`;
     hostExec(`rm -f ${shq(part)}`, { user: 'user', timeoutMs: 5000 }).catch(() => {});
   }
@@ -1114,21 +1160,41 @@ function edgeCache(s: Share, browserMax: number): string {
   return edge > 120 ? `public, max-age=${Math.min(browserMax, edge)}, s-maxage=${edge}` : 'private, max-age=60';
 }
 
-async function purgeShare(c: Context, s: Share): Promise<{success:boolean;error?:string}> {
-  if (s.cdn === false && !s.pass) return {success:true};
+async function purgeShare(c: Context, s: Share, hadEdgeCopies?: boolean): Promise<{success:boolean;error?:string}> {
+  // Skip only when the share could never have had public edge copies —
+  // evaluated by callers on the PREVIOUS state (turning CDN off must purge).
+  if (!(hadEdgeCopies ?? !(s.cdn === false && !s.pass))) return { success: true };
   const host = shareBase(c).replace(/^https?:\/\//, '');
   const r = await purgeCachePrefixes([`${host}/s/${s.id}/`]).catch((e) => ({ success: false, error: String(e) }));
   if (!r.success) console.warn('[library] purge', s.id, r.error);
   return r;
 }
 
+// Forwarded headers are only trustworthy when the immediate peer is the
+// loopback reverse proxy — direct clients can spoof them freely.
+function loopbackPeer(c: Context): boolean {
+  try {
+    const a = getConnInfo(c).remote.address;
+    return a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1';
+  } catch { return false; }
+}
+
+function requestIp(c: Context): string {
+  const fwd = loopbackPeer(c)
+    ? c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for')?.split(',')[0]?.trim()
+    : undefined;
+  if (fwd) return fwd;
+  try { return getConnInfo(c).remote.address || 'local'; } catch { return 'local'; }
+}
+
 function shareActivity(c: Context, s: Share, kind: ShareActivity['kind'], name?: string) {
-  const ip = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'local';
+  const ip = requestIp(c);
   const agent = c.req.header('user-agent') || '';
   const visitor = createHmac('sha256', SECRET).update(s.id + ':' + ip + ':' + agent).digest('hex').slice(0, 12);
   const client = /Firefox/i.test(agent) ? 'Firefox' : /Edg/i.test(agent) ? 'Edge' : /Chrome/i.test(agent) ? 'Chrome' : /Safari/i.test(agent) ? 'Safari' : 'Otro cliente';
   if (!trackShare(s, { t:Date.now(), kind, visitor, client, ...(name ? {name} : {}) })) return;
-  saveState();
+  // Share counters don't feed the admin index ETag — don't bump rev per view.
+  saveState(false);
   if (s.notifyActivity === false) return;
   const action = {view:'Visita',play:'Reproducción iniciada',download:'Descarga iniciada',zip:'Descarga ZIP iniciada'}[kind];
   const title = action + ': ' + s.title;
@@ -1484,8 +1550,12 @@ export const libraryHostGuard: MiddlewareHandler = async (c, next) => {
   if (!state.shareBase) return next();
   let shareHost = '';
   try { shareHost = new URL(state.shareBase).host.toLowerCase(); } catch { return next(); }
-  const host = (c.req.header('x-forwarded-host') || c.req.header('host') || '').toLowerCase();
-  if (!shareHost || host !== shareHost) return next();
+  // Compare against the connection's Host; X-Forwarded-Host counts only when
+  // the peer is the loopback proxy — a client-supplied one must not dodge the
+  // restriction (or trigger it) on the wrong hostname.
+  const host = (c.req.header('host') || '').split(',')[0].trim().toLowerCase();
+  const forwarded = loopbackPeer(c) ? (c.req.header('x-forwarded-host') || '').split(',')[0].trim().toLowerCase() : '';
+  if (!shareHost || (host !== shareHost && forwarded !== shareHost)) return next();
   const p = c.req.path;
   if (p.startsWith('/s/') || p === '/marca/favicon.svg' || p === '/robots.txt') {
     if (p === '/robots.txt') return c.text('User-agent: *\nDisallow: /\n');
@@ -1498,11 +1568,27 @@ export const libraryHostGuard: MiddlewareHandler = async (c, next) => {
 
 interface Upload { id: string; dir: string; name: string; part: string; size: number; received: number; t: number }
 const uploads = new Map<string, Upload>();
+// Per-upload promise chain: two concurrent chunks must not both pass the
+// offset check and interleave appends into a corrupt part file.
+const uploadLocks = new Map<string, Promise<void>>();
+
+// A malformed AXON_PUBLIC_ORIGIN must surface as a structured error, not a
+// bare TypeError from `new URL()` deep inside a route handler.
+function publicOrigin(): string {
+  try {
+    return new URL(process.env.AXON_PUBLIC_ORIGIN || 'http://localhost').origin;
+  } catch {
+    throw new Error('AXON_PUBLIC_ORIGIN inválido — debe ser una URL absoluta (p. ej. https://axon.example.com)');
+  }
+}
 
 async function appendToHost(part: string, body: ReadableStream<Uint8Array> | null): Promise<{ ok: boolean; n: number; error?: string }> {
   if (!body) return { ok: false, n: 0, error: 'Cuerpo vacío' };
   const proc = hostSpawnInteractive(`cat >> ${shq(part)}`, { user: 'user' });
   const stdin = proc.stdin as { write(d: Uint8Array): number | Promise<number>; flush(): number | Promise<number>; end(): void };
+  // A wedged remote `cat` must not hold the upload lock forever — bound the
+  // append at 5 minutes (the chunk itself is capped at 64 MiB).
+  const timer = setTimeout(() => killHostProc(proc), 300_000);
   let n = 0;
   try {
     const r = body.getReader();
@@ -1518,7 +1604,7 @@ async function appendToHost(part: string, body: ReadableStream<Uint8Array> | nul
     try { stdin.end(); } catch { /* closed */ }
     await proc.exited;
     return { ok: false, n, error: String((e as Error)?.message || e) };
-  }
+  } finally { clearTimeout(timer); }
   try { stdin.end(); } catch { /* closed */ }
   const [code, err] = await Promise.all([proc.exited, new Response(proc.stderr as ReadableStream).text()]);
   return code === 0 ? { ok: true, n } : { ok: false, n, error: err.trim() || `exit ${code}` };
@@ -1582,8 +1668,16 @@ async function flushTransferState():Promise<void>{
 export async function libraryTransferReview(mode:'copy'|'move',from:string,to:string):Promise<TransferReview|undefined>{
   if(mode!=='move')return;
   await ensureReady();
-  const source=await stat(hostToContainer(from));
-  const aliases=[from], inventory=await hostVolumes.snapshot();
+  const source=await stat(hostToContainer(from)).catch((e)=>{
+    const code=(e as NodeJS.ErrnoException)?.code;
+    throw new MaintenanceError(code==='ENOENT'||code==='ENOTDIR'?'El origen ya no existe':'No se puede acceder al origen',code==='ENOENT'||code==='ENOTDIR'?404:403);
+  });
+  const aliases=[from];
+  // A configured root may itself be a symlink; older shares keep the resolved
+  // spelling, so the resolved source is also an alias worth rewriting.
+  const real=await realpath(hostToContainer(from)).then(containerToHost).catch(()=>null);
+  if(real&&real!==from)aliases.push(real);
+  const inventory=await hostVolumes.snapshot();
   const current=volumeForPath(inventory.volumes,from);
   if(current?.path){
     const relative=path.posix.relative(current.path,from);
@@ -1599,6 +1693,21 @@ export async function libraryTransferReview(mode:'copy'|'move',from:string,to:st
   return reviewLibraryMove(state,from,to,source.isDirectory(),[...items.values()].map(it=>it.p),aliases);
 }
 
+// Library moves apply their own reference rewrites (repath/reindex), so the
+// plan→execute review round-trip happens inline: the freshly computed review
+// revision acts as the confirmation digest, and execute() still re-checks it.
+async function transferMove(transfers: FileTransfers, from: string, to: string, c: Context): Promise<void> {
+  const actor = maintenanceActor(c);
+  const plan = await transfers.plan('move', from, to, actor);
+  let status = await transfers.execute(plan.id, plan.digest, actor, plan.review?.revision);
+  const until = Date.now() + 25_000;
+  while (['planned', 'running'].includes(status.state) && Date.now() < until) {
+    await Bun.sleep(100);
+    status = await transfers.status(plan.id, actor);
+  }
+  if (status.state !== 'verified') throw new MaintenanceError(`La operación ${status.id} sigue pendiente. Abrí el historial de transferencias.`, 409);
+}
+
 function publicItem(it: Item) {
   return {
     id: it.id, p: it.p, n: it.n, e: it.e, k: it.k, s: it.s, m: it.m, tk: it.tk,
@@ -1609,6 +1718,88 @@ function publicItem(it: Item) {
 }
 
 const zipTokens = new Map<string, { paths: string[]; name: string; exp: number }>();
+
+// ---------- Duplicates ----------
+// Candidates are grouped by size first; matching sizes get fingerprinted.
+// Files up to 3 spans get a full sha1; bigger ones a head+middle+tail sample
+// (exact=false) so a whole-library pass stays bounded. Results are cached per
+// index revision — hashing hundreds of GB on every request is not an option.
+interface DupeGroup { fp: string; size: number; exact: boolean; items: Item[] }
+const DUPE_SPAN = 8 * 1024 * 1024;
+const DUPE_BUDGET_MS = 30_000;
+let dupesCache: { rev: number; at: number; partial: boolean; remaining: number; groups: DupeGroup[] } | null = null;
+let dupesFlight: Promise<void> | null = null;
+
+function hashRanges(cp: string, ranges: [number, number][]): Promise<string | null> {
+  return new Promise((resolve) => {
+    const h = createHash('sha1');
+    let i = 0;
+    const next = () => {
+      if (i >= ranges.length) return resolve(h.digest('hex'));
+      const [start, end] = ranges[i++];
+      const s = createReadStream(cp, { start, end });
+      s.on('data', (d) => h.update(d));
+      s.once('end', next);
+      s.once('error', () => { s.destroy(); resolve(null); });
+    };
+    next();
+  });
+}
+
+async function dupeFingerprint(it: Item): Promise<{ fp: string; exact: boolean } | null> {
+  const cp = hostToContainer(it.p);
+  const st = await stat(cp).catch(() => null);
+  if (!st?.isFile() || st.size !== it.s) return null;
+  if (it.s <= DUPE_SPAN * 3) {
+    const fp = await hashRanges(cp, [[0, it.s - 1]]);
+    return fp ? { fp, exact: true } : null;
+  }
+  const mid = Math.floor(it.s / 2 - DUPE_SPAN / 2);
+  const fp = await hashRanges(cp, [[0, DUPE_SPAN - 1], [mid, mid + DUPE_SPAN - 1], [it.s - DUPE_SPAN, it.s - 1]]);
+  return fp ? { fp, exact: false } : null;
+}
+
+async function computeDuplicates(): Promise<void> {
+  const bySize = new Map<number, Item[]>();
+  for (const it of items.values()) {
+    if (it.s <= 0) continue;
+    const g = bySize.get(it.s);
+    if (g) g.push(it); else bySize.set(it.s, [it]);
+  }
+  const sizeGroups = [...bySize.values()].filter((g) => g.length > 1)
+    .sort((a, b) => b[0].s * (b.length - 1) - a[0].s * (a.length - 1));
+  const deadline = Date.now() + DUPE_BUDGET_MS;
+  const byFp = new Map<string, DupeGroup>();
+  let done = 0;
+  const worker = async () => {
+    while (done < sizeGroups.length && Date.now() < deadline) {
+      const grp = sizeGroups[done++];
+      const hashed = await Promise.all(grp.map(dupeFingerprint));
+      for (let i = 0; i < grp.length; i++) {
+        const h = hashed[i];
+        if (!h) continue;
+        const key = `${grp[i].s}:${h.fp}`;
+        const g = byFp.get(key);
+        if (g) { g.items.push(grp[i]); g.exact = g.exact && h.exact; }
+        else byFp.set(key, { fp: key, size: grp[i].s, exact: h.exact, items: [grp[i]] });
+      }
+    }
+  };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  const groups = [...byFp.values()].filter((g) => g.items.length > 1)
+    .map((g) => ({ ...g, items: g.items.sort((a, b) => b.m - a.m) }))
+    .sort((a, b) => b.size * (b.items.length - 1) - a.size * (a.items.length - 1));
+  dupesCache = { rev, at: Date.now(), partial: done < sizeGroups.length, remaining: Math.max(0, sizeGroups.length - done), groups };
+}
+
+async function duplicates(): Promise<NonNullable<typeof dupesCache>> {
+  const stale = !dupesCache || dupesCache.rev !== rev || Date.now() - dupesCache.at > (dupesCache.partial ? 60_000 : 10 * 60_000);
+  if (stale) {
+    if (!dupesFlight) dupesFlight = computeDuplicates().finally(() => { dupesFlight = null; });
+    await dupesFlight;
+  }
+  return dupesCache!;
+}
 
 // ---------- Routes ----------
 // Register AFTER app.use('/api/*', requireAuth): /api/library/* inherits
@@ -1641,9 +1832,14 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers): void 
     publicItem: (it) => publicItem(it as Item),
     freeName,
     trash: async (cookie, paths) => {
-      const res = await app.request('/api/files/trash', {
+      // The internal request must carry the advertised origin as its URL base:
+      // browserWriteGuard compares Origin against the request URL while the
+      // trash route compares it against AXON_PUBLIC_ORIGIN — only an absolute
+      // URL on that origin satisfies both.
+      const base = publicOrigin();
+      const res = await app.request(`${base}/api/files/trash`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', cookie, origin: process.env.AXON_PUBLIC_ORIGIN || 'http://localhost' },
+        headers: { 'content-type': 'application/json', cookie, origin: base },
         body: JSON.stringify({ paths }),
       });
       const data = (await res.json().catch(() => ({}))) as { items?: { orig: string }[] };
@@ -1691,6 +1887,18 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers): void 
     const limit = Math.max(1, Math.min(24, Number(c.req.query('limit')) || 8));
     const list = [...items.values()].sort((a, b) => b.m - a.m).slice(0, limit);
     return c.json({ ok: true, items: list.map(publicItem), count: items.size, scannedAt });
+  });
+
+  app.get('/api/library/duplicates', async (c) => {
+    await ensureReady();
+    const r = await duplicates();
+    return c.json({
+      ok: true, partial: r.partial, remaining: r.remaining, at: r.at,
+      groups: r.groups.map((g) => ({
+        hash: g.fp, size: g.size, exact: g.exact,
+        items: g.items.filter((it) => items.get(it.id) === it).map(publicItem),
+      })),
+    });
   });
 
   app.get('/api/library/status', async (c) => {
@@ -1841,7 +2049,7 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers): void 
     if (!(await resolveInRoots(dest))) return fail(c, 403, 'Destino fuera de la biblioteca');
     if (await existsHost(dest)) return fail(c, 409, 'Ya existe un archivo con ese nombre');
     if(!transfers)return fail(c,503,'Motor de transferencias no disponible');
-    await transfers.quick('move',it.p,dest,maintenanceActor(c));
+    await transferMove(transfers,it.p,dest,c);
     dropItem(it.id);
     repath(it.p, dest);
     const ni = await addPathToIndex(dest);
@@ -1864,7 +2072,7 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers): void 
       const name = await freeName(target, it.n);
       const dest = `${target}/${name}`;
       if(!transfers){failed.push({id,error:'Motor de transferencias no disponible'});break;}
-      try{await transfers.quick('move',it.p,dest,maintenanceActor(c));}catch{failed.push({id,error:'Operación pendiente o no completada. Consultá el historial de transferencias.'});break;}
+      try{await transferMove(transfers,it.p,dest,c);}catch{failed.push({id,error:'Operación pendiente o no completada. Consultá el historial de transferencias.'});break;}
       dropItem(it.id);
       repath(it.p, dest);
       const ni = await addPathToIndex(dest);
@@ -1882,17 +2090,20 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers): void 
     const { ids } = await c.req.json<{ ids: string[] }>().catch(() => ({ ids: [] as string[], name: undefined as string | undefined }));
     const list = (ids || []).map((id) => items.get(id)).filter(Boolean) as Item[];
     if (!list.length) return fail(c, 400, 'Nada para eliminar');
-    const res = await app.request('/api/files/trash', {
+    const base = publicOrigin();
+    const res = await app.request(`${base}/api/files/trash`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: c.req.header('cookie') || '' },
+      headers: { 'content-type': 'application/json', cookie: c.req.header('cookie') || '', origin: base },
       body: JSON.stringify({ paths: list.map((it) => it.p) }),
     });
-    const data = (await res.json().catch(() => ({}))) as { items?: { orig: string }[]; failed?: unknown[]; error?: string };
+    const data = (await res.json().catch(() => ({}))) as { ok?: boolean; items?: { orig: string }[]; failed?: unknown[]; error?: string };
+    if (!res.ok || data.ok === false) {
+      return fail(c, res.ok ? 502 : res.status, data.error || 'No se pudo enviar a la papelera');
+    }
     const done = new Set((data.items || []).map((x) => x.orig));
     for (const it of list) if (done.has(it.p)) dropItem(it.id);
-    state.favorites = state.favorites.filter((p) => !done.has(p));
-    for (const col of state.collections) col.paths = col.paths.filter((p) => !done.has(p));
-    saveState();
+    // Favorites/collections/shares keep pointing at the original location —
+    // trash is restorable, and a restore reindexes that path.
     saveIndex();
     return c.json({ ok: !data.failed?.length, removed: done.size, failed: data.failed || [], error: data.error });
   });
@@ -1934,43 +2145,77 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers): void 
   app.put('/api/library/upload/:uid', async (c) => {
     const u = uploads.get(c.req.param('uid'));
     if (!u) return fail(c, 404, 'Subida no encontrada (¿expiró?)');
-    await hostVolumes.roots(u.dir);
-    const offset = Number(c.req.query('offset') || 0);
-    await hostVolumes.roots(u.dir);
-    const st = await stat(hostToContainer(u.part)).catch(() => null);
-    const have = st?.size ?? -1;
-    if (have < 0) return fail(c, 410, 'El archivo parcial desapareció');
-    if (offset !== have) return c.json({ ok: false, error: 'offset', received: have }, 409);
-    const r = await appendToHost(u.part, c.req.raw.body);
-    const after = (await stat(hostToContainer(u.part)).catch(() => null))?.size ?? have;
-    u.received = after;
-    u.t = Date.now();
-    if (!r.ok) return fail(c, 500, 'Falló la escritura del bloque', { detail: r.error, received: after });
-    if (after > u.size) return fail(c, 400, 'Se recibieron más bytes de los declarados');
-    return c.json({ ok: true, received: after });
+    const prev = uploadLocks.get(u.id);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    uploadLocks.set(u.id, gate);
+    // Gates never reject today, but swallow a predecessor rejection anyway so
+    // a future change cannot orphan this gate's release path.
+    await prev?.catch(() => {});
+    try {
+      await hostVolumes.roots(u.dir);
+      const offset = Number(c.req.query('offset') || 0);
+      const st = await stat(hostToContainer(u.part)).catch(() => null);
+      const have = st?.size ?? -1;
+      if (have < 0) return fail(c, 410, 'El archivo parcial desapareció');
+      if (offset !== have) return c.json({ ok: false, error: 'offset', received: have }, 409);
+      const r = await appendToHost(u.part, c.req.raw.body);
+      const after = (await stat(hostToContainer(u.part)).catch(() => null))?.size ?? have;
+      u.received = after;
+      u.t = Date.now();
+      if (!r.ok) return fail(c, 500, 'Falló la escritura del bloque', { detail: r.error, received: after });
+      if (after > u.size) return fail(c, 400, 'Se recibieron más bytes de los declarados');
+      return c.json({ ok: true, received: after });
+    } finally {
+      release();
+      if (uploadLocks.get(u.id) === gate) uploadLocks.delete(u.id);
+    }
   });
+
+  // finish/delete take the same per-uid gate as chunk PUTs — a `mv` or `rm`
+  // racing an in-flight append would move bytes mid-write.
+  const withUploadLock = async (uid: string, fn: () => Promise<Response>): Promise<Response> => {
+    const prev = uploadLocks.get(uid);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    uploadLocks.set(uid, gate);
+    await prev?.catch(() => {});
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (uploadLocks.get(uid) === gate) uploadLocks.delete(uid);
+    }
+  };
 
   app.post('/api/library/upload/:uid/finish', async (c) => {
     const u = uploads.get(c.req.param('uid'));
     if (!u) return fail(c, 404, 'Subida no encontrada');
-    await hostVolumes.roots(u.dir);
-    const st = await stat(hostToContainer(u.part)).catch(() => null);
-    if (!st || st.size !== u.size) return fail(c, 400, `Subida incompleta (${st?.size ?? 0} de ${u.size} bytes)`);
-    const name = await freeName(u.dir, u.name);
-    const dest = `${u.dir}/${name}`;
-    const r = await hostExec(`mv -n -- ${shq(u.part)} ${shq(dest)}`, { user: 'user', timeoutMs: 30_000 });
-    if (!r.ok) return fail(c, 500, 'No se pudo completar la subida', { detail: r.stderr });
-    uploads.delete(u.id);
-    const it = await addPathToIndex(dest);
-    return c.json({ ok: true, item: it ? publicItem(it) : null, path: dest });
+    return withUploadLock(u.id, async () => {
+      await hostVolumes.roots(u.dir);
+      const st = await stat(hostToContainer(u.part)).catch(() => null);
+      if (!st || st.size !== u.size) return fail(c, 400, `Subida incompleta (${st?.size ?? 0} de ${u.size} bytes)`);
+      const name = await freeName(u.dir, u.name);
+      const dest = `${u.dir}/${name}`;
+      // mv -n exits 0 even when it skips an existing destination — verify the
+      // part file actually went away so a silent no-op can't pass for success.
+      const r = await hostExec(`mv -nT -- ${shq(u.part)} ${shq(dest)}; [ ! -e ${shq(u.part)} ]`, { user: 'user', timeoutMs: 30_000 });
+      if (!r.ok) return fail(c, 409, 'No se pudo completar la subida (¿el destino ya existía?)', { detail: r.stderr });
+      uploads.delete(u.id);
+      const it = await addPathToIndex(dest);
+      return c.json({ ok: true, item: it ? publicItem(it) : null, path: dest });
+    });
   });
 
   app.delete('/api/library/upload/:uid', async (c) => {
     const u = uploads.get(c.req.param('uid'));
     if (u) {
-      await hostVolumes.roots(u.dir);
-      uploads.delete(u.id);
-      await hostExec(`rm -f -- ${shq(u.part)}`, { user: 'user', timeoutMs: 10_000 });
+      await withUploadLock(u.id, async () => {
+        await hostVolumes.roots(u.dir);
+        uploads.delete(u.id);
+        await hostExec(`rm -f -- ${shq(u.part)}`, { user: 'user', timeoutMs: 10_000 });
+        return c.json({ ok: true });
+      });
     }
     return c.json({ ok: true });
   });
@@ -2031,6 +2276,7 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers): void 
     const current = state.shares.find((x) => x.id === c.req.param('sid'));
     if (!current) return fail(c, 404, 'Link no encontrado');
     const s: Share = { ...current, paths: [...current.paths] };
+    const hadEdgeCopies = current.cdn !== false && !current.pass;
     const b = await c.req.json<{
       title?: string; ttl?: number | null; extend?: number; allowDownload?: boolean; password?: string | null;
       msg?: string; cdn?: boolean; notifyActivity?: boolean; add?: string[]; remove?: string[]; order?: string[];
@@ -2050,7 +2296,13 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers): void 
     const toPaths = async (ids?: string[]) => canonicalSharePaths((ids || []).map(id => items.get(id)?.p).filter(Boolean) as string[]);
     let addedPaths: string[], removedPaths: string[];
     try {
-      s.paths = await canonicalSharePaths(s.paths);
+      // Existing paths whose target vanished (renamed/deleted on disk, root
+      // removed) must not wedge every later PATCH — drop them instead of
+      // failing. They no longer resolve, so they serve nothing anyway.
+      const existing = await Promise.all(s.paths.map(async (p) => {
+        try { return (await canonicalSharePaths([p]))[0]; } catch { return null; }
+      }));
+      s.paths = existing.filter((p): p is string => !!p);
       addedPaths = await toPaths(b.add); removedPaths = await toPaths(b.remove);
     } catch (e) { return fail(c, 400, (e as Error).message); }
     if (b.remove?.length) {
@@ -2077,7 +2329,7 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers): void 
     if (!s.pass) delete current.pass;
     if (!s.msg) delete current.msg;
     saveState();
-    const edge = purge ? await purgeShare(c,s) : {success:true};
+    const edge = purge ? await purgeShare(c, s, hadEdgeCopies) : {success:true};
     return c.json({ ok: true, share: await shareSummary(c, s), ...(!edge.success ? {warning:'El cambio ya se aplicó en Axon, pero no se pudo invalidar la CDN. Algunas copias previas pueden seguir disponibles hasta vencer.'} : {}) });
   });
 
@@ -2146,7 +2398,7 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers): void 
     const s = await getShare(c);
     if (s instanceof Response) return s;
     if (!s.pass) return c.redirect(`/s/${s.id}`);
-    const ip = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'x';
+    const ip = requestIp(c);
     const key = `${ip}:${s.id}`;
     const now = Date.now();
     const fails = (unlockFails.get(key) || []).filter((t) => t > now - 10 * 60_000);
@@ -2160,7 +2412,7 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers): void 
       return passwordPage(c, s, 'Contraseña incorrecta');
     }
     unlockFails.delete(key);
-    const secure = (c.req.header('x-forwarded-proto') || '').includes('https') || (c.req.header('cf-visitor') || '').includes('https') ? '; Secure' : '';
+    const secure = ((loopbackPeer(c) && ((c.req.header('x-forwarded-proto') || '').includes('https') || (c.req.header('cf-visitor') || '').includes('https'))) || new URL(c.req.url).protocol === 'https:') ? '; Secure' : '';
     c.header('set-cookie', `axs_${s.id}=${unlockToken(s)}; Path=/s/${s.id}; HttpOnly; SameSite=Lax; Max-Age=${7 * 86400}${secure}`);
     return c.redirect(`/s/${s.id}`, 303);
   });

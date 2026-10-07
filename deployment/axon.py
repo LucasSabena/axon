@@ -23,6 +23,8 @@ import uuid
 
 REPOSITORY = 'https://github.com/LucasSabena/axon.git'
 DEFAULT_ROOT = Path.home() / '.local/share/axon-install'
+KEPT_RELEASES = 3   # current + previous + one older source tree
+KEPT_BACKUPS = 3
 
 
 def run(args, **kwargs):
@@ -111,16 +113,41 @@ def check_owner(root, name):
         raise RuntimeError(f'El contenedor {name} pertenece a otra instalación. Elegí otro --name.')
 
 
+def latest_release_ref(repo):
+    """Newest v* tag on the remote; 'main' when the query fails or none exist.
+
+    A floating 'main' update pulls whatever landed since the last release —
+    the installer already pins tags (install.sh), updates must too.
+    """
+    try:
+        result = subprocess.run(
+            ['git', '--git-dir', str(repo), 'ls-remote', '--tags', '--refs', 'origin', 'v*'],
+            capture_output=True, text=True, timeout=60)
+        if result.returncode == 0:
+            tags = [l.rsplit('refs/tags/', 1)[-1] for l in result.stdout.splitlines() if 'refs/tags/' in l]
+            if tags:
+                return sorted(tags, key=lambda t: (
+                    [int(x) for x in re.findall(r'\d+', t.split('-', 1)[0])],
+                    # Final releases sort above prereleases of the same version.
+                    0 if '-' in t else 1,
+                    # Prereleases order on their numeric suffixes (rc10 > rc2).
+                    [int(x) for x in re.findall(r'\d+', t.split('-', 1)[1])] if '-' in t else []))[-1]
+    except Exception:
+        pass
+    return 'main'
+
+
 def checkout(root, state, ref):
-    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,127}', ref) or '..' in ref:
-        raise RuntimeError('Referencia Git inválida.')
     repo = root / 'repository.git'
     if not repo.exists():
         run(['git', 'clone', '--bare', state['repository'], repo])
     run(['git', '--git-dir', repo, 'remote', 'set-url', 'origin', state['repository']])
+    if ref is None: ref = latest_release_ref(repo)
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,127}', ref) or '..' in ref:
+        raise RuntimeError('Referencia Git inválida.')
     # Fetch exactly the requested branch/tag/revision; no working tree is reset.
     run(['git', '--git-dir', repo, 'fetch', '--force', 'origin', ref])
-    revision = run(['git', '--git-dir', repo, 'rev-parse', 'FETCH_HEAD'], capture_output=True, text=True).stdout.strip()
+    revision = run(['git', '--git-dir', repo, 'rev-parse', 'FETCH_HEAD^{commit}'], capture_output=True, text=True).stdout.strip()
     dest = root / 'releases' / revision
     if not dest.exists():
         dest.mkdir(parents=True)
@@ -163,6 +190,23 @@ def backup(root, old):
             '--mount', f'type=bind,source={root / "data"},target=/data,readonly', old['image'], '-c',
             'import sys,tarfile; t=tarfile.open(fileobj=sys.stdout.buffer,mode="w|"); t.add("/data",arcname="data"); t.close()'], stdout=stream)
     return str(dest)
+
+
+def prune(root, state):
+    # Bound disk growth: keep the live releases and the newest recovery copies.
+    keep = {release['revision'] for release in (state.get('current'), state.get('previous')) if release}
+    releases = root / 'releases'
+    if releases.is_dir():
+        old = sorted((d for d in releases.iterdir() if d.is_dir() and d.name not in keep),
+                     key=lambda d: d.stat().st_mtime, reverse=True)
+        for directory in old[max(0, KEPT_RELEASES - len(keep)):]:
+            shutil.rmtree(directory, ignore_errors=True)
+    backups = root / 'backups'
+    if backups.is_dir():
+        # Names start with %Y%m%d-%H%M%S so lexicographic order is chronological.
+        old = sorted((d for d in backups.iterdir() if d.is_dir()), key=lambda d: d.name, reverse=True)
+        for directory in old[KEPT_BACKUPS:]:
+            shutil.rmtree(directory, ignore_errors=True)
 
 
 def migrate_data(root, state, release):
@@ -241,6 +285,10 @@ def activate(root, state, release, source):
     if source and (source / 'deployment/axon.py').is_file():
         atomic(root / 'manager.py', (source / 'deployment/axon.py').read_text(), 0o700)
     print(f'AXON {release["version"]} listo en {state["origin"]} ({release["revision"][:12]}).', flush=True)
+    try:
+        prune(root, state)
+    except Exception as error:
+        print(f'Aviso: no se pudieron descartar copias antiguas: {error}', flush=True)
 
 
 def update(root, ref, rollback=False):
@@ -250,6 +298,7 @@ def update(root, ref, rollback=False):
         check_owner(root, state['name'])
         try:
             if rollback:
+                if ref is not None: raise RuntimeError('--ref no aplica a rollback.')
                 release = state.get('previous')
                 if not release: raise RuntimeError('No hay una versión anterior para recuperar.')
                 source = root / 'releases' / release['revision']
@@ -283,11 +332,28 @@ def install(args):
     if not 1024 <= args.port <= 65535: raise RuntimeError('Usá un puerto entre 1024 y 65535.')
     check_owner(root, args.name)
     with socket.socket() as test: test.bind((args.bind, args.port))
-    user = pwd.getpwnam(args.host_user)
+    try:
+        user = pwd.getpwnam(args.host_user)
+    except KeyError:
+        raise RuntimeError(f'El usuario {args.host_user} no existe en este sistema.') from None
     origin = args.origin or f'http://localhost:{args.port}'
-    if not re.fullmatch(r'https?://[^/\s]+', origin): raise RuntimeError('Usá un origen completo sin ruta final, por ejemplo https://axon.example.com.')
-    if args.existing_data and not args.existing_data.is_dir(): raise RuntimeError('La carpeta --existing-data no existe.')
-    if args.existing_data and ',' in str(args.existing_data): raise RuntimeError('La ruta de datos no puede contener comas.')
+    try:
+        # Same contract as requestOrigin() in src/storage/http.ts: scheme,
+        # host and optional port only — no credentials, path, query or hash.
+        parsed = urllib.parse.urlsplit(origin)
+        parsed.port
+        valid_origin = (parsed.scheme in ('http', 'https') and bool(parsed.hostname)
+            and not parsed.username and not parsed.password
+            and parsed.path in ('', '/') and not parsed.query and not parsed.fragment
+            and not any(c.isspace() for c in origin))
+    except ValueError:
+        valid_origin = False
+    if not valid_origin: raise RuntimeError('Usá un origen completo sin ruta final, por ejemplo https://axon.example.com.')
+    existing_data = None
+    if args.existing_data:
+        if not args.existing_data.is_dir(): raise RuntimeError('La carpeta --existing-data no existe.')
+        existing_data = str(args.existing_data.resolve())
+        if ',' in existing_data or '\n' in existing_data: raise RuntimeError('La ruta de datos no puede contener comas o saltos de línea.')
     cloudflared = str(args.cloudflared_config.resolve(strict=True)) if args.cloudflared_config else None
     env = args.env_file.read_text() if args.env_file else ''
     if not re.search(r'^SESSION_SECRET=.+$', env, re.M): env += '\nSESSION_SECRET=' + secrets.token_urlsafe(48) + '\n'
@@ -316,7 +382,7 @@ def install(args):
         }, indent=2) + '\n')
     state = {'schema': 1, 'repository': args.repository, 'name': args.name, 'port': args.port, 'bind': args.bind,
              'origin': origin, 'hostUser': user.pw_name, 'current': None, 'previous': None, 'operation': 'new'}
-    if args.existing_data: state['pendingMigration'] = str(args.existing_data.resolve())
+    if existing_data: state['pendingMigration'] = existing_data
     if cloudflared: state['cloudflaredConfig'] = cloudflared
     save_state(root, state)
     atomic(root / 'manager.py', Path(__file__).read_text(), 0o700)
@@ -376,15 +442,21 @@ def setup_agents(root):
         state = read_state(root)
         if state['hostUser'] != pwd.getpwuid(os.getuid()).pw_name:
             raise RuntimeError('Ejecutá setup-agents como el usuario HOST_USER dueño de esta instalación.')
+        if not state.get('current'):
+            raise RuntimeError('Todavía no hay una versión activa. Ejecutá "axon update" antes de setup-agents.')
         runtime = root / 'agent-runtime'
         run(['python3', '-m', 'venv', runtime])
         python = runtime / 'bin/python'
         run([python, '-m', 'pip', 'install', 'websockets==15.0.1'])
         state['agentPython'] = str(python)
-        atomic(root / 'compose.json', manifest(root, state, state['current']))
-        compose(root, root / 'compose.json', 'up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '120')
-        verify(state, state['current'])
-        save_state(root, state)
+        try:
+            # Recreate through the same stop/backup/rollback flow as an update.
+            activate(root, state, state['current'], None)
+        except BaseException:
+            # The recovered container runs the previous manifest, without the variable.
+            state.pop('agentPython', None)
+            save_state(root, state)
+            raise
         print('Dependencia para cambiar cuentas de Codex Desktop instalada. Activá el selector desde Agentes.')
 
 
@@ -396,7 +468,7 @@ def main():
     ins.add_argument('--root', type=Path, default=argparse.SUPPRESS)
     ins.add_argument('--no-link', action='store_true', help='No crear el comando en ~/.local/bin; usar la ruta de esta instalación.')
     ins.add_argument('--repository', default=REPOSITORY)
-    ins.add_argument('--ref', default='main')
+    ins.add_argument('--ref', default=None, help='Rama, tag o revisión (por defecto: último tag v*, o main si no hay tags).')
     ins.add_argument('--port', type=int, default=3457)
     ins.add_argument('--name', default='axon-managed')
     ins.add_argument('--bind', choices=['127.0.0.1', '0.0.0.0'], default='127.0.0.1')
@@ -407,7 +479,7 @@ def main():
     ins.add_argument('--cloudflared-config', type=Path)
     for cmd in ['update', 'rollback', '_update', '_rollback']:
         p = sub.add_parser(cmd)
-        p.add_argument('--ref', default='main')
+        p.add_argument('--ref', default=None, help='Rama, tag o revisión (por defecto: último tag v*).')
         p.add_argument('--wait', action='store_true')
     sub.add_parser('status')
     sub.add_parser('setup-agents')
@@ -420,6 +492,7 @@ def main():
     if args.command == 'status':
         print(json.dumps(state, indent=2, ensure_ascii=False))
         print(f'Registro: {args.root / "update.log"}')
+        print(f'Retención: {KEPT_RELEASES} versiones en releases/ y {KEPT_BACKUPS} copias de seguridad en backups/.')
     elif args.command == 'setup-agents': setup_agents(args.root)
     elif args.command == 'reset-password': reset_password(args.root, state)
     elif args.command == 'reset-onboarding': reset_onboarding(args.root)
@@ -428,7 +501,9 @@ def main():
     else:
         fd = os.open(args.root / 'update.log', os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
         with os.fdopen(fd, 'a') as log:
-            child = subprocess.Popen([sys.executable, args.root / 'manager.py', '--root', args.root, '_' + args.command, '--ref', args.ref], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+            argv = [sys.executable, args.root / 'manager.py', '--root', args.root, '_' + args.command]
+            if args.ref is not None: argv += ['--ref', args.ref]
+            child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
         print(f'Proceso iniciado ({child.pid}). Continúa aunque cierres SSH. Consultá axon status y {args.root / "update.log"}.')
 
 

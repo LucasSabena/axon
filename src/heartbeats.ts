@@ -13,7 +13,7 @@ const FILE = path.join(
   path.dirname(process.env.CONFIG_PATH || '/app/data/config.json'),
   'heartbeats.json'
 );
-const MAX_TICKS = 1440; // ~24h at one probe/min
+const MAX_TICKS = 1440; // ~36h at one probe/90s
 const store = new Map<string, Heartbeat[]>();
 let loaded = false;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;

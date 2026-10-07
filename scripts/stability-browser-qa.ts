@@ -17,6 +17,11 @@ try {
     const login = await context.request.post(origin+'/api/login',{data:{username:'qa',password:'axon-local-qa'},headers:{Origin:origin}});
     if (!login.ok()) throw new Error('QA login failed');
   } else {
+    // Remote origin: we mint the session cookie locally, which needs the
+    // same SESSION_SECRET the target server uses. Without it src/auth
+    // throws at import time — say why instead.
+    if (!process.env.SESSION_SECRET)
+      throw new Error('AXON_QA_ORIGIN is remote: set SESSION_SECRET (the target server\'s secret) so a session cookie can be minted');
     const { createSession } = await import('../src/auth');
     const config = await Bun.file('data/config.json').json();
     await context.addCookies([{name:'axon_session',value:await createSession(config.auth.username),url:origin,httpOnly:true,secure:true,sameSite:'Lax'}]);
@@ -97,7 +102,7 @@ try {
     checks.push('Service worker offline recovery retains the route and returns automatically');
   } finally { await offlineContext.close(); }
   await Bun.write(output+'/report.json',JSON.stringify({origin,checks,errors,apiErrors,slowBoot:slow,operationalActions:0},null,2));
-  if(errors.length)throw new Error('Browser errors: '+errors.join('; '));
+  if(errors.length||apiErrors.length)throw new Error('Browser errors: '+errors.join('; ')+(apiErrors.length?` | API errors: ${apiErrors.map(e=>`${e.status} ${e.url}`).join('; ')}`:''));
   console.log(JSON.stringify({origin,passed:checks.length,browserErrors:errors.length,apiErrors}));
 } catch(error) {
   await Bun.write(output+'/failure.json',JSON.stringify({error:String(error),checks,errors,apiErrors,state:await page?.evaluate(()=>({url:location.href,boot:document.querySelector('#boot-message')?.textContent,loginVisible:!document.querySelector('#login-screen')?.classList.contains('hidden'),mainVisible:!document.querySelector('#main-screen')?.classList.contains('hidden')})).catch(()=>null)},null,2));

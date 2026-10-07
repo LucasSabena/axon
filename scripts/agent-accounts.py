@@ -29,6 +29,22 @@ AGENTS = {
 class Failure(Exception):
     def __init__(self, message, status=400): super().__init__(message); self.status = status
 
+def _is_python_shebang(line):
+    """True iff the shebang actually launches a python interpreter —
+    #!/path/python3.12, #!/usr/bin/env python3, env -S python3, python3.12t.
+    A trailing 'python' inside another interpreter (#!/bin/bash python) does
+    not count."""
+    m = re.match(r'^#!\s*(\S+)(.*)$', line.strip())
+    if not m: return False
+    interp, rest = m.group(1), m.group(2).strip().split()
+    base = interp.rsplit('/', 1)[-1]
+    if base == 'env':
+        while rest and rest[0].startswith('-'):
+            if rest[0] == '-S': rest = rest[1:]; break
+            rest = rest[1:]
+        base = rest[0].rsplit('/', 1)[-1] if rest else ''
+    return re.match(r'python[0-9.]*[a-z]?$', base) is not None
+
 def safe(path):
     path = Path(path)
     for p in [path, *path.parents]:
@@ -145,13 +161,13 @@ class Store:
             else: dest.symlink_to(target)
         return root
     def install(self, source, server_source=None):
-        if not source.startswith('#!/usr/bin/env python3\n'): raise Failure('Lanzador inválido')
+        if not _is_python_shebang(source.split('\n', 1)[0]): raise Failure('Lanzador inválido')
         bin_dir = self.home / '.local/bin'
         safe(bin_dir).mkdir(parents=True, exist_ok=True)
         atomic(bin_dir / 'axon-agent', source, 0o700)
         cfg = self.home / '.config/axon'; private_dir(cfg)
         if server_source:
-            if not server_source.startswith('#!/usr/bin/env python3\n'): raise Failure('Selector de servidor inválido')
+            if not _is_python_shebang(server_source.split('\n', 1)[0]): raise Failure('Selector de servidor inválido')
             atomic(cfg / 'codex-server-account.py', server_source, 0o700)
         shell = '# AXON account launcher: selection is read on every invocation.\n'
         for agent in AGENTS:
@@ -189,7 +205,10 @@ class Store:
         if state.get('serverWide'): return
         if not safe(self.home / '.config/axon/codex-server-account.py').is_file(): raise Failure('Instalá el selector de servidor antes de habilitarlo', 409)
         # Check dependencies before changing any credential path.
-        import websockets  # Host-only reconciler; no credentials leave this host.
+        try:
+            import websockets  # Host-only reconciler; no credentials leave this host.
+        except ImportError:
+            raise Failure('Falta el módulo websockets en el Python del host; instalalo antes de habilitar el modo servidor', 409)
         native = safe(self.home / '.codex/auth.json')
         if not native.is_file(): raise Failure('Conectá la cuenta original de Codex antes de habilitar el servidor', 409)
         original = self.root / 'codex/current'; private_dir(original)
@@ -202,7 +221,18 @@ class Store:
         state['serverWide'] = True
         # Publish the mapping before preparing the new current profile.
         self.save(d)
-        self.prepare('codex', 'current')
+        try:
+            self.prepare('codex', 'current')
+        except Exception:
+            # Rolled back as a whole: no serverWide flag without the prepared
+            # profile, and the credential goes back to the native home.
+            state['serverWide'] = False
+            self.save(d)
+            try:
+                if native.is_symlink(): native.unlink()
+                if not native.exists() and dest.exists(): os.rename(dest, native)
+            except OSError: pass
+            raise
     def schedule_desktop(self):
         helper = safe(self.home / '.config/axon/codex-server-account.py')
         if not helper.is_file(): raise Failure('Falta instalar el selector del servidor', 409)
@@ -244,8 +274,26 @@ class Store:
                 if agent != 'codex': raise Failure('La conexión de escritorio sólo aplica a Codex')
                 if not self.identity(agent, state['active'])['connected']: raise Failure('Conectá la cuenta antes de habilitarla en el servidor', 409)
                 self.enable_server(d)
+            elif action == 'delete':
+                p = self.profile(d, agent, req.get('id'))
+                if p['id'] == 'current': raise Failure('La cuenta actual no se puede eliminar', 409)
+                if p['id'] == state['active']: raise Failure('Activá otra cuenta antes de eliminarla', 409)
+                if self.login_busy(agent, p['id']): raise Failure('Esperá a que termine el login', 409)
+                state['profiles'] = [x for x in state['profiles'] if x['id'] != p['id']]
+                # Solo perfiles creados por el panel viven bajo root/agent —
+                # 'current' apunta al home nativo y ya está rechazado arriba.
+                shutil.rmtree(self.profile_home(agent, p['id']), ignore_errors=True)
+                lock = self.root / agent / (p['id'] + '.login-lock')
+                if lock.exists(): lock.unlink()
             elif action != 'install': raise Failure('Acción no admitida')
-            if action in ['create', 'install']: self.install(req['source'], req.get('serverSource'))
+            if action in ['create', 'install']:
+                try: self.install(req['source'], req.get('serverSource'))
+                except Exception:
+                    # A failed install after prepare() must not leave an
+                    # orphaned profile dir behind for an unsaved account.
+                    if action == 'create':
+                        shutil.rmtree(self.profile_home(agent, p['id']), ignore_errors=True)
+                    raise
             self.save(d)
             if agent == 'codex' and state.get('serverWide') and action in ['activate', 'enable-server']:
                 self.schedule_desktop()

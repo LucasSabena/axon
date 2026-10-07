@@ -1,5 +1,6 @@
 import type { MiddlewareHandler } from 'hono';
-import type { PlatformStore } from './store';
+import { PlatformError, type PlatformStore } from './store';
+import { MaintenanceError } from '../storage/types';
 import path from 'node:path';
 
 /** Metadata only: never capture payloads, query strings, credentials or command output. */
@@ -27,7 +28,9 @@ export function auditMutations(store: PlatformStore, projectFor?: (pathname: str
       await next();
       store.append({actor,action:`${c.req.method} ${pathname}`,resource,projectId,status:c.res.status < 400 ? 'ok' : 'failed',httpStatus:c.res.status,durationMs:Math.round(performance.now()-start),operationId});
     } catch (e) {
-      store.append({actor,action:`${c.req.method} ${pathname}`,resource,projectId,status:'failed',httpStatus:500,durationMs:Math.round(performance.now()-start),operationId});
+      // The error handlers map typed errors to their own status; mirror that here.
+      const httpStatus=(e instanceof PlatformError||e instanceof MaintenanceError)&&Number.isInteger(e.status)?e.status:500;
+      store.append({actor,action:`${c.req.method} ${pathname}`,resource,projectId,status:'failed',httpStatus,durationMs:Math.round(performance.now()-start),operationId});
       throw e;
     }
   };

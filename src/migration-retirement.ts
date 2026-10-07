@@ -20,7 +20,22 @@ export class MigrationRetirement {
   const handle=await open(hostToContainer(file),constants.O_RDONLY|constants.O_NOFOLLOW);let source:string;
   try{const s=await handle.stat();if(!s.isFile()||s.size>262144)throw new MaintenanceError('Configuración no compatible');source=await handle.readFile('utf8');}finally{await handle.close();}
   const doc=load(source,{schema:JSON_SCHEMA}) as {services:Record<string,any>};if(!doc?.services?.[c.service])throw new MaintenanceError('El servicio no pertenece al archivo actual');
-  for(const [name,s] of Object.entries(doc.services)){if(name===c.service)continue;const deps=s.depends_on;if(Array.isArray(deps)&&deps.includes(c.service)||deps&&typeof deps==='object'&&Object.hasOwn(deps,c.service))throw new MaintenanceError('Otro servicio depende de la selección; resolvé esa dependencia antes de retirar');}
+  // Dependents can reference the target by service name or by its live
+  // container name: depends_on, links, volumes_from, 'service:'/'container:'
+  // modes (network_mode, ipc, pid), extends and container_name collisions.
+  const targets=new Set([c.service,i.name].filter((x):x is string=>!!x));
+  const named=(v:unknown)=>targets.has(String(v).split(':')[0]);
+  const scoped=(v:unknown)=>typeof v==='string'&&/^(?:service|container):/.test(v)&&targets.has(v.split(':').slice(1).join(':'));
+  for(const [name,s] of Object.entries(doc.services)){
+   if(name===c.service||!s||typeof s!=='object')continue;
+   const deps=s.depends_on;
+   const dependent=(Array.isArray(deps)?deps.some(named):deps&&typeof deps==='object'?Object.keys(deps).some(k=>targets.has(k)):false)
+    ||[s.links,s.volumes_from].flat().some(v=>named(v)||scoped(v))
+    ||[s.network_mode,s.ipc,s.pid].some(scoped)
+    ||targets.has(typeof s.extends==='string'?s.extends:s.extends?.service)
+    ||typeof s.container_name==='string'&&named(s.container_name);
+   if(dependent)throw new MaintenanceError('Otro servicio depende de la selección; resolvé esa dependencia antes de retirar');
+  }
   delete doc.services[c.service];if(!Object.keys(doc.services).length)throw new MaintenanceError('Retirar el último servicio requiere archivar el stack completo con otro plan');
   const content=dump(doc,{noRefs:true,lineWidth:120});this.drafts.save(file,content,source,hash(source));
   try{

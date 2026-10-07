@@ -51,7 +51,7 @@ def account_roots(home, kind):
         folder=base/agent
         if folder.is_symlink() or not folder.is_dir():continue
         for profile in sorted(folder.iterdir())[:24]:
-            if not re.fullmatch(r'a-[a-f0-9]{16}',profile.name) or profile.is_symlink() or not profile.is_dir():continue
+            if not re.fullmatch(r'(?:current|a-[a-f0-9]{16})',profile.name) or profile.is_symlink() or not profile.is_dir():continue
             roots.extend((agent,profile/s) for s in subdirs)
     return roots
 
@@ -190,7 +190,10 @@ class Store:
             for p in walk(root,{'.jsonl','.json'}):
                 if agent=='claude' and ('memory' in p.parts or p.name=='sessions-index.json'):continue
                 if agent=='gemini' and (p.parent.name!='chats' or not p.name.startswith('session-')):continue
-                sid=ident(agent,str(p));ids.add(sid);s=p.stat();sig=str(s.st_mtime_ns)+':'+str(s.st_size)
+                sid=ident(agent,str(p));ids.add(sid)
+                try:s=p.stat()
+                except OSError:continue  # vanished between walk and stat
+                sig=str(s.st_mtime_ns)+':'+str(s.st_size)
                 old=self.index.execute('select signature from chats where id=?',(sid,)).fetchone()
                 if old and old[0]==sig:
                     if str(p) in titles:
@@ -340,7 +343,7 @@ class Store:
         if row['agent']=='engram':
             title=self.r.get('title',row['title'])
             if not isinstance(title,str) or not title.strip() or len(title)>500:raise Failure('Título inválido')
-            backup=self.state/'backups';backup.mkdir(exist_ok=True,mode=0o700)
+            backup=self.state/'backups';backup.mkdir(exist_ok=True,mode=0o700);prune_backups(backup)
             name=backup/(row['id']+'-'+str(time.time_ns())+'.json');name.write_text(json.dumps(row,ensure_ascii=False));os.chmod(name,0o600)
             payload=json.dumps(dict(title=title,content=content)).encode()
             port=int(os.environ.get('ENGRAM_PORT','7437'))
@@ -352,7 +355,7 @@ class Store:
             p=Path(row['source']);old=p.read_text()
             # Check native file again immediately before replacement.
             if digest(old)!=digest(row['content']) or p.is_symlink() or p.resolve()!=p:raise Failure('El archivo cambió o usa un enlace simbólico',409)
-            backup=self.state/'backups';backup.mkdir(exist_ok=True,mode=0o700)
+            backup=self.state/'backups';backup.mkdir(exist_ok=True,mode=0o700);prune_backups(backup)
             name=backup/(row['id']+'-'+str(time.time_ns())+'.md');name.write_text(old);os.chmod(name,0o600)
             fd,tmp=tempfile.mkstemp(prefix='.axon-memory-',dir=p.parent)
             try:
@@ -364,6 +367,15 @@ class Store:
                 if os.path.exists(tmp):os.unlink(tmp)
         result=self.memory_detail();result['backup']=str(name)
         return result
+
+def prune_backups(folder, keep=50):
+    # Backups grow unboundedly otherwise — keep the newest per rotation.
+    try:
+        entries=[p for p in Path(folder).iterdir() if not p.is_symlink()]
+        for p in sorted(entries,key=lambda x:x.stat().st_mtime,reverse=True)[keep:keep+200]:
+            try:p.unlink()
+            except OSError:continue
+    except OSError:pass
 
 def memory_revision(row):return digest(str(row['updated'])+'\n'+row['title']+'\n'+row['content'])
 def file_refs(text):

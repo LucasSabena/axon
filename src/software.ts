@@ -1,4 +1,4 @@
-import { readFile, open } from 'node:fs/promises';
+import { readFile, open, writeFile, rename, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import {constants} from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
@@ -18,7 +18,7 @@ export interface SoftwareInstallation {
   executables:string[]; executablePath?:string; applicationId?:string; integrationId?:string; desktopFile?:string;
   iconFile?:string; iconSource?:string; iconUrl?:string; origin?:string; policy?:{minutes:number;excludes:string[]};
   iconName?:string;iconInfo?:IconInfo;sourceName?:string;homepage?:string;projectName?:string;
-  canUpdate:boolean; updateState:string; reason:string; targetVersion?:string; targetCommit?:string; targetRevision?:string;
+  canUpdate:boolean; updateState:string; reason:string; ignored?:boolean; targetVersion?:string; targetCommit?:string; targetRevision?:string;
 }
 export interface SoftwareSnapshot {ok:true; installations:SoftwareInstallation[]; sources:SoftwareSource[]; checkedAt:number; user:string; home:string; canAdministerSystem:boolean; checking?:boolean; error?:string}
 export interface SoftwareTransaction {manager:string;scope:string;user:string;root:string;items:SoftwareInstallation[];argv:string[];effects:string;simulation:{complete:boolean;changes:{packageName:string;targetVersion:string}[];removals:string[]}}
@@ -29,8 +29,9 @@ const shq=(s:string)=>`'${s.replace(/'/g,`'"'"'`)}'`;
 const digest=(s:string)=>createHash('sha256').update(s).digest('hex');
 const validPackage=(s:string)=>/^(?:@[a-z0-9._-]+\/)?[a-z0-9][a-z0-9._-]*$/i.test(s);
 
-let script:Promise<string>;
-const scriptText=()=>script ||= readFile(new URL('./software-host.py',import.meta.url),'utf8');
+let script:Promise<string>|undefined;
+// A rejected read must not poison the cache — reset so the next call retries.
+const scriptText=()=>script ||= readFile(new URL('./software-host.py',import.meta.url),'utf8').catch(e=>{script=undefined;throw e;});
 export async function nativeSoftwareRunner(request:Record<string,unknown>) {
   if(Array.isArray(request.items))request={...request,items:request.items.map(p=>({id:p.id,version:p.version,targetVersion:p.targetVersion,targetRevision:p.targetRevision,targetCommit:p.targetCommit}))};
   const encoded=Buffer.from(JSON.stringify(request)).toString('base64');
@@ -67,6 +68,14 @@ export async function softwareConfig():Promise<SoftwareConfig> {
     if(parsed.ignored && (!Array.isArray(parsed.ignored)||parsed.ignored.some((id:any)=>typeof id!=='string')))throw new Error();
     return parsed;
   } catch(e:any) {if(e.code==='ENOENT')return {};throw new Error('software.json no es válido; no se aplican recetas ni ámbitos aproximados');}
+}
+
+// Escritura atómica: tmp + rename en el mismo directorio, permisos mínimos.
+async function writeSoftwareConfig(cfg:SoftwareConfig){
+  const file=path.join(DATA,'software.json'),tmp=file+'.tmp';
+  await mkdir(DATA,{recursive:true});
+  await writeFile(tmp,JSON.stringify(cfg,null,2),{mode:0o600});
+  await rename(tmp,file);
 }
 
 // Metadata only: optional integrations do not decide which packages exist.
@@ -113,7 +122,7 @@ export class SoftwareService {
   private generation=0;
   private checked=0;
   private plans=new Map<string,{plan:SoftwarePlan;config:SoftwareConfig}>();
-  constructor(private run:Runner=nativeSoftwareRunner,private config=softwareConfig,private integrationLoader=integrations,private metadata=registryMetadata){}
+  constructor(private run:Runner=nativeSoftwareRunner,private config=softwareConfig,private integrationLoader=integrations,private metadata=registryMetadata,private saveConfig:typeof writeSoftwareConfig=writeSoftwareConfig){}
   invalidate(){this.generation++;this.flight=undefined;this.updates=undefined;this.checked=0;/* Retain the last snapshot on read failure. */}
   refreshIcons(){if(this.snapshot){softwareIcons.learnNative(this.snapshot.installations);for(const row of this.snapshot.installations){row.iconInfo=softwareIcons.describe(row);row.iconUrl='/api/software/icons/'+encodeURIComponent(row.id)+'?v='+row.iconInfo.version;}}}
   async get(fresh=false):Promise<SoftwareSnapshot>{
@@ -130,7 +139,10 @@ export class SoftwareService {
         if(previous && Date.now()-this.checked<300000){
           for(const row of snapshot.installations){
             const old=previous.installations.find(p=>p.id===row.id),source=snapshot.sources.find(s=>s.id===row.sourceId);
-            if(old&&old.version===row.version&&source?.complete&&!source.error&&JSON.stringify(old.policy)===JSON.stringify(row.policy)){
+            // Held rows (fresh cfg.ignored applied in read(), or carried from
+            // a previous hold) keep their own state — copying over them would
+            // briefly resurrect a stale "update available" marker.
+            if(old&&old.version===row.version&&old.updateState!=='held'&&row.updateState!=='held'&&source?.complete&&!source.error&&JSON.stringify(old.policy)===JSON.stringify(row.policy)){
               for(const key of ['canUpdate','updateState','reason','targetVersion','targetRevision','targetCommit'] as const)(row as any)[key]=old[key];
             }
           }
@@ -155,7 +167,7 @@ export class SoftwareService {
     for(const row of combined!.installations){
       row.iconInfo=softwareIcons.describe(row);
       row.iconUrl='/api/software/icons/'+encodeURIComponent(row.id)+'?v='+row.iconInfo.version;
-      if(cfg.ignored?.includes(row.id)){row.canUpdate=false;row.updateState='held';row.reason='Retenido en la configuración local de AXON';}
+      if(cfg.ignored?.includes(row.id)){row.canUpdate=false;row.updateState='held';row.ignored=true;row.reason='Retenido en la configuración local de AXON';}
     }
     return combined!;
   }
@@ -170,7 +182,7 @@ export class SoftwareService {
       let cursor=0;
       await Promise.all(Array.from({length:Math.min(4,globals.length)},async()=>{
         while(cursor<globals.length){const row=globals[cursor++];
-          try {const data=await this.metadata(row.packageName),candidate=registryCandidate(data,row);row.targetVersion=candidate||undefined;row.canUpdate=!!candidate&&!!row.version&&compareVersions(candidate,row.version)>0;row.updateState=!row.version||!/^\d+\.\d+\.\d+/.test(row.version)?'unmanaged':row.canUpdate?'available':'current';row.reason=candidate?'Sin actualizaciones permitidas por la política del gestor':'No hay versiones que cumplan la política de publicación';}
+          try {const data=await this.metadata(row.packageName),candidate=registryCandidate(data,row);row.targetVersion=candidate||undefined;row.canUpdate=!!candidate&&!!row.version&&compareVersions(candidate,row.version)>0;row.updateState=!row.version||!/^\d+\.\d+\.\d+/.test(row.version)?'unmanaged':row.canUpdate?'available':'current';row.reason=row.canUpdate?'':candidate?'Sin actualizaciones permitidas por la política del gestor':'No hay versiones que cumplan la política de publicación';}
           catch(error:any){row.canUpdate=false;row.updateState='error';row.reason=error.message;}
         }
       }));
@@ -180,6 +192,19 @@ export class SoftwareService {
     this.updates=flight;
   }
   async settled(){await this.get();await this.updates;return {...this.snapshot!,checking:!!this.updates};}
+  // Persiste `ignored` en software.json: la retención sobrevive reinicios y se
+  // revierte desde la misma UI. El siguiente inventario la re-aplica como held.
+  async setIgnored(id:string,ignore:boolean){
+    const snapshot=await this.get();
+    if(!snapshot.installations.some(p=>p.id===id))throw new Error('Instalación desconocida');
+    const cfg=await this.config(),set=new Set(cfg.ignored||[]);
+    if(ignore)set.add(id);else set.delete(id);
+    const next:SoftwareConfig={...cfg,ignored:[...set]};
+    if(!next.ignored!.length)delete next.ignored;
+    await this.saveConfig(next);
+    this.invalidate();
+    return (await this.get()).installations.find(p=>p.id===id);
+  }
   async plan(ids:string[]):Promise<SoftwarePlan>{
     if(!Array.isArray(ids)||!ids.length||ids.length>200||ids.some(id=>typeof id!=='string'))throw new Error('Seleccioná entre 1 y 200 instalaciones');
     await this.get(true);await this.updates;
@@ -244,6 +269,7 @@ export function registerSoftwareRoutes(app:Hono, service=software) {
   app.post('/api/software/icons-sync',async c=>{try{await softwareIcons.refresh();const result=await softwareIcons.warm((await service.get()).installations);service.invalidate();return c.json({ok:true,...result,...softwareIcons.status()});}catch(e:any){return c.json({ok:false,error:'No se pudieron renovar los iconos: '+e.message},503);}});
   app.get('/api/software',async c=>{softwareIcons.autoRefresh();try{return c.json(await service.get(c.req.query('fresh')==='1'));}catch(e:any){return c.json({ok:false,error:e.message},503);}});
   app.post('/api/software/plan',async c=>{try{const body=await c.req.json();return c.json({ok:true,plan:await service.plan(body.ids)});}catch(e:any){return c.json({ok:false,error:e.message},409);}});
+  app.put('/api/software/:id/ignore',async c=>{try{const body=await c.req.json().catch(()=>null);if(typeof body?.ignored!=='boolean')throw new Error('Indicá ignored:true o ignored:false');const row=await service.setIgnored(c.req.param('id'),body.ignored);return c.json({ok:true,ignored:body.ignored,updateState:row?.updateState});}catch(e:any){return c.json({ok:false,error:e.message},409);}});
   app.post('/api/software/execute',async c=>{try{const body=await c.req.json();return c.json({ok:true,job:await service.execute(body.planId)});}catch(e:any){return c.json({ok:false,error:e.message},409);}});
   app.post('/api/software/refresh-indices',async c=>{try{const snapshot=await service.get();if(!snapshot.canAdministerSystem||!snapshot.sources.some(s=>s.manager==='apt'&&s.available))throw new Error('No hay índices APT gestionables en este host');const cmd=await softwareCommand({action:'refresh',user:HOST_USER});return c.json({ok:true,job:runSoftwareJob('Actualizar índices APT',[{label:'Consultar repositorios sin instalar paquetes',cmd,user:'root',group:'software:apt'}])});}catch(e:any){return c.json({ok:false,error:e.message},409);}});
   app.get('/api/software/icons/:id',async c=>{const snapshot=await service.get(),row=snapshot.installations.find(p=>p.id===c.req.param('id'));return row?softwareIcon(row):c.json({ok:false,error:'Instalación desconocida'},404);});

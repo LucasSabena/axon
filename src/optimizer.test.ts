@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { Optimizer } from './optimizer';
+import { Optimizer, PLAN_TTL_MS } from './optimizer';
 import { assessContainer, sustainedHigh } from './optimizer-policy';
 import { cpuCounters, cpuDelta, dockerMemoryMb, memoryInfo, processStat } from './resource-math';
 import type { ContainerInfo } from './optimizer-collector';
@@ -120,7 +120,7 @@ describe('optimizer safety and recovery', () => {
   test('expired plan, changed preference or a new dependency stop all actions', async () => {
     const f = await fixture(); const c = f.rows[0];
     await f.service.preference(c.id, 'sometimes'); await f.warm();
-    const plan = await f.service.plan(false); f.advance(60_001);
+    const plan = await f.service.plan(false); f.advance(PLAN_TTL_MS + 1);
     await expect(f.service.apply(plan.token)).rejects.toThrow();
     await f.warm(); const p2 = await f.service.plan(false); await f.service.preference(c.id, 'always');
     await expect(f.service.apply(p2.token)).rejects.toThrow();

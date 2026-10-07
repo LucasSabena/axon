@@ -90,6 +90,56 @@
 
 #tab-drop .drop-btnrow { display: flex; gap: 6px; flex-wrap: wrap; }
 
+/* ---------- Opciones de los links ---------- */
+
+#tab-drop .drop-opts { margin: -6px 0 12px; font-size: 0.8rem; }
+#tab-drop .drop-opts summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: var(--text-faint);
+  list-style: none;
+  user-select: none;
+}
+#tab-drop .drop-opts summary::-webkit-details-marker { display: none; }
+#tab-drop .drop-opts summary svg { width: 14px; height: 14px; }
+#tab-drop .drop-opts summary:hover { color: var(--text-dim); }
+#tab-drop .drop-opts[open] summary { color: var(--text-dim); }
+#tab-drop .drop-opts-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+#tab-drop .drop-opt .drop-label { display: block; margin-bottom: 3px; }
+#tab-drop .drop-opt .drop-input { width: auto; min-width: 120px; }
+#tab-drop .drop-opt .drop-max { min-width: 0; width: 110px; }
+
+/* ---------- Progreso de subida ---------- */
+
+#tab-drop .drop-prog {
+  height: 4px;
+  background: var(--bg-canvas);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 6px;
+}
+#tab-drop .drop-prog-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 0.15s ease;
+}
+#tab-drop .drop-pct { font-variant-numeric: tabular-nums; }
+
+/* ---------- Drops list extras ---------- */
+
+#tab-drop .drop-lock { display: inline-flex; margin-right: 5px; color: var(--warn, #f0b429); vertical-align: middle; }
+#tab-drop .drop-lock svg { width: 13px; height: 13px; }
+
 /* ---------- Link result ---------- */
 
 #tab-drop .drop-result {

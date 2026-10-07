@@ -1,5 +1,5 @@
-import * as path from 'path';
-import { HOST_FS, HOST_USER, hostExec } from './host';
+import { realpath, stat } from 'node:fs/promises';
+import { HOST_FS, HOST_USER, containerToHost, hostExec } from './host';
 import type { ProgramDef, ProgramView } from './types';
 
 // Optional account/integration metadata and install recommendations. This list
@@ -500,30 +500,51 @@ return [
 ];
 };
 
+// Roots an icon file may resolve to — mirrors the native resolver's policy:
+// theme roots, pixmaps dirs and packaged-icon stores only.
+const iconRoots = () => {
+  const home = HOST_USER === 'root' ? '/root' : `/home/${HOST_USER}`;
+  return [
+    '/usr/share/icons',
+    '/usr/local/share/icons',
+    '/var/lib/flatpak/exports/share/icons',
+    `${home}/.local/share/icons`,
+    '/usr/share/pixmaps',
+    '/usr/local/share/pixmaps',
+    `${home}/.local/share/pixmaps`,
+    '/var/lib/snapd/desktop/icons',
+    '/snap/icons',
+  ];
+};
+
 export async function resolveIcon(iconName: string): Promise<string | null> {
   if (!iconName || iconName.includes('..') || iconName.includes('\0')) return null;
   // Absolute path (desktop entries may store one) — only serve real image
   // files so the endpoint can't read arbitrary host files.
   if (iconName.startsWith('/')) {
     if (!/\.(png|svg|xpm|ico|jpe?g|webp)$/i.test(iconName)) return null;
-    const p = hostToContainerFs(iconName);
+    const p = await hostIconFile(iconName);
     if (p) return p;
   }
   for (const dir of iconDirs()) {
     for (const ext of ICON_EXTS) {
       const candidate = `${dir}/${iconName}${ext}`;
-      const p = hostToContainerFs(candidate);
+      const p = await hostIconFile(candidate);
       if (p) return p;
     }
   }
   return null;
 }
 
-function hostToContainerFs(hostPath: string): string | null {
-  const p = `${HOST_FS}${hostPath}`;
+// Resolve symlinks, then require the real path to stay under a known icon
+// root — otherwise an Icon= entry (or a hostile symlink inside one) could
+// point this endpoint at any image-looking file on the host.
+async function hostIconFile(hostPath: string): Promise<string | null> {
   try {
-    const { existsSync } = require('fs');
-    return existsSync(p) ? p : null;
+    const real = await realpath(`${HOST_FS}${hostPath}`);
+    const host = containerToHost(real);
+    if (!(await stat(real)).isFile()) return null;
+    return iconRoots().some((root) => host === root || host.startsWith(root + '/')) ? real : null;
   } catch {
     return null;
   }

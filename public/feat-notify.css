@@ -117,12 +117,25 @@
   font-size: 0.82rem;
 }
 
+/* .notif-item is a <button>: reset the UA styles or it inherits button chrome
+ * (centered text, border, background) that breaks the row layout. */
 .notif-item {
+  appearance: none;
+  -webkit-appearance: none;
   display: flex;
   gap: 10px;
+  width: 100%;
   padding: 9px 12px;
+  border: 0;
   border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.07));
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
+.notif-item:hover { background: var(--bg-elevated, #16161d); }
+.notif-item:focus-visible { outline: 2px solid var(--accent, #5e6ad2); outline-offset: -2px; }
 .notif-item:last-child { border-bottom: 0; }
 .notif-item-unread { background: var(--accent-soft, rgba(94, 106, 210, 0.16)); }
 .notif-item-unread .notif-item-title { font-weight: 600; }
@@ -140,6 +153,8 @@
 .notif-ic-ok { color: var(--ok, #4cb782); }
 
 .notif-body { flex: 1; min-width: 0; }
+/* The body children are <span>s — they must stack, not flow inline. */
+.notif-body > span { display: block; }
 .notif-item-title {
   font-size: 0.82rem;
   font-weight: 500;

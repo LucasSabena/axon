@@ -22,6 +22,26 @@
     return v.toFixed(0) + ' TB';
   }
 
+  function fmtExp(ts) {
+    var d = new Date(ts);
+    if (!ts || isNaN(d.getTime())) return '-';
+    if (d.toDateString() === new Date().toDateString()) return d.toLocaleTimeString();
+    return d.toLocaleString('es-AR', { day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+
+  // Opciones compartidas por los tres creadores de links (subir, serve, texto).
+  function linkOpts() {
+    var o = {};
+    var el;
+    el = document.getElementById('drop-ttl');
+    if (el && parseFloat(el.value) > 0) o.ttl = parseFloat(el.value);
+    el = document.getElementById('drop-pw');
+    if (el && el.value) o.pw = el.value;
+    el = document.getElementById('drop-max');
+    if (el && parseInt(el.value, 10) > 0) o.max = parseInt(el.value, 10);
+    return o;
+  }
+
   function qrSvg(text) {
     try {
       if (typeof qrcode === 'function') {
@@ -70,18 +90,32 @@
         '</div>' +
       '</div>' +
       '<p class="listener-note drop-note-top">Pasá archivos y texto entre tus dispositivos y el servidor. ' +
-      'Los links públicos viven 24 h — un link = un archivo, sin login.</p>' +
+      'Los links públicos viven 24 h por defecto — un link = un archivo, sin login.</p>' +
+      '<details class="drop-opts">' +
+        '<summary>' + icon('settings-2') + ' Opciones de los links</summary>' +
+        '<div class="drop-opts-row">' +
+          '<span class="drop-opt"><label class="drop-label" for="drop-ttl">Vencimiento</label>' +
+          '<select id="drop-ttl" class="drop-input">' +
+            '<option value="1">1 hora</option><option value="6">6 horas</option><option value="24" selected>24 horas</option>' +
+            '<option value="72">3 días</option><option value="168">7 días</option>' +
+          '</select></span>' +
+          '<span class="drop-opt"><label class="drop-label" for="drop-pw">Contraseña</label>' +
+          '<input type="password" id="drop-pw" class="drop-input" placeholder="opcional" autocomplete="off"></span>' +
+          '<span class="drop-opt"><label class="drop-label" for="drop-max">Máx. descargas</label>' +
+          '<input type="number" id="drop-max" class="drop-input drop-max" min="1" max="10000" placeholder="ilimitadas"></span>' +
+        '</div>' +
+      '</details>' +
       '<div class="drop-grid">' +
 
         '<div class="card drop-card">' +
           '<div class="drop-card-title">' + icon('upload') + ' Subir → servidor</div>' +
-          '<div id="drop-zone" class="drop-zone" role="group" aria-label="Subir un archivo al servidor" tabindex="0">' +
+          '<div id="drop-zone" class="drop-zone" role="group" aria-label="Subir archivos al servidor" tabindex="0">' +
             '<div class="drop-zone-inner">' + icon('upload') +
-              '<span>Arrastrá un archivo acá o <button type="button" class="drop-link" id="drop-browse">elegilo</button></span>' +
-              '<small>máx. 50 MB</small>' +
+              '<span>Arrastrá archivos acá o <button type="button" class="drop-link" id="drop-browse">elegilos</button></span>' +
+              '<small>máx. 50 MB c/u · también podés pegar desde el portapapeles</small>' +
             '</div>' +
           '</div>' +
-          '<input type="file" id="drop-file-input" class="hidden">' +
+          '<input type="file" id="drop-file-input" class="hidden" multiple>' +
           '<div class="drop-save">' +
             '<label class="drop-label" for="drop-saveto">Guardar también en el servidor (opcional)</label>' +
             '<input type="text" id="drop-saveto" class="drop-input mono" placeholder="/home/usuario/descargas/ (carpeta) o ruta completa" spellcheck="false">' +
@@ -191,10 +225,11 @@
       var tr = document.createElement('tr');
       tr.innerHTML =
         '<td class="icon-cell">' + icon(kindIcon(d)) + '</td>' +
-        '<td><span class="drop-preview" title="' + esc(d.hostPath || d.name || d.preview || '') + '">' + esc(dropTitle(d)) + '</span></td>' +
+        '<td>' + (d['protected'] ? '<span class="drop-lock" title="Con contraseña">' + icon('lock') + '</span>' : '') +
+        '<span class="drop-preview" title="' + esc(d.hostPath || d.name || d.preview || '') + '">' + esc(dropTitle(d)) + '</span></td>' +
         '<td class="num">' + (d.size !== undefined ? fmtBytes(d.size) : '-') + '</td>' +
         '<td class="num">' + relTime(d.t) + '</td>' +
-        '<td class="num">' + new Date(d.expires).toLocaleTimeString() + '</td>' +
+        '<td class="num" title="' + esc(new Date(d.expires).toLocaleString('es-AR')) + '">' + esc(fmtExp(d.expires)) + '</td>' +
         '<td><div class="actions">' +
           '<button class="btn-action drop-copy" data-url="' + esc(url) + '" title="Copiar link">' + icon('copy') + '</button>' +
           '<button class="btn-action drop-qrtoggle" title="Mostrar QR">' + icon('qr-code') + '</button>' +
@@ -267,7 +302,12 @@
 
   // ---------- Upload / serve / text / clip ----------
 
-  function showLinkResult(container, url, saved) {
+  function showLinkResult(container, url, saved, meta) {
+    meta = meta || {};
+    var note = meta.deduped ? 'Link reutilizado — ya existía uno activo' : 'Público';
+    if (meta.expires) note += ' · vence ' + fmtExp(meta.expires);
+    if (meta.pw) note += ' · con contraseña';
+    if (meta.max) note += ' · máx. ' + meta.max + ' descarga' + (meta.max === 1 ? '' : 's');
     container.innerHTML =
       '<div class="drop-result">' +
         (saved
@@ -283,33 +323,76 @@
           '<a class="btn-secondary" href="' + esc(url) + '" target="_blank" rel="noopener">' + icon('external-link') + ' Abrir</a>' +
         '</div>' +
         '<div class="drop-qr hidden"></div>' +
-        '<div class="drop-note">Público · vence en 24 h · un link = un archivo</div>' +
+        '<div class="drop-note">' + esc(note) + ' · un link = un archivo</div>' +
       '</div>';
     refreshIcons();
   }
 
-  async function uploadFile(file) {
-    if (!file) return;
-    if (file.size > 50 * 1024 * 1024) { toast('El archivo supera el máximo de 50 MB', 'warn'); return; }
-    var out = document.getElementById('drop-upload-out');
-    out.innerHTML = '<div class="drop-status">' + icon('loader-circle') + ' Subiendo ' + esc(file.name) + ' (' + fmtBytes(file.size) + ')…</div>';
-    refreshIcons();
-    try {
-      var fd = new FormData();
-      fd.append('file', file);
-      var saveTo = document.getElementById('drop-saveto').value.trim();
-      var res = await fetch('/api/drop/file' + (saveTo ? '?saveTo=' + encodeURIComponent(saveTo) : ''), {
-        method: 'POST', body: fd, credentials: 'same-origin',
-      });
-      var data = await res.json().catch(function () { return {}; });
-      if (!res.ok || data.ok === false) throw new Error(data.error || 'HTTP ' + res.status);
-      showLinkResult(out, data.url || dropUrl(data.id), data.saved);
-      toast('Archivo subido', 'ok', '', 2500);
-      loadDrops().catch(function () {});
-    } catch (err) {
-      out.innerHTML = '';
-      errToast(err);
+  // XHR porque fetch no reporta progreso de subida.
+  function uploadOne(file, idx, total) {
+    if (file.size > 50 * 1024 * 1024) {
+      toast('«' + file.name + '» supera el máximo de 50 MB', 'warn');
+      return Promise.resolve(false);
     }
+    var out = document.getElementById('drop-upload-out');
+    var label = total > 1 ? ' (' + (idx + 1) + '/' + total + ')' : '';
+    out.innerHTML =
+      '<div class="drop-status">' + icon('loader-circle') + ' Subiendo ' + esc(file.name) +
+      ' (' + fmtBytes(file.size) + ')' + label + ' — <span class="drop-pct">0%</span></div>' +
+      '<div class="drop-prog"><span class="drop-prog-fill"></span></div>';
+    refreshIcons();
+    var fill = out.querySelector('.drop-prog-fill');
+    var pct = out.querySelector('.drop-pct');
+    var fd = new FormData();
+    fd.append('file', file);
+    var o = linkOpts();
+    if (o.ttl) fd.append('ttl', String(o.ttl));
+    if (o.pw) fd.append('pw', o.pw);
+    if (o.max) fd.append('max', String(o.max));
+    var saveTo = document.getElementById('drop-saveto').value.trim();
+    return new Promise(function (resolve) {
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/drop/file' + (saveTo ? '?saveTo=' + encodeURIComponent(saveTo) : ''));
+      xhr.withCredentials = true;
+      xhr.timeout = 120000;
+      xhr.upload.onprogress = function (e) {
+        if (!e.lengthComputable || !e.total) return;
+        var p = Math.min(100, Math.round((e.loaded / e.total) * 100));
+        if (fill) fill.style.width = p + '%';
+        if (pct) pct.textContent = p + '%';
+      };
+      xhr.onload = function () {
+        var data = {};
+        try { data = JSON.parse(xhr.responseText || '{}'); } catch (e) { /* respuesta no-JSON */ }
+        if (xhr.status >= 200 && xhr.status < 300 && data.ok !== false) {
+          showLinkResult(out, data.url || dropUrl(data.id), data.saved, {
+            pw: o.pw, max: o.max, expires: data.expires, deduped: data.deduped,
+          });
+          resolve(true);
+        } else {
+          out.innerHTML = '';
+          errToast(new Error(data.error || 'HTTP ' + xhr.status));
+          resolve(false);
+        }
+      };
+      xhr.onerror = xhr.ontimeout = function () {
+        out.innerHTML = '';
+        errToast(new Error('La subida falló — revisá la conexión con el servidor'));
+        resolve(false);
+      };
+      xhr.send(fd);
+    });
+  }
+
+  async function uploadFiles(list) {
+    var files = Array.prototype.slice.call(list || []).filter(Boolean);
+    if (!files.length) return;
+    var ok = 0;
+    for (var i = 0; i < files.length; i++) {
+      if (await uploadOne(files[i], i, files.length)) ok++;
+    }
+    if (ok) toast(ok === 1 ? 'Archivo subido' : ok + ' archivos subidos', 'ok', '', 2500);
+    loadDrops().catch(function () {});
   }
 
   async function createServe() {
@@ -318,9 +401,12 @@
     if (!p) { toast('Escribí la ruta del archivo en el servidor', 'warn'); return; }
     var out = document.getElementById('drop-serve-out');
     try {
-      var data = await api('/api/drop/serve', { method: 'POST', body: { path: p } });
-      showLinkResult(out, data.url || dropUrl(data.id));
-      toast('Link generado — ' + (data.name || 'archivo'), 'ok', '', 2500);
+      var o = linkOpts();
+      var data = await api('/api/drop/serve', { method: 'POST', body: { path: p, ttl: o.ttl, pw: o.pw, max: o.max } });
+      showLinkResult(out, data.url || dropUrl(data.id), undefined, {
+        pw: o.pw, max: o.max, expires: data.expires, deduped: data.deduped,
+      });
+      toast(data.deduped ? 'Link reutilizado — ya existía uno activo' : 'Link generado — ' + (data.name || 'archivo'), 'ok', '', 2500);
       loadDrops().catch(function () {});
     } catch (err) {
       out.innerHTML = '';
@@ -344,8 +430,8 @@
       view.textContent = data.text || '(vacío)';
       view.classList.remove('hidden');
       if (data.text) {
-        await navigator.clipboard.writeText(data.text).catch(function () {});
-        toast('Clipboard del servidor traído y copiado', 'ok', '', 2500);
+        var copied = await navigator.clipboard.writeText(data.text).then(function () { return true; }, function () { return false; });
+        toast(copied ? 'Clipboard del servidor traído y copiado' : 'Traído — copialo a mano (el navegador bloqueó el portapapeles)', copied ? 'ok' : 'warn', '', 2500);
       }
     } catch (err) { errToast(err); }
   }
@@ -355,8 +441,11 @@
     if (!text.trim()) { toast('Escribí algo primero', 'warn'); return; }
     var out = document.getElementById('drop-text-out');
     try {
-      var data = await api('/api/drop/text', { method: 'POST', body: { text: text } });
-      showLinkResult(out, data.url || dropUrl(data.id));
+      var o = linkOpts();
+      var data = await api('/api/drop/text', { method: 'POST', body: { text: text, ttl: o.ttl, pw: o.pw, max: o.max } });
+      showLinkResult(out, data.url || dropUrl(data.id), undefined, {
+        pw: o.pw, max: o.max, expires: data.expires, deduped: data.deduped,
+      });
       toast('Link de texto creado', 'ok', '', 2500);
       loadDrops().catch(function () {});
     } catch (err) {
@@ -380,7 +469,7 @@
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); }
     });
     input.addEventListener('change', function () {
-      uploadFile(input.files[0]);
+      uploadFiles(input.files);
       input.value = '';
     });
     ['dragenter', 'dragover'].forEach(function (ev) {
@@ -390,8 +479,16 @@
       zone.addEventListener(ev, function (e) { e.preventDefault(); zone.classList.remove('drop-over'); });
     });
     zone.addEventListener('drop', function (e) {
-      var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-      uploadFile(f);
+      uploadFiles(e.dataTransfer && e.dataTransfer.files);
+    });
+
+    // Pegar un archivo copiado (captura de pantalla, archivo del gestor) con
+    // la sección visible lo sube directo.
+    document.addEventListener('paste', function (e) {
+      var tab = document.getElementById('tab-drop');
+      if (!tab || !tab.classList.contains('active')) return;
+      var files = e.clipboardData && e.clipboardData.files;
+      if (files && files.length) { e.preventDefault(); uploadFiles(files); }
     });
 
     document.getElementById('drop-serve-btn').addEventListener('click', createServe);
@@ -424,8 +521,9 @@
     document.getElementById('tab-drop').addEventListener('click', async function (e) {
       var copyBtn = e.target.closest('.drop-copy');
       if (copyBtn) {
-        await navigator.clipboard.writeText(copyBtn.dataset.url).catch(function () {});
-        toast('Link copiado', 'ok', '', 2000);
+        var copied = await navigator.clipboard.writeText(copyBtn.dataset.url).then(function () { return true; }, function () { return false; });
+        if (copied) toast('Link copiado', 'ok', '', 2000);
+        else toast('No se pudo copiar — seleccioná el link y copialo a mano', 'warn');
         return;
       }
       var qrBtn = e.target.closest('.drop-qrbtn');
@@ -480,6 +578,15 @@
       // Integración con el tab-switcher de app.js por si el integrador agregó
       // el botón en el HTML en vez del inyectado.
       try { loaders.drop = loadDrop; } catch (e) { /* app.js viejo sin loaders */ }
+      try { window.AxonPages = window.AxonPages || {}; window.AxonPages.drop = { restore: loadDrop }; } catch (e) { /* sin navegación por secciones */ }
+      // Auto-refresh suave mientras la sección está visible.
+      setInterval(function () {
+        try {
+          var main = document.getElementById('main-screen');
+          if (typeof activeTabName !== 'undefined' && activeTabName === 'drop' && main && !main.classList.contains('hidden') &&
+              !document.hidden && !document.querySelector('.modal:not(.hidden)')) loadDrop();
+        } catch (e) { /* best effort */ }
+      }, 30000);
       refreshIcons();
     }
   }

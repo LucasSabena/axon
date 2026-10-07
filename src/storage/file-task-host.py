@@ -79,15 +79,17 @@ def rename(src,name,dst,new):
   raise OSError(e,'Movimiento rechazado')
  os.fsync(src);os.fsync(dst)
 def snapshot(parent,name):
- result=[];start=time.monotonic();device=os.stat(name,dir_fd=parent,follow_symlinks=False).st_dev
+ result=[];start=time.monotonic();device=os.stat(name,dir_fd=parent,follow_symlinks=False).st_dev;size=[0]
  def walk(fd,n,rel,depth):
-  if len(result)>=300000 or depth>40 or time.monotonic()-start>(15 if req.get('action')=='prepare' else 120):raise Guard('Árbol excedido: seleccioná una carpeta más pequeña')
+  # The serialized snapshot is embedded in state.json, which read_json caps at
+  # 8MiB. Staying under ~6MiB keeps every prepared task startable/recoverable.
+  if len(result)>=300000 or size[0]>6*1024*1024 or depth>40 or time.monotonic()-start>(15 if req.get('action')=='prepare' else 120):raise Guard('Árbol excedido: seleccioná una carpeta más pequeña')
   s=os.stat(n,dir_fd=fd,follow_symlinks=False)
   if s.st_dev!=device:raise Guard('El árbol cruza un montaje; seleccioná cada filesystem por separado')
   if not (stat.S_ISREG(s.st_mode) or stat.S_ISDIR(s.st_mode) or stat.S_ISLNK(s.st_mode)):raise Guard('El árbol contiene archivos especiales; operación bloqueada')
   row={'rel':rel,'identity':ident(s),'blocks':str(s.st_blocks*512)}
   if stat.S_ISLNK(s.st_mode):row['link']=os.readlink(n,dir_fd=fd)
-  result.append(row)
+  size[0]+=len(json.dumps(row,separators=(',',':')));result.append(row)
   if stat.S_ISDIR(s.st_mode):
    child=os.open(n,D,dir_fd=fd)
    try:
@@ -104,7 +106,7 @@ def progress(n):
  if time.monotonic()-progress.last>0.3:save(task);progress.last=time.monotonic()
 progress.last=0
 def copy_tree(src,sname,dst,dname,rows):
- expected={r['rel']:r for r in rows};hardlinks={}
+ expected={r['rel']:r for r in rows};hardlinks={};stageroot=[]
  def copy(fd,name,out,new,rel):
   cancelled();r=expected[rel];s=os.stat(name,dir_fd=fd,follow_symlinks=False)
   if not same(ident(s),r['identity']):raise Guard('El origen cambió desde el plan')
@@ -124,7 +126,10 @@ def copy_tree(src,sname,dst,dname,rows):
    os.utime(new,ns=(s.st_atime_ns,s.st_mtime_ns),dir_fd=out,follow_symlinks=False);return
   key=(s.st_dev,s.st_ino)
   if key in hardlinks:
-   previous=hardlinks[key];os.link(previous,new,dst_dir_fd=out,follow_symlinks=False);progress(s.st_size);return
+   # The source stays fd-relative to the staged root: an ancestor swap cannot
+   # point the link at an arbitrary same-device inode.
+   if not stageroot:stageroot.append(os.open(dname,D,dir_fd=dst))
+   os.link(hardlinks[key],new,src_dir_fd=stageroot[0],dst_dir_fd=out,follow_symlinks=False);progress(s.st_size);return
   a=os.open(name,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=fd);b=os.open(new,os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=out)
   try:
    if not same(ident(os.fstat(a)),r['identity']):raise Guard('El archivo cambió al abrirlo')
@@ -149,8 +154,10 @@ def copy_tree(src,sname,dst,dname,rows):
    if check.digest()!=digest.digest():raise Guard('La copia no coincide con el original')
   finally:os.close(a);os.close(b)
   os.utime(new,ns=(s.st_atime_ns,s.st_mtime_ns),dir_fd=out,follow_symlinks=False)
-  hardlinks[key]=task['partialPath']+('/'+rel if rel else '')
- copy(src,sname,dst,dname,'');os.fsync(dst)
+  hardlinks[key]=rel
+ try:copy(src,sname,dst,dname,'');os.fsync(dst)
+ finally:
+  if stageroot:os.close(stageroot[0])
 def metadata_signature(t,remove=False):
  p=t.get('metadataPath')
  if not p:return None
@@ -273,13 +280,20 @@ def run_worker():
   save(task)
  except Cancelled:
   # A same-filesystem move staged before cancellation must be returned intact.
+  restore_failed=False
   if task.get('phase')=='source-staged':
    try:rename(dst,stage,src,sname);task['partialPath']=None
-   except:pass
+   except:restore_failed=True
   if task.get('mode')=='purge' and task.get('phase')=='purging' and not task.get('removedEntries'):
    try:rename(dst,stage,src,sname);task['partialPath']=None
-   except:pass
-  task['state']='skipped';task['message']='Cancelado entre pasos seguros. Revisá cualquier copia parcial conservada.';save(task)
+   except:restore_failed=True
+  # A failed rename-back leaves an unrecoverable staged leftover — 'interrupted'
+  # keeps the locks and the task dir for reconcile. A *kept* partialPath (copy
+  # dest, purge remainder) is intentional evidence, still 'skipped'.
+  if restore_failed:
+   task['state']='interrupted';task['message']='Cancelado pero la restauración falló; la copia parcial quedó conservada para reconciliar.';save(task)
+  else:
+   task['state']='skipped';task['message']='Cancelado entre pasos seguros. Revisá cualquier copia parcial conservada.';save(task)
  except (Guard,OSError,KeyError,ValueError) as error:
   task['state']='interrupted' if task.get('phase') in ('source-staged','destination-committed','original-retained','purging','payload-removed') else 'failed'
   task['message']=error_reason(error)+'. Los originales y las copias parciales se conservan.';save(task)
@@ -291,7 +305,7 @@ def recover():
  owner=task.get('owner')
  if owner and incarnation(int(owner.split(':')[1]))==owner:raise Guard('El worker sigue trabajando')
  if task['state']=='restored':return
- lockdir=anchor(req['home']+'/.local/share/axon');lock=os.open('file-operations.lock',os.O_RDWR|os.O_NOFOLLOW,dir_fd=lockdir)
+ lockdir=anchor(req['home']+'/.local/share/axon');lock=os.open('file-operations.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600,dir_fd=lockdir)
  try:
   fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
   if task['mode']=='purge' and task.get('phase')=='payload-removed':
@@ -325,24 +339,28 @@ def recover():
    except FileNotFoundError:pass
    finally:os.close(parent);os.close(src)
   # No unknown effects are called success. A source still present permits a safe omission.
-  if task['mode']!='purge':
-   src=anchor(os.path.dirname(task['from']))
-   try:
-    s=os.stat(os.path.basename(task['from']),dir_fd=src,follow_symlinks=False)
-    if [str(s.st_dev),str(s.st_ino)]!=task['snapshot'][0]['identity'][:2]:raise Guard('Origen sustituido')
-   finally:os.close(src)
-   task['state']='skipped';task['message']='Origen conservado; la transferencia no se completó. Revisá la copia o contenido parcial antes de repetir.';save(task);return
-  raise Guard('El resultado necesita revisión manual; no se libera un bloqueo incierto')
+  src=anchor(os.path.dirname(task['from']))
+  try:
+   s=os.stat(os.path.basename(task['from']),dir_fd=src,follow_symlinks=False)
+   if [str(s.st_dev),str(s.st_ino)]!=task['snapshot'][0]['identity'][:2]:raise Guard('Origen sustituido')
+  except FileNotFoundError:
+   raise Guard('El resultado necesita revisión manual; no se libera un bloqueo incierto')
+  finally:os.close(src)
+  # A purge whose staged copy already went back (cancel rename-back) or was
+  # never staged leaves the source intact — confirm that instead of failing.
+  task['state']='skipped'
+  task['message']='El origen sigue intacto; no había contenido pendiente de devolver.' if task['mode']=='purge' else 'Origen conservado; la transferencia no se completó. Revisá la copia o contenido parcial antes de repetir.'
+  save(task);return
  finally:os.close(lock);os.close(lockdir)
 def public(t):
  return {'launched':bool(opfd is not None and 'launched' in os.listdir(opfd)),**{k:t.get(k) for k in ('id','state','mode','from','to','owner','phase','snapshotRevision','logicalBytes','allocatedBytes','copiedBytes','entries','partialPath','recoveryPath','message','retiredBytes','freeBytesBefore','freeBytesAfter','removedEntries')}}
 try:
- home=req['home'];id=req['id']
- if not isinstance(id,str) or str(uuid.UUID(id))!=id:raise Guard('Identificador inválido')
+ home=req['home'];id=req.get('id');action=req['action']
+ if action!='cleanup' and (not isinstance(id,str) or str(uuid.UUID(id))!=id):raise Guard('Identificador inválido')
+ if action=='cleanup' and id is not None and (not isinstance(id,str) or str(uuid.UUID(id))!=id):raise Guard('Identificador inválido')
  base=anchor(home+'/.local/share/axon/operations',True);handles.append(base)
  private=os.fstat(base)
  if private.st_uid!=os.getuid() or private.st_mode&0o077:raise Guard('Operaciones requieren directorio privado del usuario')
- action=req['action']
  if action=='prepare':
   if len(os.listdir(base))>=200:raise Guard('Límite de registros: revisá las operaciones anteriores antes de crear más')
   source=req['from'];destination=req['to'];mode=req['mode']
@@ -373,6 +391,54 @@ try:
   if mode=='purge':
    task['adapter']=req['adapter'];task['metadataPath']=req.get('metadataPath');task['metadataSignature']=metadata_signature(task)
   save(task);out={'ok':True,**public(task)}
+ elif action=='cleanup':
+  # Remove task dirs in a verified terminal state (or left behind by a crashed
+  # prepare without state.json) so the 200-entry cap cannot lock out new work.
+  removed=[]
+  for entry in sorted(os.listdir(base)):
+   if id is not None and entry!=id:continue
+   try:
+    if str(uuid.UUID(entry))!=entry:continue
+   except (ValueError,AttributeError,TypeError):continue
+   try:efd=os.open(entry,D,dir_fd=base)
+   except OSError:continue
+   try:
+    disposable=False
+    try:
+     record=read_json(efd,'state.json')
+     if isinstance(record,dict) and record.get('id')==entry:
+      st=record.get('state')
+      if st in ('verified','restored','failed','skipped'):
+       # Keep dirs that still name staged leftovers — state.json is the only
+       # record identifying a mid-flight remainder or pending delete.
+       disposable=not(record.get('partialPath') or record.get('recoveryPath') or record.get('pendingDelete'))
+      elif st=='planned':
+       # An unlaunched prepare outlives the 5-minute plan window only as
+       # garbage; past the margin it can never legitimately start.
+       try:os.stat('launched',dir_fd=efd,follow_symlinks=False);launched=True
+       except OSError:launched=False
+       try:disposable=not launched and time.time()-os.stat('state.json',dir_fd=efd,follow_symlinks=False).st_mtime>900
+       except OSError:disposable=False
+    except FileNotFoundError:
+     # A crashed prepare between mkdir and save() leaves a bare dir; require
+     # some age so a concurrent prepare just past mkdir is not swept.
+     try:disposable=time.time()-os.fstat(efd).st_mtime>60
+     except OSError:disposable=False
+    except (Guard,OSError,ValueError):pass
+    if disposable:
+     try:
+      # Re-check the launch marker at the last moment: a `start` that wrote
+      # 'launched' after the planned-age check above must not be swept.
+      try:os.stat('launched',dir_fd=efd,follow_symlinks=False);disposable=False
+      except OSError:pass
+      if not disposable:continue
+      names=os.listdir(efd)
+      if not any(stat.S_ISDIR(os.stat(n,dir_fd=efd,follow_symlinks=False).st_mode) for n in names):
+       for n in names:os.unlink(n,dir_fd=efd)
+       os.rmdir(entry,dir_fd=base);os.fsync(base);removed.append(entry)
+     except OSError:pass
+   finally:os.close(efd)
+  out={'ok':True,'removed':removed}
  else:
   opfd=os.open(id,D,dir_fd=base);handles.append(opfd);task=read_json(opfd,'state.json')
   if action=='start':
@@ -397,7 +463,7 @@ try:
      launch=os.stat('launched',dir_fd=opfd)
      if time.time()-launch.st_mtime>10:task['state']='interrupted';task['message']='Inicio sin recibo del worker; no se repite automáticamente.';save(task)
     except FileNotFoundError:pass
-   if task['state']=='running' and incarnation(int(task.get('owner','::0').split(':')[1]))!=task.get('owner'):
+   if task['state']=='running' and incarnation(int((task.get('owner') or 'missing:-1:owner').split(':')[1]))!=(task.get('owner') or 'missing:-1:owner'):
     task['state']='interrupted';task['message']='El worker terminó sin un recibo final. Revisá las ubicaciones; no se reejecuta automáticamente.';save(task)
    out={'ok':True,**public(task)}
   else:raise Guard('Acción no admitida')

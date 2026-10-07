@@ -24,6 +24,10 @@ async function atomicJson(file: string, value: unknown) {
 }
 class OperationError extends Error { constructor(message: string, public status = 409) { super(message); } }
 
+// 60 s era corto para leer la propuesta con calma; 3 min sigue obligando a
+// re-verificar el estado antes de aplicar.
+export const PLAN_TTL_MS = 180_000;
+
 export class Optimizer {
   private state: State = { preferences: {}, receipts: [] };
   private points: Point[] = [];
@@ -47,7 +51,8 @@ export class Optimizer {
   }) { this.activity = new ActivityGuard(deps.probe, () => this.now()); }
   private now() { return this.deps.now?.() ?? Date.now(); }
   private async load() {
-    if (!this.loaded) this.loaded = (async () => {
+    if (!this.loaded) {
+      const attempt = (async () => {
       try {
         const state = JSON.parse(await readFile(path.join(this.deps.dir, 'optimizer.json'), 'utf8'));
         if (!state || !state.preferences || Array.isArray(state.preferences) || !Array.isArray(state.receipts)) throw new Error('Formato inválido');
@@ -60,6 +65,11 @@ export class Optimizer {
         if (Array.isArray(points)) this.points = points.filter(p => Number.isFinite(p.at) && Number.isFinite(p.cpu) && Array.isArray(p.top)).slice(-2880);
       } catch { /* history is informational; never grants permission to stop */ }
     })();
+      this.loaded = attempt;
+      // A rejected attempt (corrupt optimizer.json) must not be cached
+      // forever — once the file is fixed the next call retries.
+      attempt.catch(() => { if (this.loaded === attempt) this.loaded = undefined; });
+    }
     return this.loaded;
   }
   private async save() { await atomicJson(path.join(this.deps.dir, 'optimizer.json'), this.state); }
@@ -133,7 +143,7 @@ export class Optimizer {
     const items = selected.filter(c => c.canStop);
     const skipped = selected.filter(c => !c.canStop).map(c => ({ id: c.id, name: c.name, reason: c.blocked }));
     const token = crypto.randomUUID();
-    const plan: Plan = { token, expiresAt: this.now() + 60_000, before: snapshot.cpu.busy, items, cleanup };
+    const plan: Plan = { token, expiresAt: this.now() + PLAN_TTL_MS, before: snapshot.cpu.busy, items, cleanup };
     for (const [key, p] of this.plans) if (p.expiresAt < this.now()) this.plans.delete(key);
     if (this.plans.size >= 20) this.plans.delete(this.plans.keys().next().value!);
     this.plans.set(token, plan);
@@ -216,14 +226,33 @@ export class Optimizer {
       return { ok: true, receipt };
     });
   }
+  // Manual start for an exited/created container. Identity is re-checked so a
+  // replaced container can't be started under a stale name.
+  async start(id: string) {
+    return this.exclusive(async () => {
+      const c = (await this.rows()).find(c => c.id === id);
+      if (!c) throw new OperationError('La aplicación cambió o ya no existe. Actualizá la lista.', 404);
+      if (c.state === 'running') return { ok: true, already: true };
+      if (c.state !== 'exited' && c.state !== 'created') throw new OperationError('La aplicación está cambiando de estado. Actualizá y reintentá.');
+      const r = await this.run(`docker start ${c.id}`);
+      if (!r.ok) throw new OperationError('No se pudo encender. Revisá su estado en Programas.');
+      this.cache.clear();
+      this.deps.event?.(`Se encendió ${c.name} desde Salud`);
+      return { ok: true };
+    });
+  }
 }
 
-export function registerOptimizerRoutes(app: Hono, config: () => Promise<AppConfig>) {
+export function registerOptimizerRoutes(app: Hono, config: () => Promise<AppConfig>, busyGuard?: () => Promise<string | null>) {
   const service = new Optimizer({
     dir: path.dirname(process.env.CONFIG_PATH || '/app/data/config.json'), config,
     selfId: process.env.HOSTNAME || '',
     event: title => recordEvent('system', title, undefined, { section: 'ops' }),
   });
+  const json = async (c: any) => {
+    try { return await c.req.json(); }
+    catch { throw new OperationError('Cuerpo de la solicitud inválido.', 400); }
+  };
   const route = (fn: (c: any) => Promise<any>) => async (c: any) => {
     c.header('Cache-Control', 'private, no-store');
     const origin = c.req.header('origin');
@@ -235,14 +264,21 @@ export function registerOptimizerRoutes(app: Hono, config: () => Promise<AppConf
     try { return c.json(await fn(c)); } catch (e) { return c.json({ ok: false, error: e instanceof OperationError ? e.message : 'No se pudo completar la operación. No se aplicarán nuevas acciones hasta poder verificar el servidor.' }, e instanceof OperationError ? e.status : 503); }
   };
   app.get('/api/optimizer', route(async () => ({ ok: true, snapshot: await service.snapshot() })));
-  app.put('/api/optimizer/apps/:id', route(async c => service.preference(c.req.param('id'), (await c.req.json()).importance)));
+  app.put('/api/optimizer/apps/:id', route(async c => service.preference(c.req.param('id'), (await json(c)).importance)));
   app.post('/api/optimizer/plan', route(async c => {
-    const body = await c.req.json();
+    const body = await json(c);
     if (body.ids !== undefined && (!Array.isArray(body.ids) || body.ids.some((v: unknown) => typeof v !== 'string'))) throw new OperationError('Selección inválida.', 400);
     return service.plan(body.cleanup === true, body.ids);
   }));
-  app.post('/api/optimizer/apply', route(async c => service.apply((await c.req.json()).token)));
-  app.post('/api/optimizer/undo', route(async c => service.undo((await c.req.json()).receiptId)));
+  // docker stop/start must not race an in-flight compose apply/recovery —
+  // same guard the docker/compose mutation routes use.
+  const dockerGuard = async () => {
+    const msg = await busyGuard?.();
+    if (msg) throw new OperationError(msg, 409);
+  };
+  app.post('/api/optimizer/apply', route(async c => { await dockerGuard(); return service.apply((await json(c)).token); }));
+  app.post('/api/optimizer/undo', route(async c => { await dockerGuard(); return service.undo((await json(c)).receiptId); }));
+  app.post('/api/optimizer/apps/:id/start', route(async c => { await dockerGuard(); return service.start(c.req.param('id')); }));
   // Attribute spikes even while the UI is closed. Never run automatic actions.
   const timer = setInterval(() => service.snapshot().catch(() => {}), 30_000);
   timer.unref();

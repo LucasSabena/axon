@@ -1,4 +1,4 @@
-import {readFile,lstat,readlink} from 'node:fs/promises';
+import {readFile,lstat,readlink,readdir} from 'node:fs/promises';
 import path from 'node:path';
 import {hostToContainer} from '../host';
 import {hostArgv,boundedCommand} from './host-argv';
@@ -22,7 +22,13 @@ export class HostCleaner {
   if(root.adapterId==='remote'){
    const name=path.basename(p);
    if(!(/\/\.vscode-server\/bin$/.test(root.path)&&/^[a-f0-9]{40}$/.test(name)||/\/\.vscode-server\/cli\/servers$/.test(root.path)&&/^(Stable|Insiders)-[a-f0-9]{40}$/.test(name)))throw new Error('Layout remoto no certificado; se conservan extensiones, perfiles y Devin');
-   for(const ref of ['current','default']){try{const f=path.join(root.path,ref);if((await lstat(hostToContainer(f))).isSymbolicLink()&&path.resolve(root.path,await readlink(hostToContainer(f)))===p)throw new Error('La versión está seleccionada por '+ref);}catch(e:any){if(e.code!=='ENOENT')throw e;}}
+   const selected:string[]=[];
+   try{for(const ref of (await readdir(hostToContainer(root.path))).slice(0,500)){
+    try{const f=path.join(root.path,ref);if((await lstat(hostToContainer(f))).isSymbolicLink()&&path.resolve(root.path,await readlink(hostToContainer(f)))===p)selected.push(ref);}catch(e:any){if(e.code!=='ENOENT')throw e;}
+   }}catch(e:any){if(e.code!=='ENOENT')throw e;}
+   if(selected.length)throw new Error('La versión está seleccionada por '+selected.slice(0,5).join(', '));
+   const markers=(await readdir(hostToContainer(p)).catch((e:any)=>{if(e.code!=='ENOENT')throw e;return [];})).filter(n=>/\.(?:lock|pid|token)$|^lockfile$/i.test(n));
+   if(markers.length)throw new Error('La versión tiene marcadores de uso ('+markers.slice(0,3).join(', ')+'); se conserva');
   }
   if(!root.adapterId.startsWith('trash-')&&PROTECTED.test(p))throw new Error('Ruta protegida');
  }
@@ -50,10 +56,18 @@ export class HostCleaner {
  async revalidate(step:Step,root:ScanRoot){try{await this.eligibility({...step.candidate,blockers:[]},root);await this.quiet(step.candidate,root);return true;}catch{return false;}}
  async start(step:Step){if(!step.taskId)throw new Error('Paso sin intención del host');const r=await this.run({action:'start',id:step.taskId,home:await this.home()});if(!r.ok)throw new Error('Inicio incierto');return r;}
  async status(step:Step):Promise<Receipt&{partialPath?:string;removedEntries?:number;launched?:boolean}>{
-  const r=await this.run({action:'status',id:step.taskId,home:await this.home()});if(!r.ok)throw new Error('Recibo no disponible');
+  const r=await this.run({action:'status',id:step.taskId,home:await this.home()});
+  // A missing or corrupt task dir is terminal evidence, not a retryable error:
+  // surface it as an interrupted receipt so plans stop blocking on a 503.
+  if(!r.ok)return {stepId:step.id,state:'interrupted',message:'El registro del worker no está disponible o es inválido; no hubo efectos confirmados. '+(((r as {error?:string}).error)||'Revisá el resultado manualmente.')};
   if(r.state==='planned'&&!r.launched)return {stepId:step.id,state:'skipped',message:'El worker no se inició. No se reanuda automáticamente.'};
   return {stepId:step.id,state:['verified','restored','failed','skipped','interrupted'].includes(r.state)?r.state as Receipt['state']:'running',message:r.message||'El worker sigue trabajando',retiredBytes:r.retiredBytes,freeBytesBefore:r.freeBytesBefore,freeBytesAfter:r.freeBytesAfter,partialPath:r.partialPath,removedEntries:r.removedEntries};
  }
  async recover(step:Step){const r=await this.run({action:'recover',id:step.taskId,home:await this.home()});if(!r.ok)throw new Error('No se pudo recuperar el resto: proceso activo, conflicto o identidad desconocida');return this.status(step);}
  async cancel(step:Step){await this.run({action:'cancel',id:step.taskId,home:await this.home()});}
+ // Best-effort removal of a terminal task dir (worker hard-caps operations/).
+ // The worker decides safety: it must keep anything still recoverable.
+ // Older workers return ok:false for the unknown action — ignored on purpose.
+ async cleanup(taskId:string){try{await this.run({action:'cleanup',id:taskId,home:await this.home()});}catch{}}
+ async sweep(){try{await this.run({action:'cleanup',home:await this.home(),all:true});}catch{}}
 }

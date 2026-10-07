@@ -21,7 +21,9 @@ try{
   await command(['docker','exec',sourceId,'psql','-U','proof','-d','axon_fixture','-c',"UPDATE restore_proof SET value='Actual';"]);
   const restoreId=crypto.randomUUID();await backupWorker({action:'start',home,id:restoreId,mode:'restore',originalId:id});const restored=await wait(restoreId);
   const find=async(dir:string):Promise<string|null>=>{for(const e of await readdir(dir,{withFileTypes:true})){const p=path.join(dir,e.name);if(e.isDirectory()){const found=await find(p);if(found)return found;}else if(e.name==='axon_fixture.dump')return p;}return null;};
-  const dump=(await find(restored.restoredPath))!;
+  if(!restored.restoredPath)throw new Error('La restauración verificada no devolvió restoredPath');
+  const dump=await find(restored.restoredPath);
+  if(!dump)throw new Error(`axon_fixture.dump no encontrado bajo ${restored.restoredPath}`);
   await command(['docker','exec',sourceId,'createdb','-U','proof','axon_recovered']);
   await command(['docker','exec','-i',sourceId,'pg_restore','--exit-on-error','--no-owner','--no-acl','-U','proof','-d','axon_recovered'],new Uint8Array(await readFile(dump)));
   const recovered=await command(['docker','exec',sourceId,'psql','-At','-U','proof','-d','axon_recovered','-c','SELECT value FROM restore_proof ORDER BY id']);
@@ -29,4 +31,4 @@ try{
   if(recovered!=='Original argentino\nRestauración comprobada'||current!=='Actual\nActual')throw new Error('El dump recuperado no preservó los valores originales o reemplazó el origen');
   const result={passed:true,at:new Date().toISOString(),checks:['Native PostgreSQL inventory','pg_dump custom snapshot','Restic isolated verified restore','Automatic import in temporary PostgreSQL','Recovered exact rows after source mutation','Source database unchanged by recovery'],snapshot:snapshot.snapshot,verifiedDatabases:snapshot.verifiedDatabases,originalPreserved:true};
   await mkdir('docs/platform-expansion-2026-10-05',{recursive:true});await writeFile('docs/platform-expansion-2026-10-05/database-proof.json',JSON.stringify(result,null,2));console.log(JSON.stringify(result));
-}finally{if(sourceId)await command(['docker','rm','-f',sourceId]);await rm(home,{recursive:true,force:true});}
+}finally{try{if(sourceId)await command(['docker','rm','-f',sourceId]);}finally{await rm(home,{recursive:true,force:true});}}

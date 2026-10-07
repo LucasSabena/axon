@@ -1,4 +1,4 @@
-import { createHmac, randomBytes } from 'crypto';
+import { createHash, createHmac, randomBytes } from 'crypto';
 
 // ---------- TOTP (RFC 6238) ----------
 // Dependency-free: 160-bit base32 secret + HMAC-SHA1, 30s steps, 6 digits.
@@ -76,4 +76,43 @@ export function totpUri(secret: string, username: string, issuer = 'AXON'): stri
     `otpauth://totp/${encodeURIComponent(issuer)}:${encodeURIComponent(username)}` +
     `?secret=${secret}&issuer=${encodeURIComponent(issuer)}`
   );
+}
+
+// ---------- Recovery codes ----------
+// Single-use backups for when the authenticator is unavailable — without them,
+// losing the device means irreversible lockout (la cuenta es local, sin mail).
+//
+// Plaintext codes are shown ONCE at enable time; only SHA-256 hashes persist
+// (en config.auth.totpRecovery: string[] — requiere agregar el campo opcional
+// a AppConfig.auth en types.ts y llamar estas funciones desde index.ts:
+//   enable: config.auth.totpRecovery = generateRecoveryCodes().map(hashRecoveryCode)
+//           y devolver los códigos en claro en la respuesta para mostrarlos una vez
+//   login:  valid = verifyTotp(...) || consumeRecoveryCode(config.auth.totpRecovery, code)
+//   disable: delete config.auth.totpRecovery
+// ).
+
+// 'xxxx-xxxx' — 40 bits, alfabeto base32 sin ambigüedades, fácil de tipear.
+export function generateRecoveryCodes(count = 10): string[] {
+  const codes: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const raw = base32Encode(randomBytes(5)).toLowerCase();
+    codes.push(`${raw.slice(0, 4)}-${raw.slice(4)}`);
+  }
+  return codes;
+}
+
+const normalizeRecovery = (code: string): string =>
+  (code || '').toUpperCase().replace(/[^A-Z2-7]/g, '');
+
+export function hashRecoveryCode(code: string): string {
+  return createHash('sha256').update(normalizeRecovery(code)).digest('hex');
+}
+
+// Returns true and removes the hash on match — the caller must saveConfig().
+export function consumeRecoveryCode(hashes: string[] | undefined, code: string): boolean {
+  if (!Array.isArray(hashes)) return false;
+  const index = hashes.indexOf(hashRecoveryCode(code));
+  if (index === -1) return false;
+  hashes.splice(index, 1);
+  return true;
 }

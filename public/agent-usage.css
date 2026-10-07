@@ -4,8 +4,6 @@
 .agd-authrow { flex-wrap:wrap; min-width:0; }
 .agd-authrow .auth-account { min-width:0; overflow-wrap:anywhere; }
 .ag-usage-heading > div { flex-wrap:wrap; }
-.ag-account-row { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:start; }
-.ag-account-usage { grid-column:1 / -1; min-width:0; }
 .ag-usage-account { padding:16px 0; border-bottom:1px solid var(--border); }
 .ag-usage-account-heading { margin-bottom:10px; flex-wrap:wrap; }
 .ag-usage-account-heading > div { min-width:0; }
@@ -38,8 +36,7 @@
 .ag-usage-connect-form label { display:grid; gap:5px; font-size:12px; }
 .ag-usage-connect-form input { min-width:0; width:100%; }
 .ag-usage-connect-form > div { display:flex; flex-wrap:wrap; gap:8px; }
-@media(max-width:720px) {
-  .ag-account-row { grid-template-columns:minmax(0,1fr); }
-  .ag-account-actions { justify-content:flex-start; flex-wrap:wrap; }
+/* same breakpoint as agent-accounts.css (was 720 — inconsistent) */
+@media(max-width:640px) {
   .ag-usage-windows { grid-template-columns:minmax(0,1fr); }
 }

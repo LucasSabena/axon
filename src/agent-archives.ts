@@ -1,8 +1,15 @@
 import { lstat, realpath, readFile, writeFile, mkdir, rename } from 'node:fs/promises';
 import * as path from 'node:path';
-import type { Hono } from 'hono';
+import type { Context, Hono } from 'hono';
 import { hostExec, hostToContainer, hostExists } from './host';
 import { recordEvent } from './events';
+import { body as readBody } from './storage/http';
+
+// Bounded JSON body (300 KB cap on the stream, independent of Content-Length);
+// parse/oversize failures degrade to {} so the route's own validation answers.
+async function reqJson<T extends Record<string, unknown>>(c: Context): Promise<T> {
+  try { return (await readBody(c)) as T; } catch { return {} as T; }
+}
 
 type Agent = { id: string; name: string; root: string; shared?: boolean };
 type Archive = { id: string; agentId: string; name: string; source: string; destination: string; at: number };
@@ -72,7 +79,7 @@ export function registerAgentArchives(app: Hono, options: {
   });
   app.post('/api/agent-residuals/archive', async c => {
     if(flight)return c.json({ok:false,error:'Ya hay una operación en curso'},409);
-    const body=await c.req.json<{confirm?:boolean;ids?:unknown}>().catch(()=>({} as {confirm?:boolean;ids?:unknown}));
+    const body=await reqJson<{confirm?:boolean;ids?:unknown}>(c);
     if(body?.confirm!==true||!Array.isArray(body.ids)||!body.ids.length||body.ids.length>50||body.ids.some(id=>typeof id!=='string'))
       return c.json({ok:false,error:'Seleccioná entre 1 y 50 residuales y confirmá la limpieza'},400);
     if(flight)return c.json({ok:false,error:'Ya hay una operación en curso'},409);
@@ -96,7 +103,7 @@ export function registerAgentArchives(app: Hono, options: {
   });
   app.post('/api/agents/:id/archive', async c => {
     if (flight) return c.json({ok:false,error:'Ya hay una limpieza en curso'},409);
-    const body=await c.req.json<{confirm?:boolean}>().catch(()=>({} as {confirm?:boolean}));
+    const body=await reqJson<{confirm?:boolean}>(c);
     if(body?.confirm!==true)return c.json({ok:false,error:'Confirmación requerida'},400);
     if(flight)return c.json({ok:false,error:'Ya hay una limpieza en curso'},409);
     const work=archiveOne(c.req.param('id'));flight=work;
@@ -109,7 +116,11 @@ export function registerAgentArchives(app: Hono, options: {
       if(!row || !safeArchiveRoot(row.source,options.home()) || row.destination!==options.home()+'/.local/share/axon/agent-archives/'+row.id || !/^[a-f0-9-]{36}$/.test(row.id))throw new Error('Respaldo inválido');
       if(await lstat(hostToContainer(row.source)).catch(()=>null))throw new Error('Ya existe una configuración en el destino; se conserva');
       const parent=hostToContainer(path.posix.dirname(row.source));
-      if(await realpath(parent)!==parent)throw new Error('El destino usa un enlace simbólico');
+      // realpath rejects ENOENT when the parent dir is gone — report it as a
+      // clean domain error instead of a raw fs exception.
+      const realParent=await realpath(parent).catch(()=>null);
+      if(realParent===null)throw new Error('La carpeta de destino no existe; creala o elegí otro respaldo');
+      if(realParent!==parent)throw new Error('El destino usa un enlace simbólico');
       await realDirectory(row.destination);
       const result=await hostExec(`mv -T -n -- ${quote(row.destination)} ${quote(row.source)} && test ! -e ${quote(row.destination)} && test ! -L ${quote(row.destination)}`,{user:'user',timeoutMs:15_000});
       if(!result.ok)throw new Error('No se pudo restaurar la carpeta');

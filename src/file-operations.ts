@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { HOST_USER, ON_HOST, readHostFile } from './host';
+import { resolveHostPath } from './host-storage';
 import { MaintenanceRepository } from './storage/repository';
 import { hostArgv, boundedCommand } from './storage/host-argv';
 import { hash, policyRevision, within } from './storage/policy';
@@ -72,8 +73,14 @@ export class FileOperations {
     const step:Step={id:stepId,adapterId:root.adapterId,actionId:'host-clean',candidate,locks:[],interruptions:[],expectedRecovery:'none',taskId:prepared.taskId};
     await this.purger!.start(step);
     let receipt=await this.purger!.status(step);
-    while(receipt.state==='running'){await Bun.sleep(400);receipt=await this.purger!.status(step);}
+    // A stuck worker must not hold the files:transfer lock forever. Past the
+    // bound the step reads interrupted: locks stay until reconcile settles the
+    // receipt against the real worker.
+    const deadline=Date.now()+30*60_000;
+    while(receipt.state==='running'&&Date.now()<deadline){await Bun.sleep(400);receipt=await this.purger!.status(step);}
+    if(receipt.state==='running')receipt={...receipt,state:'interrupted',message:'El borrado excedió el tiempo previsto; el bloqueo se conserva hasta reconciliar el resultado real.'};
     this.repo.receipt(opId,stepId,receipt);
+    if(['verified','skipped','failed','restored'].includes(receipt.state||''))void this.purger!.cleanup(step.taskId);
     if(receipt.state==='interrupted'){
      const current=this.repo.get<FileOperation>('file-operation',opId)!;
      this.repo.put('file-operation',opId,{...current,state:'interrupted',receipt:{ok:false,state:'interrupted',message:'Borrado interrumpido: el bloqueo se conserva. Comprobá el resultado real antes de reintentar.'}},'interrupted');
@@ -98,7 +105,7 @@ export class FileOperations {
     if(r.state!=='running'||!r.taskId)continue;
     try{
      const fresh=await this.purger.status({id:r.stepId,taskId:r.taskId} as Step);
-     if(fresh.state!=='running')this.repo.receipt(id,r.stepId,{...r,...fresh,stepId:r.stepId});
+     if(fresh.state!=='running'){this.repo.receipt(id,r.stepId,{...r,...fresh,stepId:r.stepId});if(['verified','skipped','failed','restored'].includes(fresh.state||''))void this.purger.cleanup(r.taskId);}
     }catch{/* status indisponible; conservar el recibo */}
    }
    receipts=this.repo.receipts(id) as typeof receipts;
@@ -179,6 +186,7 @@ export class FileOperations {
      }
      this.repo.receipt(id,r.stepId,{...r,...fresh,stepId:r.stepId});
      if(fresh.state==='interrupted')uncertain=true;
+     else if(['verified','skipped','failed','restored'].includes(fresh.state||''))void this.purger.cleanup(r.taskId!);
     }catch{uncertain=true;}
    }
    const settled=(this.repo.receipts(id) as {state:string}[]).filter(r=>r.state!=='running');
@@ -234,6 +242,9 @@ export function registerSharedTrashRoutes(app:Hono,operations:FileOperations){
  });
  app.use('/api/files/delete-now',async(c,next)=>{c.header('Cache-Control','private, no-store');actor(c);if(c.req.method!=='POST'||c.req.header('origin')!==requestOrigin(c)||c.req.header('sec-fetch-site')==='cross-site'||!c.req.header('content-type')?.startsWith('application/json'))return c.json({ok:false,error:'Solicitud no permitida'},403);await next();});
  app.post('/api/files/delete-now',async c=>{const b=await body(c);only(b,['paths']);if(!Array.isArray(b.paths)||!b.paths.length||b.paths.length>200||b.paths.some(p=>typeof p!=='string'||!p.startsWith('/')||p.length>4096))throw new MaintenanceError('Selección inválida',400);
+  // Defense in depth ahead of the host worker: every literal path must resolve
+  // inside the same allowed roots the file browser enforces.
+  for(const p of b.paths as string[])await resolveHostPath(p);
   const by=actor(c);const script=await readFile(new URL('./storage/force-delete-host.py',import.meta.url),'utf8');
   const argv=ON_HOST&&process.getuid?.()===0?['python3','-c',script]:['nsenter','-t','1','-m','-u','-i','-n','-p','--','/usr/bin/env','-i','PATH=/usr/local/bin:/usr/bin:/bin','python3','-c',script];
   const out=JSON.parse(await boundedCommand(argv,JSON.stringify({paths:b.paths,home:await operations.location()}),undefined,600000));

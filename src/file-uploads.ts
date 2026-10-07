@@ -1,14 +1,17 @@
 import type { Hono } from 'hono';
 import { stat } from 'node:fs/promises';
 import * as path from 'node:path';
-import { hostExec, hostSpawnInteractive, hostToContainer } from './host';
+import { hostExec, hostSpawnInteractive, hostToContainer, killHostProc } from './host';
 
 // The limit is per request, never per file. Memory stays bounded even for
 // multi-GB files, and each request fits comfortably through a reverse proxy.
 const CHUNK_BYTES = 8 * 1024 * 1024;
 const IDLE_MS = 60 * 60 * 1000;
+// A single block may be slow, but a dribbling client must not pin the `cat >>`
+// writer and the per-upload mutex forever. Generous bound for weak uplinks.
+const APPEND_TIMEOUT_MS = 15 * 60 * 1000;
 const shq = (s: string) => `'${s.replace(/'/g, `'"'"'`)}'`;
-type Resolve = (input: string | undefined | null) => Promise<{ path?: string; error?: string }>;
+type Resolve = (input: string | undefined | null) => Promise<{ path?: string; error?: string; status?: number }>;
 interface Upload {
   dir: string;
   dest: string;
@@ -46,20 +49,33 @@ async function append(part: string, body: ReadableStream<Uint8Array>, max: numbe
   const reader = body.getReader();
   let bytes = 0;
   let failure: unknown;
+  const timer = setTimeout(() => {
+    failure = new Error('El bloque tardó demasiado; la subida quedó interrumpida');
+    killHostProc(proc);
+    reader.cancel().catch(() => {});
+  }, APPEND_TIMEOUT_MS);
   try {
     while (true) {
+      if (failure) throw failure;
       const { done, value } = await reader.read();
       if (done) break;
       bytes += value.byteLength;
       if (bytes > max) throw new Error('El bloque supera el tamaño permitido');
-      await stdin.write(value);
+      // FileSink.write may accept only part of the chunk — re-offer the rest
+      // so the staged file never silently undercounts.
+      for (let off = 0; off < value.byteLength;) {
+        const n = Number(await stdin.write(value.subarray(off)));
+        if (n <= 0) throw new Error('No se pudo escribir el bloque');
+        off += n;
+      }
       await stdin.flush();
     }
     if (!bytes) throw new Error('Bloque vacío');
   } catch (err) {
-    failure = err;
+    failure = failure ?? err;
     await reader.cancel().catch(() => {});
   } finally {
+    clearTimeout(timer);
     reader.releaseLock();
     try { stdin.end(); } catch { /* process already closed */ }
   }
@@ -80,7 +96,10 @@ export function registerFileUploadRoutes(app: Hono, resolve: Resolve): void {
   };
   const sweeper = setInterval(() => {
     for (const [id, u] of uploads) {
-      if (!u.operation && Date.now() - u.touched > IDLE_MS) void remove(id, u);
+      // `touched` is stamped when a block starts and again when it settles, so
+      // an operation still running past IDLE_MS is a stuck upload: reap it too
+      // instead of letting a dribbling chunk keep the staging dir immortal.
+      if (Date.now() - u.touched > IDLE_MS) void remove(id, u);
     }
   }, 60_000);
   sweeper.unref();
@@ -88,16 +107,17 @@ export function registerFileUploadRoutes(app: Hono, resolve: Resolve): void {
   app.post('/api/files/upload/init', async (c) => {
     const b = await c.req.json<{ path: string; name: string; size: number }>().catch(() => null);
     if (!b || !Number.isSafeInteger(b.size) || b.size < 0) return c.json({ ok: false, error: 'Tamaño inválido' }, 400);
-    if (typeof b.name !== 'string' || !b.name || b.name === '.' || b.name === '..' || /[/\\\x00-\x1f\x7f]/.test(b.name)) {
+    if (typeof b.name !== 'string' || !b.name || b.name === '.' || b.name === '..' || /[/\\\x00-\x1f\x7f]/.test(b.name) ||
+        Buffer.byteLength(b.name, 'utf8') > 255) {
       return c.json({ ok: false, error: 'Nombre de archivo inválido' }, 400);
     }
     if (typeof b.path !== 'string') return c.json({ ok: false, error: 'Ruta inválida' }, 400);
     const rd = await resolve(b.path);
-    if (!rd.path) return c.json({ ok: false, error: rd.error }, 403);
+    if (!rd.path) return c.json({ ok: false, error: rd.error }, (rd.status ?? 403) as 403);
     const mk = await hostExec(`mkdir -p -- ${shq(rd.path)}`, { user: 'user', timeoutMs: 15_000 });
     if (!mk.ok) return c.json({ ok: false, error: 'No se pudo crear la carpeta destino', detail: mk.stderr }, 500);
     const dest = await resolve(path.posix.join(rd.path, b.name));
-    if (!dest.path) return c.json({ ok: false, error: dest.error }, 403);
+    if (!dest.path) return c.json({ ok: false, error: dest.error }, (dest.status ?? 403) as 403);
     // Stage on the destination filesystem so final rename is atomic, including
     // overwrite. An interrupted upload never truncates the original file.
     const parent = path.posix.dirname(dest.path);
@@ -115,20 +135,35 @@ export function registerFileUploadRoutes(app: Hono, resolve: Resolve): void {
   app.put('/api/files/upload/:id', async (c) => {
     const id = c.req.param('id');
     const u = uploads.get(id);
-    if (!u || u.cancelled) return c.json({ ok: false, error: 'Subida no encontrada o cancelada' }, 404);
-    if (u.completed) return c.json({ ok: false, error: 'Subida completa', received: u.received }, 409);
+    // Every early return drains the bounded body first (same rationale as the
+    // 409s above): a proxy stalls if we answer while the client still sends.
+    if (!u || u.cancelled) {
+      await discard(c.req.raw.body);
+      return c.json({ ok: false, error: 'Subida no encontrada o cancelada' }, 404);
+    }
+    if (u.completed) {
+      await discard(c.req.raw.body);
+      return c.json({ ok: false, error: 'Subida completa', received: u.received }, 409);
+    }
     if (u.operation) {
       await discard(c.req.raw.body);
       return c.json({ ok: false, error: 'Hay un bloque en curso' }, 409);
     }
     const offset = Number(c.req.query('offset'));
-    if (!Number.isSafeInteger(offset) || offset < 0) return c.json({ ok: false, error: 'Offset inválido' }, 400);
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      await discard(c.req.raw.body);
+      return c.json({ ok: false, error: 'Offset inválido' }, 400);
+    }
     if (offset !== u.received) {
       await discard(c.req.raw.body);
       return c.json({ ok: false, error: 'Offset desactualizado', received: u.received }, 409);
     }
     const body = c.req.raw.body;
-    if (!body || u.received === u.size) return c.json({ ok: false, error: 'Bloque vacío o subida completa' }, 400);
+    if (!body) return c.json({ ok: false, error: 'Bloque vacío o subida completa' }, 400);
+    if (u.received === u.size) {
+      await discard(body);
+      return c.json({ ok: false, error: 'Bloque vacío o subida completa' }, 400);
+    }
     const part = u.dir + '/data';
     let unlock!: () => void;
     u.operation = new Promise<void>((r) => { unlock = r; });
@@ -162,7 +197,7 @@ export function registerFileUploadRoutes(app: Hono, resolve: Resolve): void {
     try {
       // Recheck the allowlist in case a parent symlink changed during upload.
       const dest = await resolve(u.dest);
-      if (dest.path !== u.dest) return c.json({ ok: false, error: dest.error || 'La ruta destino cambió' }, 403);
+      if (dest.path !== u.dest) return c.json({ ok: false, error: dest.error || 'La ruta destino cambió' }, (dest.status ?? 403) as 403);
       const part = u.dir + '/data';
       if (!u.size) {
         const r = await hostExec(`: > ${shq(part)}`, { user: 'user', timeoutMs: 10_000 });
