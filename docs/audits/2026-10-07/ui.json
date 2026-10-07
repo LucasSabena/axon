@@ -1,0 +1,1505 @@
+{
+  "origin": "http://127.0.0.1:46171",
+  "sections": 24,
+  "checks": [
+    {
+      "name": "login accessibility",
+      "passed": true,
+      "evidence": {
+        "name": "login",
+        "violations": 0
+      }
+    },
+    {
+      "name": "axon/dashboard",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/dashboard",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "axon/ports",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/ports",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "axon/projects",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/projects",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "axon/docker",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/docker",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "axon/domains",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/domains",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "axon/files",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/files",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "axon/library",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/library",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "axon/terminal",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/terminal",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "axon/navegador",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/navegador",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "axon/programs",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/programs",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "axon/store",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/store",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "axon/drop",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/drop",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "axon/metrics",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/metrics",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "axon/logs",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/logs",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "axon/ops",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/ops",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "axon/scripts",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/scripts",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "axon/storage",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/storage",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "axon/compose",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/compose",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "axon/agents",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/agents",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "axon/settings",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/settings",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "axon/backups",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/backups",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "axon/audit",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/audit",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "axon/access",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/access",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "axon/desktop",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "axon/desktop",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/dashboard",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/dashboard",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/ports",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/ports",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/projects",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/projects",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/docker",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/docker",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/domains",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/domains",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/files",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/files",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/library",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/library",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/terminal",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/terminal",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/navegador",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/navegador",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/programs",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/programs",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/store",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/store",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/drop",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/drop",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/metrics",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/metrics",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/logs",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/logs",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/ops",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/ops",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/scripts",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/scripts",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/storage",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/storage",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/compose",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/compose",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/agents",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/agents",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/settings",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/settings",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/backups",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/backups",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/audit",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/audit",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/access",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/access",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "paper/desktop",
+      "passed": true,
+      "evidence": {
+        "geometry": {
+          "active": 1,
+          "width": 1440,
+          "scrollWidth": 1440
+        },
+        "accessibility": {
+          "name": "paper/desktop",
+          "violations": 0
+        }
+      }
+    },
+    {
+      "name": "320/dashboard",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "320/ports",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "320/projects",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "320/docker",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "320/domains",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "320/files",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "320/library",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "320/terminal",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "320/navegador",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "320/programs",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "320/store",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "320/drop",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "320/metrics",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "320/logs",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "320/ops",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "320/scripts",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "320/storage",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "320/compose",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "320/agents",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "320/settings",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "320/backups",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "320/audit",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "320/access",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "320/desktop",
+      "passed": true,
+      "evidence": {
+        "width": 320,
+        "scrollWidth": 320
+      }
+    },
+    {
+      "name": "390/dashboard",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "390/ports",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "390/projects",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "390/docker",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "390/domains",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "390/files",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "390/library",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "390/terminal",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "390/navegador",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "390/programs",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "390/store",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "390/drop",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "390/metrics",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "390/logs",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "390/ops",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "390/scripts",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "390/storage",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "390/compose",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "390/agents",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "390/settings",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "390/backups",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "390/audit",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "390/access",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "390/desktop",
+      "passed": true,
+      "evidence": {
+        "width": 390,
+        "scrollWidth": 390
+      }
+    },
+    {
+      "name": "768/dashboard",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "768/ports",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "768/projects",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "768/docker",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "768/domains",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "768/files",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "768/library",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "768/terminal",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "768/navegador",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "768/programs",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "768/store",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "768/drop",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "768/metrics",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "768/logs",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "768/ops",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "768/scripts",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "768/storage",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "768/compose",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "768/agents",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "768/settings",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "768/backups",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "768/audit",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "768/access",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "768/desktop",
+      "passed": true,
+      "evidence": {
+        "width": 768,
+        "scrollWidth": 768
+      }
+    },
+    {
+      "name": "1024/dashboard",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    },
+    {
+      "name": "1024/ports",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    },
+    {
+      "name": "1024/projects",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    },
+    {
+      "name": "1024/docker",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    },
+    {
+      "name": "1024/domains",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    },
+    {
+      "name": "1024/files",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    },
+    {
+      "name": "1024/library",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    },
+    {
+      "name": "1024/terminal",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    },
+    {
+      "name": "1024/navegador",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    },
+    {
+      "name": "1024/programs",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    },
+    {
+      "name": "1024/store",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    },
+    {
+      "name": "1024/drop",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    },
+    {
+      "name": "1024/metrics",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    },
+    {
+      "name": "1024/logs",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    },
+    {
+      "name": "1024/ops",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    },
+    {
+      "name": "1024/scripts",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    },
+    {
+      "name": "1024/storage",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    },
+    {
+      "name": "1024/compose",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    },
+    {
+      "name": "1024/agents",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    },
+    {
+      "name": "1024/settings",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    },
+    {
+      "name": "1024/backups",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    },
+    {
+      "name": "1024/audit",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    },
+    {
+      "name": "1024/access",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    },
+    {
+      "name": "1024/desktop",
+      "passed": true,
+      "evidence": {
+        "width": 1024,
+        "scrollWidth": 1024
+      }
+    }
+  ],
+  "errors": [],
+  "apiErrors": [],
+  "hostMutations": 0
+}

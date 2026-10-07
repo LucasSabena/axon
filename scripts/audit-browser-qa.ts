@@ -17,9 +17,16 @@ const checks: any[] = [];
 let page: Page;
 async function check(name: string, run: () => Promise<unknown>) {
   try { const evidence = await run(); checks.push({ name, passed: true, evidence }); console.log('PASS ' + name); }
-  catch (error) { checks.push({ name, passed: false, error: String(error) }); console.error('FAIL ' + name + ': ' + error); }
+  catch (error) {
+    checks.push({ name, passed: false, error: String(error) }); console.error('FAIL ' + name + ': ' + error);
+    await page?.screenshot({path:path.join(output,'screens','failure-'+name.replace(/[^a-z0-9-]/gi,'-')+'.png')}).catch(()=>{});
+  }
 }
 async function scan(name: string) {
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    await Promise.all(document.getAnimations().filter(a => a.effect?.getComputedTiming().iterations !== Infinity).map(a => a.finished.catch(() => {})));
+  });
   const result = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']).analyze();
   const violations = result.violations.map(v => ({ id: v.id, impact: v.impact, nodes: v.nodes.map(n => ({ target: n.target, summary: n.failureSummary })) }));
   if (violations.length) throw new Error(JSON.stringify(violations));

@@ -22,6 +22,8 @@ export interface BackupJob {
   createdAt:number;snapshot?:string;message?:string;verifiedAt?:number;restoredPath?:string;bytes?:number;files?:number;
   destinationId?:string;destinationLabel?:string;batchId?:string;launchedAt?:number;retryAt?:number;scheduledFor?:number;
   forgottenSnapshots?:string[];expired?:boolean;paths?:string[];sourcePaths?:string[];endedAt?:number;
+  partial?:boolean;updatedAt?:number;
+  progress?:{bytes_done?:number;total_bytes?:number;files_done?:number;total_files?:number;seconds_elapsed?:number;seconds_remaining?:number;error_count?:number};
 }
 export type BackupRunner = (request:Record<string,unknown>) => Promise<any>;
 let workerSource:Promise<string>|undefined;

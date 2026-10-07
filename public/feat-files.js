@@ -468,7 +468,12 @@
               });
             }
           })
-          .catch(() => {})
+          .catch((error) => {
+            if (nav === S.navId) sec.querySelectorAll(`[data-dirsize="${CSS.escape(p)}"]`).forEach((cell) => {
+              cell.textContent = 'Sin calcular';
+              cell.title = error.message || 'No se pudo leer el contenido completo de esta carpeta';
+            });
+          })
           .finally(() => { dirSizeRunning--; run(); });
       }
     };
@@ -2379,8 +2384,8 @@
           <tr><td>Tipo</td><td class="fp-type"></td></tr>
           ${orig ? '<tr><td>Ubicación original</td><td class="mono fp-orig"></td></tr>' : ''}
           ${st.symlinkTarget ? '<tr><td>Destino</td><td class="mono fp-target"></td></tr>' : ''}
-          <tr><td>Tamaño</td><td class="fp-size"></td></tr>
-          ${st.ftype === 'directory' ? '<tr><td>En disco</td><td class="fm-props-disk">calculando…</td></tr>' : ''}
+          <tr><td>${st.ftype === 'directory' ? 'Tamaño de los archivos' : 'Tamaño'}</td><td class="fp-size"></td></tr>
+          ${st.ftype === 'directory' ? '<tr><td>Espacio ocupado en disco</td><td class="fm-props-disk"></td></tr>' : ''}
           <tr><td>Modificado</td><td class="fp-mtime"></td></tr>
           <tr><td>Permisos</td><td class="fm-props-perms"></td></tr>
           <tr><td>Dueño</td><td class="fp-owner"></td></tr>
@@ -2395,7 +2400,8 @@
     m.querySelector('.fp-type').textContent = ftype;
     if (orig) m.querySelector('.fp-orig').textContent = orig;
     if (st.symlinkTarget) m.querySelector('.fp-target').textContent = st.symlinkTarget;
-    m.querySelector('.fp-size').textContent = `${fmtSize(st.size)} (${st.size.toLocaleString('es')} B)`;
+    m.querySelector('.fp-size').textContent = st.ftype === 'directory' ? 'Calculando…' : `${fmtSize(st.size)} (${st.size.toLocaleString('es')} B)`;
+    if (st.ftype === 'directory') m.querySelector('.fm-props-disk').textContent = st.diskSize == null ? 'Sin calcular' : `${fmtSize(st.diskSize)} (${st.diskSize.toLocaleString('es')} B)`;
     m.querySelector('.fp-mtime').textContent = fmtDate(st.mtime);
     m.querySelector('.fp-owner').textContent = `${st.user}:${st.group}`;
     // Permisos: checkboxes rwx por grupo, sincronizados con el octal.
@@ -2455,16 +2461,17 @@
       }
     });
     document.body.appendChild(m);
-    // Async disk usage — du on big trees takes a while.
+    // Directory metadata bytes are not the total of its files. Allocated
+    // space already came from stat; only request the apparent content total.
     if (st.ftype === 'directory') {
       api(`/api/files/dirsize?path=${encodeURIComponent(p)}`)
         .then((r) => {
-          const c = m.querySelector('.fm-props-disk');
+          const c = m.querySelector('.fp-size');
           if (c && m.isConnected) c.textContent = `${fmtSize(r.bytes)} (${r.bytes.toLocaleString('es')} B)`;
         })
         .catch(() => {
-          const c = m.querySelector('.fm-props-disk');
-          if (c && m.isConnected) c.textContent = '—';
+          const c = m.querySelector('.fp-size');
+          if (c && m.isConnected) c.textContent = 'Sin calcular';
         });
     }
   }

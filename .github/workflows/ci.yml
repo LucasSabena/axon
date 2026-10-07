@@ -34,12 +34,18 @@ jobs:
         run: pnpm run check
       - name: Application regressions
         run: pnpm run test
+      - name: Native agent contracts
+        run: pnpm run test:agents
       - name: Native software discovery and transaction contracts
         run: pnpm run test:software
       - name: Installer and recovery contracts
         run: pnpm run test:installer
       - name: Build application
         run: pnpm run build
+      - name: Install QA browser
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Isolated navigation, accessibility and responsive QA
+        run: pnpm run qa:full
       - name: Validate bootstrap
         run: bash -n install.sh
       - name: Build distributed Docker image

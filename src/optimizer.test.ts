@@ -20,7 +20,7 @@ async function fixture() {
   const cfg = { domains: [], settings: {}, projects: [] } as unknown as AppConfig;
   let failStop = false; let signal = { sessions: 0, work: 0, fingerprint: 'quiet' }; let probeFails = false;
   const deps = {
-    probe: async () => { if (probeFails) throw new Error('Unavailable'); return signal; },
+    probe: async (_container: ContainerInfo) => { if (probeFails) throw new Error('Unavailable'); return signal; },
     dir, config: async () => cfg, inventory: async () => structuredClone(rows), now: () => now,
     collect: async () => { collectionCount++; return { at: now, intervalMs: 1000, cpu: { busy: 50, wait: 0, steal: 0, total: 1600, cores: 16, pressure10: 0 }, memory: { totalMb: 1000, usedMb: 500, availableMb: 500, percent: 50, cacheMb: 100, swapUsedMb: 0 }, disk: { totalGb: 100, usedGb: 50, availableGb: 50, percent: 50 }, load: [1, 1, 1], containers: structuredClone(rows), processes: [], errors: [] }; },
     run: async (cmd: string) => {

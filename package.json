@@ -1,6 +1,6 @@
 {
   "name": "axon",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "Panel de control web self-hosted para administrar un servidor completo: puertos, proyectos, Docker, dominios y más",
   "license": "MIT",
   "author": "Lucas Sabena <01studiobinary@gmail.com>",
@@ -35,7 +35,8 @@
     "qa:platform:database": "bun --no-env-file run scripts/platform-database-qa.ts",
     "test:software": "python3 -m unittest discover -s src -p test_software_host.py",
     "test:installer": "python3 -m unittest discover -s deployment -p \"test_*.py\"",
-    "qa:audit": "bun --no-env-file run scripts/audit-browser-qa.ts"
+    "qa:audit": "bun --no-env-file run scripts/audit-browser-qa.ts",
+    "qa:full": "bun --no-env-file run scripts/qa-run.ts"
   },
   "dependencies": {
     "@awesome.me/webawesome": "3.14.0",

@@ -1,3 +1,4 @@
+import type { HttpFetch } from './http-fetch';
 import {Database} from 'bun:sqlite';
 import {constants,existsSync,lstatSync,mkdirSync} from 'node:fs';
 import {open} from 'node:fs/promises';
@@ -54,7 +55,7 @@ function contrastSvg(bytes:Uint8Array,color?:string){
 }
 export class SoftwareIcons {
  private db?:Database;private catalog:CatalogIcon[]=[];private byId=new Map<string,CatalogIcon>();private byName=new Map<string,CatalogIcon[]>();private nativeBrands=new Map<string,IconSubject>();private flights=new Map<string,Promise<{bytes:Uint8Array;mime:string}>>();private refreshFlight?:Promise<void>;private checked=0;private storageError='';private active=0;private waiters:(()=>void)[]=[];
- constructor(private directory=path.join(path.dirname(process.env.CONFIG_PATH||'/app/data/config.json'),'software-icons'),private fetcher:typeof fetch=fetch,private bundled:Record<string,any>=seed.assets){}
+ constructor(private directory=path.join(path.dirname(process.env.CONFIG_PATH||'/app/data/config.json'),'software-icons'),private fetcher:HttpFetch=fetch,private bundled:Record<string,any>=seed.assets){}
  private init(){
   if(this.db)return;
   try{mkdirSync(this.directory,{recursive:true,mode:0o700});if(lstatSync(this.directory).isSymbolicLink()||!lstatSync(this.directory).isDirectory())throw Error('Invalid cache directory');const file=path.join(this.directory,'icons.sqlite');if(existsSync(file)&&lstatSync(file).isSymbolicLink())throw Error('Invalid database path');this.db=new Database(file,{create:true});}

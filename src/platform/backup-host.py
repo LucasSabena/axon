@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import time
+import threading
 import uuid
 from pathlib import Path
 
@@ -59,6 +60,35 @@ def run(argv, env=None, timeout=120, stdout=None, stdin=None):
                             stderr=subprocess.PIPE, timeout=timeout)
     if result.returncode: raise RuntimeError('La herramienta no pudo completar la operación: ' + Path(argv[0]).name)
     return result.stdout or b''
+
+def capture_backup(argv, env, report, timeout=7200):
+    """Persist bounded progress while restic runs, without buffering its output."""
+    summary = None
+    with subprocess.Popen(argv, env={**env, 'RESTIC_PROGRESS_FPS': '1'},
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as process:
+        expired = threading.Event()
+        def expire():
+            expired.set()
+            try: process.kill()
+            except ProcessLookupError: pass
+        timer = threading.Timer(timeout, expire); timer.start()
+        try:
+            for line in process.stdout:
+                try: row = json.loads(line)
+                except ValueError: continue
+                if not isinstance(row, dict): continue
+                if row.get('message_type') == 'summary': summary = row
+                elif row.get('message_type') == 'status':
+                    progress = {key: value for key in ('bytes_done', 'total_bytes', 'files_done', 'total_files', 'seconds_elapsed', 'seconds_remaining', 'error_count')
+                                if isinstance(value := row.get(key), (int, float)) and not isinstance(value, bool) and 0 <= value < 2**53}
+                    report(progress)
+            code = process.wait()
+            if expired.is_set(): raise RuntimeError('La copia excedió el tiempo máximo y se detuvo.')
+            return code, summary
+        finally:
+            timer.cancel()
+            if process.poll() is None: process.kill()
+            process.wait(); process.stdout.close()
 
 def incarnation(pid):
     try:
@@ -387,6 +417,7 @@ def start(request):
                 request['snapshot'] = original['snapshot']; request['policy'] = {**original['policy'], 'repository': request.get('policy', {}).get('repository', original['policy'].get('repository'))}; request['dumpImage'] = original.get('dumpImage')
                 snapshot_selection(request.get('paths'))
                 request['bytes'] = original.get('bytes', 0); request['files'] = original.get('files'); request['sourcePaths'] = original.get('sourcePaths')
+                request['partial'] = original.get('partial', False)
         except Exception as e:
             # A deterministic rejection (invalid policy, missing snapshot) is
             # terminal evidence — a durable 'failed' receipt tells TS not to
@@ -399,7 +430,7 @@ def start(request):
             return rejected
         receipt = dict(id=job_id, policy=request['policy'], mode=request.get('mode', 'backup'), state='queued',
                        phase='starting', createdAt=int(time.time()*1000), message='Preparando la copia.',
-                       snapshot=request.get('snapshot'), originalId=request.get('originalId'), dumpImage=request.get('dumpImage'), paths=request.get('paths'), bytes=request.get('bytes', 0), files=request.get('files'), sourcePaths=request.get('sourcePaths'))
+                       snapshot=request.get('snapshot'), originalId=request.get('originalId'), dumpImage=request.get('dumpImage'), paths=request.get('paths'), bytes=request.get('bytes', 0), files=request.get('files'), sourcePaths=request.get('sourcePaths'), partial=request.get('partial', False))
         atomic(target, receipt)
         worker = base / 'backup-worker.py'; code = Path(__file__).read_text() if '__file__' in globals() and Path(__file__).is_file() else request['workerSource']
         # Replace atomically: a just-spawned worker must never read a partial file.
@@ -425,6 +456,7 @@ def worker(request):
     lockfd = os.open(base / 'repository.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     # Receipt writes serialize with status() rewrites on launch.lock.
     def update(**values):
+        values['updatedAt'] = int(time.time()*1000)
         receipt.update(values)
         fcntl.flock(launchfd, fcntl.LOCK_EX)
         try: atomic(target, receipt)
@@ -494,16 +526,8 @@ def worker(request):
                     if mount not in sources and any(mount.startswith(source.rstrip('/') + '/') for source in sources): args += ['--exclude', mount]
 
             args += ['--', *sources]
-            result = subprocess.run(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=7200)
-            # Tolerate non-JSON progress lines; only the summary matters.
-            summary = None
-            for line in (result.stdout or b'').decode(errors='replace').splitlines():
-                try: row = json.loads(line)
-                except ValueError: continue
-                if row.get('message_type') == 'summary': summary = row
-            # rc=3 means some source files were unreadable; the snapshot is still
-            # committed and gets verified like a complete one.
-            if result.returncode not in (0, 3) or not summary or not summary.get('snapshot_id'): raise RuntimeError('La herramienta no pudo completar la operación: restic')
+            code, summary = capture_backup(args, env, lambda progress: update(progress=progress))
+            if code not in (0, 3) or not summary or not summary.get('snapshot_id'): raise RuntimeError('La herramienta no pudo completar la operación: restic')
             if not summary.get('total_files_processed'):
                 nonempty = False
                 for s in sources:
@@ -513,7 +537,7 @@ def worker(request):
                     if nonempty: break
                 if nonempty: raise RuntimeError('La copia no incluyó ningún archivo. Revisá las exclusiones elegidas.')
             update(snapshot=summary['snapshot_id'], bytes=summary.get('total_bytes_processed', 0), files=summary.get('total_files_processed', 0), sourcePaths=sources,
-                   exclusions=exclusions, phase='verify', message='Restaurando el snapshot en una carpeta nueva para verificar sus datos.' + (' Algunos archivos no pudieron leerse.' if result.returncode == 3 else ''))
+                   partial=code == 3, exclusions=exclusions, phase='verify', message='Restaurando el snapshot en una carpeta nueva para verificar sus datos.' + (' Algunos archivos no pudieron leerse.' if code == 3 else ''))
         for source, mount_id in request.get('sourceMounts', {}).items(): check_mount(source, mount_id)
         check_mount(policy.get('repository'), request.get('repositoryMountId'))
         snapshot = receipt['snapshot']
@@ -587,12 +611,13 @@ def worker(request):
         else: shutil.rmtree(restored)
         retention_error = None
         forgotten = []
-        if mode == 'backup':
+        if mode == 'backup' and not receipt.get('partial'):
             try: forgotten, retention_error = retain_verified(base, policy, snapshot, env)
             except Exception: retention_error = 'La copia está verificada. No se pudo completar la limpieza de versiones antiguas.'
         update(forgottenSnapshots=forgotten, retentionError=retention_error)
-        update(state='verified', phase='done', verifiedAt=int(time.time()*1000), endedAt=int(time.time()*1000),
-               message='Restauración aislada comprobada. Los originales permanecen en su ubicación.' if mode == 'restore' else 'Copia y recuperación de prueba comprobadas.',
+        incomplete = receipt.get('partial') and mode != 'restore'
+        update(state='failed' if incomplete else 'verified', phase='partial' if incomplete else 'done', verifiedAt=int(time.time()*1000), endedAt=int(time.time()*1000),
+               message='Copia incompleta: algunos archivos no pudieron leerse. Los datos guardados se comprobaron y pueden recuperarse; se conservaron las versiones anteriores.' if incomplete else 'Restauración aislada comprobada. Los originales permanecen en su ubicación.' if mode == 'restore' else 'Copia y recuperación de prueba comprobadas.',
                destination='local', disasterRecovery=False)
     except Exception as error:
         update(state='failed', phase=receipt.get('phase', 'unknown'), endedAt=int(time.time()*1000), message=str(error)[:240])

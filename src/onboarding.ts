@@ -137,7 +137,11 @@ export function registerOnboardingPublic(app: Hono, deps: OnboardingDeps): void 
     else await next();
   });
   app.get('/api/onboarding/status', async (c) => {
-    const step = onboardingStep(await loadOnboarding());
+    const state = await loadOnboarding();
+    // A crash after credentials were saved may leave a consumed token in the
+    // wizard file. Show normal login rather than a setup form that always fails.
+    const consumed = state?.setupToken && deps.getConfig().auth.setupTokenHash === setupTokenHash(state.setupToken);
+    const step = consumed ? state.completedAt ? 'done' : 'wizard' : onboardingStep(state);
     return c.json({ ok: true, step, pending: step === 'setup' });
   });
 

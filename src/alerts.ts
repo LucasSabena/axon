@@ -1,4 +1,4 @@
-import { $ } from 'bun';
+import { dockerRun } from './docker';
 import { readFile, writeFile, mkdir } from 'fs/promises';
 import * as path from 'path';
 import type { Hono } from 'hono';
@@ -231,45 +231,20 @@ function preserveCheck(prefix: string, preserve: Set<string>): void {
 
 async function checkContainers(current: Map<string, ActiveAlert>, preserve: Set<string>): Promise<void> {
   // One inspect for every container — cheap enough once a minute.
-  const psRes = await $`docker ps -aq`.quiet().nothrow().catch(() => null);
-  let ids = psRes ? psRes.stdout.toString().trim() : '';
-  // The docker CLI may only exist on the host — fall back via nsenter when
-  // the in-container call fails (empty output with exit 0 = no containers).
-  const useHost = !psRes || psRes.exitCode !== 0;
-  if (useHost) {
-    const res = await hostExec('docker ps -aq', { user: 'user', timeoutMs: 20_000 }).catch(() => null);
-    if (!res || !res.ok) {
-      // Both docker paths failed — empty ids would be indistinguishable
-      // from "zero containers", so keep last tick's candidates.
-      preserveCheck('container:', preserve);
-      return;
-    }
-    ids = res.stdout.trim();
-  }
+  // Use the bounded command shared with the Docker module. A hung local CLI
+  // must not hold `ticking` forever and stop CPU/disk/systemd alerts as well.
+  const psRes = await dockerRun('ps -aq', 20_000);
+  if (!psRes.ok) { preserveCheck('container:', preserve); return; }
+  const ids = psRes.stdout.trim();
   const seen = new Set<string>();
   if (ids) {
     const list = ids.split('\n').map((s) => s.trim()).filter((s) => DOCKER_ID_SAFE.test(s));
     let out = '';
     if (list.length) {
       const fmt = '{{.Name}}|{{.RestartCount}}|{{.State.Status}}';
-      if (useHost) {
-        const res = await hostExec(`docker inspect ${list.map(shq).join(' ')} --format ${shq(fmt)}`, {
-          user: 'user',
-          timeoutMs: 30_000,
-        }).catch(() => null);
-        if (!res || !res.ok) {
-          preserveCheck('container:', preserve);
-          return;
-        }
-        out = res.stdout;
-      } else {
-        const inspectRes = await $`docker inspect ${list} --format ${fmt}`.quiet().nothrow().catch(() => null);
-        if (!inspectRes || inspectRes.exitCode !== 0) {
-          preserveCheck('container:', preserve);
-          return;
-        }
-        out = inspectRes.stdout.toString();
-      }
+      const res = await dockerRun(`inspect ${list.map(shq).join(' ')} --format ${shq(fmt)}`, 30_000);
+      if (!res.ok) { preserveCheck('container:', preserve); return; }
+      out = res.stdout;
     }
     for (const line of out.split('\n').filter(Boolean)) {
       const [rawName, rawCount, state] = line.split('|');
@@ -396,6 +371,7 @@ async function checkSmart(current: Map<string, ActiveAlert>, preserve: Set<strin
     const dev = (nl >= 0 ? part.slice(0, nl) : part).replace(/==\s*$/, '').trim();
     const body = nl >= 0 ? part.slice(nl + 1) : '';
     const result = body.match(/overall-health[^:]*:\s*(\w+)/i)?.[1] || '';
+    if (dev && !result) preserve.add(`smart:${dev}`);
     if (dev && result && result.toUpperCase() !== 'PASSED') {
       current.set(`smart:${dev}`, {
         key: `smart:${dev}`,

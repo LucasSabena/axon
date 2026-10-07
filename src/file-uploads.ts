@@ -42,7 +42,7 @@ async function discard(body: ReadableStream<Uint8Array> | null): Promise<void> {
 }
 
 // Stream to the host, applying backpressure instead of assembling a Buffer.
-async function append(part: string, body: ReadableStream<Uint8Array>, max: number): Promise<number> {
+export async function appendUploadBlock(part: string, body: ReadableStream<Uint8Array>, max: number, timeoutMs = APPEND_TIMEOUT_MS): Promise<number> {
   const proc = hostSpawnInteractive(`cat >> ${shq(part)}`, { user: 'user' });
   const stdin = proc.stdin as { write(d: Uint8Array): number | Promise<number>; flush(): number | Promise<number>; end(): void };
   const stderr = new Response(proc.stderr as ReadableStream).text();
@@ -52,8 +52,8 @@ async function append(part: string, body: ReadableStream<Uint8Array>, max: numbe
   const timer = setTimeout(() => {
     failure = new Error('El bloque tardó demasiado; la subida quedó interrumpida');
     killHostProc(proc);
-    reader.cancel().catch(() => {});
-  }, APPEND_TIMEOUT_MS);
+    try { void reader.cancel().catch(() => {}); } catch { /* reader already released */ }
+  }, timeoutMs);
   try {
     while (true) {
       if (failure) throw failure;
@@ -73,16 +73,20 @@ async function append(part: string, body: ReadableStream<Uint8Array>, max: numbe
     if (!bytes) throw new Error('Bloque vacío');
   } catch (err) {
     failure = failure ?? err;
-    await reader.cancel().catch(() => {});
+    // Cancellation belongs to the transport; an unresolved cancel promise must
+    // not pin the writer or its upload mutex after a rejected block.
+    killHostProc(proc);
+    void reader.cancel().catch(() => {});
   } finally {
-    clearTimeout(timer);
     reader.releaseLock();
     try { stdin.end(); } catch { /* process already closed */ }
   }
-  const [code, detail] = await Promise.all([proc.exited, stderr]);
-  if (failure) throw failure;
-  if (code !== 0) throw new Error(detail.trim().slice(0, 500) || 'No se pudo escribir el bloque');
-  return bytes;
+  try {
+    const [code, detail] = await Promise.all([proc.exited, stderr]);
+    if (failure) throw failure;
+    if (code !== 0) throw new Error(detail.trim().slice(0, 500) || 'No se pudo escribir el bloque');
+    return bytes;
+  } finally { clearTimeout(timer); }
 }
 
 export function registerFileUploadRoutes(app: Hono, resolve: Resolve): void {
@@ -169,7 +173,7 @@ export function registerFileUploadRoutes(app: Hono, resolve: Resolve): void {
     u.operation = new Promise<void>((r) => { unlock = r; });
     u.touched = Date.now();
     try {
-      const bytes = await append(part, body, Math.min(CHUNK_BYTES, u.size - u.received));
+      const bytes = await appendUploadBlock(part, body, Math.min(CHUNK_BYTES, u.size - u.received));
       u.received += bytes;
       return c.json({ ok: true, received: u.received });
     } catch (err) {

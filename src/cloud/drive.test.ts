@@ -33,8 +33,8 @@ async function fixture(id:DriveId,fn:(v:any)=>Promise<void>){
     return Response.json(file(u.pathname.split('/').pop()));
   };
   // Remove intentionally malformed placeholder from normal Microsoft listings.
-  const wrapped=async(...args:any[])=>{const r=await http(...args);if(id==='onedrive'&&new URL(args[0]).pathname.endsWith('/children')){const d:any=await r.json();d.value=d.value.filter((v:any)=>typeof v==='object');return Response.json(d);}return r;};
-  const drive=new Drive(id,store,vault,wrapped as typeof fetch);drive.configure(by.actorId,'fixture-client.apps.example','client-secret-private');
+  const wrapped=async(url:any,init:any={})=>{const r=await http(url,init);if(id==='onedrive'&&new URL(url).pathname.endsWith('/children')){const d:any=await r.json();d.value=d.value.filter((v:any)=>typeof v==='object');return Response.json(d);}return r;};
+  const drive=new Drive(id,store,vault,wrapped);drive.configure(by.actorId,'fixture-client.apps.example','client-secret-private');
   const connect=async()=>{const u=new URL(drive.authorize(by,origin));await drive.callback(by,u.searchParams.get('state'),'code');return u;};
   try{await fn({root,store,vault,drive,calls,bytes,connect,get refreshes(){return refreshes;},set badUrl(v:boolean){badUrl=v;},set rotate(v:boolean){rotate=v;}});}finally{store.close();initHostStorage();await rm(root,{recursive:true,force:true});}
 }

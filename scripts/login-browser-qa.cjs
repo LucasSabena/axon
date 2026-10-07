@@ -4,11 +4,11 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 
 (async () => {
-  const base = process.env.AXON_LOGIN_QA_URL || 'http://127.0.0.1:3467';
+  const base = process.env.AXON_QA_ORIGIN || process.env.AXON_LOGIN_QA_URL || 'http://127.0.0.1:3467';
   const publicOnly = process.env.AXON_LOGIN_QA_PUBLIC === '1';
-  const output = 'docs/login-redesign-2026-10-06';
+  const output = process.env.AXON_QA_OUTPUT || '/tmp/axon-login-qa';
   await fs.mkdir(output+'/screens',{recursive:true});
-  const browser = await chromium.launch({channel:'chrome',headless:true});
+  const browser = await chromium.launch({headless:true,...(process.env.AXON_QA_BROWSER_CHANNEL?{channel:process.env.AXON_QA_BROWSER_CHANNEL}:{})});
   const results = {base,publicOnly,layouts:[],flows:[],pageErrors:[]};
   const context = await browser.newContext({viewport:{width:1440,height:900},colorScheme:'dark'});
   const page = await context.newPage();
@@ -20,6 +20,7 @@ const fs = require('node:fs/promises');
     await page.waitForFunction(()=>['.login-story','.login-box'].every(selector=>Number(getComputedStyle(document.querySelector(selector)).opacity)===1));
   };
   try {
+    if(!publicOnly){const marker=await context.request.get(base+'/api/health');assert.equal((await marker.json()).qa,true,'An isolated QA fixture is required');}
     await entrance();
     for (const mode of ['dark','light']) {
       await page.evaluate(mode=>AxonThemes.setMode(mode),mode);
@@ -94,26 +95,62 @@ const fs = require('node:fs/promises');
       assert.equal(await page.locator('#login-submit').isEnabled(),true);
       results.flows.push('connection error recovery (simulated network failure)');
       await page.unroute('**/api/login');
-      await page.route('**/api/me',async route=>{
-        const response=await route.fetch();const body=await response.json();
-        await route.fulfill({response,json:{...body,totpEnabled:true}});
+      // Only a successful password response can advance to the second step.
+      let expired=false;
+      await page.route('**/api/login',async route=>{
+        const body=route.request().postDataJSON();
+        if(body.challenge){
+          assert.equal(body.username,undefined);assert.equal(body.password,undefined);
+          await route.fulfill({status:expired?410:401,json:{ok:false,error:expired?'La verificación venció. Volvé a ingresar tu usuario y contraseña.':'El código no es válido. Probá otra vez.'}});
+        }else await route.fulfill({status:200,json:{ok:true,requiresSecondFactor:true,challenge:'fixture-password-proof',expiresIn:300}});
       });
       await entrance();
+      await page.locator('#username').fill('qa');await page.locator('#password').fill('axon-local-qa');await page.locator('#login-submit').click();
+      await page.getByRole('heading',{name:'Verificá tu acceso',exact:true}).waitFor();
+      assert.equal(await page.locator('#login-credentials').isVisible(),false);
+      assert.equal(await page.locator('#password').inputValue(),'');
       assert.equal(await page.locator('#login-code').isVisible(),true);
-      assert.equal(await page.locator('#login-code').getAttribute('required'),'');
+      assert.equal(await page.locator('#login-code').evaluate(el=>el.required),true);
       await page.locator('#login-code').fill('123');
       assert.equal(await page.locator('#login-code').evaluate(el=>el.checkValidity()),false);
       await page.locator('#login-code').fill('123456');
       assert.equal(await page.locator('#login-code').evaluate(el=>el.checkValidity()),true);
-      assert.equal((await new AxeBuilder({page}).include('#login-screen').analyze()).violations.length,0);
-      await page.screenshot({path:`${output}/screens/login-2fa.png`});
-      results.flows.push('second-factor visibility, helper and six-digit validation (simulated server configuration)');
-      await page.unroute('**/api/me');await entrance();
+      await page.locator('#login-code').fill('abcd-2345');
+      assert.equal(await page.locator('#login-code').inputValue(),'abcd-2345');
+      assert.equal(await page.locator('#login-code').evaluate(el=>el.checkValidity()),true);
+      await page.locator('#login-code').fill('abcd2345');
+      assert.equal(await page.locator('#login-code').evaluate(el=>el.checkValidity()),true);
+      for(const mode of ['dark','light']){
+        await page.evaluate(mode=>AxonThemes.setMode(mode),mode);
+        for(const width of [1440,390,320]){
+          await page.setViewportSize({width,height:900});
+          assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+          await page.evaluate(()=>Promise.all(document.getAnimations().filter(a=>a.effect?.getComputedTiming().iterations!==Infinity).map(a=>a.finished.catch(()=>{}))));
+          const scan=await new AxeBuilder({page}).include('#login-screen').analyze();
+          assert.equal(scan.violations.length,0,JSON.stringify(scan.violations));
+          await page.screenshot({path:`${output}/screens/login-2fa-${mode}-${width}.png`});
+        }
+      }
+      await page.locator('#login-code').fill('123456');await page.locator('#login-submit').click();
+      await page.locator('#login-error').filter({hasText:'El código no es válido'}).waitFor();
+      assert.equal(await page.locator('#login-code').isVisible(),true);
+      assert.equal(await page.locator('#login-code').inputValue(),'');
+      await page.locator('#login-back').click();assert.equal(await page.locator('#login-code').isVisible(),false);
+      assert.equal(await page.locator('#password').isEnabled(),true);
+      await page.locator('#password').fill('axon-local-qa');await page.locator('#login-submit').click();
+      await page.getByRole('heading',{name:'Verificá tu acceso',exact:true}).waitFor();
+      expired=true;await page.locator('#login-code').fill('123456');await page.locator('#login-submit').click();
+      await page.locator('#login-error').filter({hasText:'La verificación venció'}).waitFor();
+      assert.equal(await page.locator('#login-code').isVisible(),false);
+      assert.equal(await page.locator('#password').isEnabled(),true);
+      results.flows.push('Password-confirmed second step, TOTP/recovery, retry, back and expiration (simulated responses)');
+      await page.unroute('**/api/login');await entrance();
       // A real rejected login exercises the original backend and session contract.
       await page.locator('#username').fill('qa');await page.locator('#password').fill('wrong-qa-password');
       await page.locator('#login-submit').click();
       await page.locator('#login-error').filter({hasText:'Credenciales inválidas'}).waitFor();
       assert.equal(await page.locator('#password').inputValue(),'wrong-qa-password');
+      assert.equal(await page.locator('#login-code').isVisible(),false,'Wrong passwords must never ask for 2FA');
       await page.locator('#password').fill('axon-local-qa');await page.locator('#password').press('Enter');
       await page.locator('#main-screen:not(.hidden)').waitFor({timeout:30000});
       assert.equal(await page.locator('#login-screen').isVisible(),false);
@@ -121,10 +158,39 @@ const fs = require('node:fs/promises');
       results.flows.push('real invalid credentials, Enter login, session cookie and reload');
       await page.request.post(base+'/api/logout');await entrance();
       results.flows.push('logout returns to new entrance');
+      // Exercise the real UI with 2FA enabled in the owned server fixture.
+      const {totpCode}=await import('../src/totp.ts');
+      const apiPost=(url,data)=>context.request.post(base+url,{data,headers:{Origin:base}});
+      assert.equal((await apiPost('/api/login',{username:'qa',password:'axon-local-qa'})).status(),200);
+      const setup=await apiPost('/api/auth/totp/setup',{});assert.equal(setup.status(),200);const secret=(await setup.json()).secret;
+      const enabled=await apiPost('/api/auth/totp/enable',{password:'axon-local-qa',code:totpCode(secret)});assert.equal(enabled.status(),200);
+      const recovery=(await enabled.json()).recovery[0];
+      try{
+        await apiPost('/api/logout',{});await entrance();
+        assert.equal(await page.locator('#login-code').isVisible(),false);
+        await page.locator('#username').fill('qa');await page.locator('#password').fill('wrong-fixture-password');await page.locator('#login-submit').click();
+        await page.locator('#login-error').filter({hasText:'Credenciales inválidas'}).waitFor();
+        assert.equal(await page.locator('#login-code').isVisible(),false);
+        await page.locator('#password').fill('axon-local-qa');await page.locator('#login-submit').click();
+        await page.getByRole('heading',{name:'Verificá tu acceso',exact:true}).waitFor();
+        assert.equal((await (await context.request.get(base+'/api/me')).json()).authenticated,false);
+        await page.locator('#login-code').fill(recovery);await page.locator('#login-code').press('Enter');
+        await page.locator('#main-screen:not(.hidden)').waitFor();
+        assert.equal((await (await context.request.get(base+'/api/me')).json()).authenticated,true);
+        results.flows.push('Real enabled 2FA: bad password stays in step one, correct password stays unauthenticated until a recovery code completes step two');
+      }finally{
+        // Recovery consumption can fail a test before it has a cookie. The
+        // remaining valid recovery codes let us safely remove fixture-only 2FA.
+        let disabled=await apiPost('/api/auth/totp/disable',{password:'axon-local-qa'});
+        if(disabled.status()!==200){await apiPost('/api/login',{username:'qa',password:'axon-local-qa',code:totpCode(secret)});disabled=await apiPost('/api/auth/totp/disable',{password:'axon-local-qa'});}
+        assert.equal(disabled.status(),200);
+      }
+      await apiPost('/api/logout',{});await entrance();
+
     }
     assert.deepEqual(results.pageErrors,[]);
     results.passed=true;
-  } finally {
+  } catch(error){results.error=String(error);await page.screenshot({path:output+'/failure.png'}).catch(()=>{});throw error;} finally {
     await fs.writeFile(`${output}/${publicOnly?'production':'local'}-checks.json`,JSON.stringify(results,null,2)+'\n');
     await context.close();await browser.close();
   }

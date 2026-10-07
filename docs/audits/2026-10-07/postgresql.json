@@ -1,0 +1,17 @@
+{
+  "passed": true,
+  "at": "2026-10-07T12:56:46.584Z",
+  "checks": [
+    "Native PostgreSQL inventory",
+    "pg_dump custom snapshot",
+    "Restic isolated verified restore",
+    "Automatic import in temporary PostgreSQL",
+    "Recovered exact rows after source mutation",
+    "Source database unchanged by recovery"
+  ],
+  "snapshot": "dd55aa698703fa1293741d00f941c8d234eea2b9b490eadd5aace0b82e43de30",
+  "verifiedDatabases": [
+    "axon_fixture"
+  ],
+  "originalPreserved": true
+}

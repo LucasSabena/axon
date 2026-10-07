@@ -67,9 +67,33 @@ export async function loadConfig(): Promise<AppConfig> {
 
 let saveQueue: Promise<void> = Promise.resolve();
 export function saveConfig(config: AppConfig): Promise<void> {
-  const text = JSON.stringify(config, null, 2);
+  const snapshot = structuredClone(config);
+  // Auth commits retain this object identity; queued settings saves must not
+  // overwrite credentials with an older snapshot.
+  const auth = config.auth;
   const operation = saveQueue.catch(() => {}).then(async () => {
-    await atomicPrivateWrite(CONFIG_PATH, text);
+    await atomicPrivateWrite(CONFIG_PATH, JSON.stringify({ ...snapshot, auth }, null, 2));
+  });
+  saveQueue = operation;
+  return operation;
+}
+
+// Serialize read/modify/write with other config saves. Publish credentials only
+// after the durable write succeeds; callers cannot observe an uncommitted 2FA
+// or password change after an I/O error.
+export function updateConfigAuth(config: AppConfig, update: (auth: AppConfig['auth']) => void | Promise<void>): Promise<void> {
+  const operation = saveQueue.catch(() => {}).then(async () => {
+    const auth = structuredClone(config.auth);
+    await update(auth);
+    let stored: AppConfig;
+    try { stored = JSON.parse(await readFile(CONFIG_PATH, 'utf8')); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      stored = config;
+    }
+    await atomicPrivateWrite(CONFIG_PATH, JSON.stringify({ ...stored, auth }, null, 2));
+    for (const key of Object.keys(config.auth)) delete config.auth[key];
+    Object.assign(config.auth, auth);
   });
   saveQueue = operation;
   return operation;

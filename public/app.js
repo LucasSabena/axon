@@ -91,21 +91,33 @@ const BOOT_RETRY_LIMIT = 5;
 const BOOT_RETRY_DELAY_MS = 1500;
 let bootRetryTimer = null;
 let bootDone = false;
-function setLoginSecondFactor(enabled) {
-  $('#login-code').classList.toggle('hidden', !enabled);
-  $('#login-code-label').classList.toggle('hidden', !enabled);
-  $('#login-code-help').classList.toggle('hidden', !enabled);
-  // Nunca required: /api/me ya no revela si la cuenta usa 2FA antes de
-  // autenticar, así que el campo aparece tras el primer intento fallido y
-  // quienes no usan 2FA lo dejan vacío.
-  $('#login-code').required = false;
+let loginChallenge = null;
+function setLoginSecondFactor(challenge) {
+  loginChallenge = challenge || null;
+  const enabled = !!loginChallenge;
+  $('#login-credentials').classList.toggle('hidden', enabled);
+  for (const id of ['username', 'password', 'password-toggle']) $('#' + id).disabled = enabled;
+  for (const id of ['login-code', 'login-code-label', 'login-code-help', 'login-back']) $('#' + id).classList.toggle('hidden', !enabled);
+  $('#login-code').required = enabled;
+  $('#login-code').disabled = !enabled;
+  $('#login-code').value = '';
+  $('#login-title').textContent = enabled ? 'Verificá tu acceso' : 'Entrá a tu espacio';
+  $('#login-help').textContent = enabled ? 'Tu cuenta tiene activa la verificación en dos pasos.' : 'Usá el usuario configurado en tu servidor.';
+  $('#login-submit-label').textContent = enabled ? 'Verificar código' : 'Ingresar';
+  if (enabled) { $('#password').value = ''; $('#login-code').focus(); }
 }
+$('#login-back').addEventListener('click', () => {
+  if ($('#login-submit').disabled) return;
+  setLoginSecondFactor(null);
+  $('#login-error').textContent = ''; $('#login-status').textContent = '';
+  $('#password').focus();
+});
 async function initAuth(attempt = 0) {
   clearTimeout(bootRetryTimer);
   try {
     const me = await api('/api/me');
     await axonDomReady;
-    setLoginSecondFactor(Boolean(me.totpEnabled));
+    setLoginSecondFactor(null);
     if (me.authenticated) {
       await AxonAssets.features();
       if (bootDone) return;
@@ -157,13 +169,19 @@ $('#login-form').addEventListener('submit', async (e) => {
   $('#login-error').textContent = '';
   submit.disabled = true;
   form.setAttribute('aria-busy', 'true');
-  $('#login-submit-label').textContent = 'Ingresando…';
+  $('#login-submit-label').textContent = loginChallenge ? 'Verificando…' : 'Ingresando…';
   $('#login-status').textContent = 'Verificando tu acceso…';
   try {
-    await api('/api/login', {
+    const result = await api('/api/login', {
       method: 'POST',
-      body: { username: $('#username').value, password: $('#password').value, code: $('#login-code').value.trim() },
+      body: loginChallenge ? { challenge: loginChallenge, code: $('#login-code').value.trim() } : { username: $('#username').value, password: $('#password').value },
     });
+    if (result.requiresSecondFactor && result.challenge) {
+      submit.disabled = false; form.setAttribute('aria-busy', 'false');
+      $('#login-status').textContent = 'Contraseña verificada. Ingresá tu código de autenticación.';
+      setLoginSecondFactor(result.challenge);
+      return;
+    }
     $('#login-submit-label').textContent = 'Abriendo tu espacio…';
     $('#login-status').textContent = 'Acceso verificado. Abriendo tu espacio.';
     // Volver a la sección donde expiró la sesión (guardada en axon:return).
@@ -175,11 +193,11 @@ $('#login-form').addEventListener('submit', async (e) => {
     $('#login-error').textContent = err.message;
     submit.disabled = false;
     form.setAttribute('aria-busy', 'false');
-    $('#login-submit-label').textContent = 'Ingresar';
+    if (err.status === 410) setLoginSecondFactor(null);
+    $('#login-submit-label').textContent = loginChallenge ? 'Verificar código' : 'Ingresar';
     $('#login-status').textContent = '';
-    // Mostrar el campo de código tras cualquier intento fallido: quienes
-    // tienen 2FA reintentan con su código; el resto lo deja vacío.
-    setLoginSecondFactor(true); $('#login-code').focus();
+    if (loginChallenge) { $('#login-code').value = ''; $('#login-code').focus(); }
+    else $('#password').focus();
   }
 });
 

@@ -34,11 +34,11 @@ async function fixture(fn:(v:any)=>Promise<void>) {
       const range=headers.get('range');if(range){const [a,b]=range.slice(6).split('-').map(Number),end=Math.min(b,data.length-1);part=data.subarray(a,end+1);status=206;h['Content-Range']=`bytes ${a}-${end}/${data.length}`;}
       h['Content-Length']=String(part.length);
       if(slow){let timer:any;const stream=new ReadableStream({start(c){timer=setTimeout(()=>{c.enqueue(part);c.close();},2000);},cancel(){clearTimeout(timer);}});init.signal?.addEventListener('abort',()=>stream.cancel().catch(()=>{}));return new Response(stream,{status,headers:h});}
-      return new Response(part,{status,headers:h});
+      return new Response(new Uint8Array(part),{status,headers:h});
     }
     return Response.json({error:'fixture missing'}, {status:409});
   };
-  const dbx=new Dropbox(store,vault,http as typeof fetch,'');dbx.configure(by.actorId,'fixture-client');
+  const dbx=new Dropbox(store,vault,http,'');dbx.configure(by.actorId,'fixture-client');
   const connect=async(actor=by)=>{const u=new URL(dbx.authorize(actor,origin));await dbx.callback(actor,u.searchParams.get('state'),'fixture-code');return u;};
   setHostUser(userInfo().username);initHostStorage(root);
   try{await fn({root,store,vault,dbx,http,calls,files,folders,metadata,connect,get refreshCount(){return refreshCount;},set slow(v:boolean){slow=v;}});}finally{store.close();initHostStorage();await rm(root,{recursive:true,force:true});}
@@ -131,11 +131,11 @@ test('Dropbox App Folder applications omit unsupported Path-Root and retain thei
   await v.connect();const row=v.store.get('dropbox-account',by.actorId),a=v.vault.open(row.sealed,'account:'+by.actorId);a.rootNamespace='root-fixture';v.store.put('dropbox-account',by.actorId,{...row,sealed:v.vault.seal(a,'account:'+by.actorId)});
   v.files.set('/nota.txt',new TextEncoder().encode('nota'));v.folders.set('',['/nota.txt']);let rejected=0;
   const sandboxHttp=async(url:any,init:any)=>{if(new Headers(init.headers).has('Dropbox-API-Path-Root')){rejected++;return new Response('Error in call to API function "files/list_folder": path root is not supported for sandbox app',{status:400});}return v.http(url,init);};
-  const dbx=new Dropbox(v.store,v.vault,sandboxHttp as typeof fetch,'');const page=await dbx.list(by.actorId,'account','');expect(page.entries[0].name).toBe('nota.txt');expect(rejected).toBe(1);expect(dbx.status(by.actorId).appFolder).toBe(true);expect(dbx.status(by.actorId).sources[0].name).toBe('Carpeta de la aplicación');
-  await dbx.metadata(by.actorId,'account','/nota.txt');await dbx.content(by.actorId,'account','/nota.txt');expect(rejected).toBe(1);expect(new Dropbox(v.store,v.vault,sandboxHttp as typeof fetch,'').status(by.actorId).appFolder).toBe(true);
+  const dbx=new Dropbox(v.store,v.vault,sandboxHttp,'');const page=await dbx.list(by.actorId,'account','');expect(page.entries[0].name).toBe('nota.txt');expect(rejected).toBe(1);expect(dbx.status(by.actorId).appFolder).toBe(true);expect(dbx.status(by.actorId).sources[0].name).toBe('Carpeta de la aplicación');
+  await dbx.metadata(by.actorId,'account','/nota.txt');await dbx.content(by.actorId,'account','/nota.txt');expect(rejected).toBe(1);expect(new Dropbox(v.store,v.vault,sandboxHttp,'').status(by.actorId).appFolder).toBe(true);
 }));
 
 test('Full Dropbox keeps Path-Root; unrelated API failures cannot silently change the account scope',async()=>fixture(async v=>{
   await v.connect();const row=v.store.get('dropbox-account',by.actorId),a=v.vault.open(row.sealed,'account:'+by.actorId);a.rootNamespace='root-fixture';v.store.put('dropbox-account',by.actorId,{...row,sealed:v.vault.seal(a,'account:'+by.actorId)});await v.dbx.list(by.actorId,'account','');expect(v.calls.at(-1).headers.get('Dropbox-API-Path-Root')).toContain('root-fixture');
-  const fail=new Dropbox(v.store,v.vault,(async()=>new Response('unrelated invalid request',{status:400})) as typeof fetch,'');await expect(fail.list(by.actorId,'account','')).rejects.toThrow();expect(fail.status(by.actorId).appFolder).toBe(false);
+  const fail=new Dropbox(v.store,v.vault,(async()=>new Response('unrelated invalid request',{status:400})),'');await expect(fail.list(by.actorId,'account','')).rejects.toThrow();expect(fail.status(by.actorId).appFolder).toBe(false);
 }));

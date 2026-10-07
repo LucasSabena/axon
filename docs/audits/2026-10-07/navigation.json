@@ -1,0 +1,42 @@
+{
+  "origin": "http://127.0.0.1:46171",
+  "checks": [
+    "Navigation starts during interactive with pending resources",
+    "Failed feature download retries without breaking dependent modules",
+    "dashboard: deep link and reload",
+    "ports: deep link and reload",
+    "projects: deep link and reload",
+    "docker: deep link and reload",
+    "domains: deep link and reload",
+    "files: deep link and reload",
+    "library: deep link and reload",
+    "terminal: deep link and reload",
+    "navegador: deep link and reload",
+    "programs: deep link and reload",
+    "store: deep link and reload",
+    "drop: deep link and reload",
+    "metrics: deep link and reload",
+    "logs: deep link and reload",
+    "ops: deep link and reload",
+    "scripts: deep link and reload",
+    "storage: deep link and reload",
+    "compose: deep link and reload",
+    "agents: deep link and reload",
+    "settings: deep link and reload",
+    "backups: deep link and reload",
+    "audit: deep link and reload",
+    "access: deep link and reload",
+    "desktop: deep link and reload",
+    "Sidebar + Back + Forward",
+    "Mobile 390px",
+    "Mobile 320px",
+    "Service worker offline recovery retains the route and returns automatically"
+  ],
+  "errors": [],
+  "apiErrors": [],
+  "slowBoot": {
+    "dom": "interactive",
+    "section": "tab-projects"
+  },
+  "operationalActions": 0
+}

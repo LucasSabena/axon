@@ -36,7 +36,7 @@ function safeId(id: string): string | null {
 // Run a docker subcommand in-container with a hard timeout — a wedged daemon
 // must not hang the request — then fall back to the host CLI (the container
 // image may not ship docker at all).
-async function dockerRun(args: string, timeoutMs = 15_000): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+export async function dockerRun(args: string, timeoutMs = 15_000): Promise<{ ok: boolean; stdout: string; stderr: string }> {
   const proc = Bun.spawn(['bash', '-c', `docker ${args}`], { stdout: 'pipe', stderr: 'pipe' });
   const timer = setTimeout(() => {
     try { proc.kill('SIGKILL'); } catch { /* already gone */ }

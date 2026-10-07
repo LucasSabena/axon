@@ -1,0 +1,12 @@
+{
+  "bun": {
+    "passed": 307,
+    "failed": 0,
+    "files": 50,
+    "assertions": 2635
+  },
+  "challengeTests": 5,
+  "typecheck": true,
+  "build": true,
+  "productionDeployed": false
+}

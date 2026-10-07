@@ -1,0 +1,20 @@
+{
+  "application": {
+    "passed": 302,
+    "failed": 0,
+    "files": 49,
+    "assertions": 2614
+  },
+  "python": {
+    "agents": 38,
+    "software": 12,
+    "installer": 10,
+    "failed": 0
+  },
+  "typecheckIncludesTests": true,
+  "frontendSyntaxFiles": 104,
+  "pythonSyntaxFiles": 28,
+  "buildPassed": true,
+  "productionDeployed": false,
+  "remoteCIRun": false
+}

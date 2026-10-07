@@ -1,3 +1,4 @@
+import type { HttpFetch } from './http-fetch';
 import {test,expect} from 'bun:test';
 import {mkdtemp,rm,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -5,7 +6,7 @@ import path from 'node:path';
 import {SoftwareIcons,validateIcon,typeIcon} from './software-icons';
 import {parseIconCatalog} from './software-icon-catalog';
 const svg='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#123456" d="M1 1h10v10z"/></svg>';
-async function registry(fn:(icons:SoftwareIcons)=>Promise<void>,fetcher:typeof fetch=async()=>new Response(svg)){
+async function registry(fn:(icons:SoftwareIcons)=>Promise<void>,fetcher:HttpFetch=async()=>new Response(svg)){
  const dir=await mkdtemp(path.join(tmpdir(),'axon-icons-test-')),icons=new SoftwareIcons(dir,fetcher,{});try{await fn(icons);}finally{icons.close();await rm(dir,{recursive:true,force:true});}
 }
 test('an installed application absent from the previous icon map matches the external catalog',()=>registry(async icons=>{

@@ -1,0 +1,234 @@
+{
+  "base": "http://127.0.0.1:46171",
+  "publicOnly": false,
+  "layouts": [
+    {
+      "mode": "dark",
+      "width": 1440,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "block",
+      "violations": []
+    },
+    {
+      "mode": "dark",
+      "width": 960,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "block",
+      "violations": []
+    },
+    {
+      "mode": "dark",
+      "width": 768,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "block",
+      "violations": []
+    },
+    {
+      "mode": "dark",
+      "width": 700,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "none",
+      "violations": []
+    },
+    {
+      "mode": "dark",
+      "width": 390,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "none",
+      "violations": []
+    },
+    {
+      "mode": "dark",
+      "width": 320,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "none",
+      "violations": []
+    },
+    {
+      "mode": "light",
+      "width": 1440,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "block",
+      "violations": []
+    },
+    {
+      "mode": "light",
+      "width": 960,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "block",
+      "violations": []
+    },
+    {
+      "mode": "light",
+      "width": 768,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "block",
+      "violations": []
+    },
+    {
+      "mode": "light",
+      "width": 700,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "none",
+      "violations": []
+    },
+    {
+      "mode": "light",
+      "width": 390,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "none",
+      "violations": []
+    },
+    {
+      "mode": "light",
+      "width": 320,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "none",
+      "violations": []
+    }
+  ],
+  "flows": [
+    "theme switch and persistence",
+    "pause/resume and reduced motion",
+    "keyboard focus and password visibility",
+    "loading, duplicate prevention, rate-limit error and accessible recovery (simulated response)",
+    "connection error recovery (simulated network failure)",
+    "Optional second-factor input accepts TOTP and complete recovery codes (simulated server configuration)",
+    "real invalid credentials, Enter login, session cookie and reload",
+    "logout returns to new entrance"
+  ],
+  "pageErrors": [],
+  "passed": true
+}

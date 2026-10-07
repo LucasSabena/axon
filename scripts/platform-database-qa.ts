@@ -30,5 +30,5 @@ try{
   const current=await command(['docker','exec',sourceId,'psql','-At','-U','proof','-d','axon_fixture','-c','SELECT value FROM restore_proof ORDER BY id']);
   if(recovered!=='Original argentino\nRestauración comprobada'||current!=='Actual\nActual')throw new Error('El dump recuperado no preservó los valores originales o reemplazó el origen');
   const result={passed:true,at:new Date().toISOString(),checks:['Native PostgreSQL inventory','pg_dump custom snapshot','Restic isolated verified restore','Automatic import in temporary PostgreSQL','Recovered exact rows after source mutation','Source database unchanged by recovery'],snapshot:snapshot.snapshot,verifiedDatabases:snapshot.verifiedDatabases,originalPreserved:true};
-  await mkdir('docs/platform-expansion-2026-10-05',{recursive:true});await writeFile('docs/platform-expansion-2026-10-05/database-proof.json',JSON.stringify(result,null,2));console.log(JSON.stringify(result));
+  const output=process.env.AXON_QA_OUTPUT||'docs/platform-expansion-2026-10-05';await mkdir(output,{recursive:true});await writeFile(path.join(output,'database-proof.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result));
 }finally{try{if(sourceId)await command(['docker','rm','-f',sourceId]);}finally{await rm(home,{recursive:true,force:true});}}

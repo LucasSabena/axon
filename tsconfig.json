@@ -22,9 +22,6 @@
     "resolveJsonModule": true,
     "checkJs": false
   },
-  // src/**/*.test.ts is excluded from `tsc --noEmit` because the suites carry
-  // pre-existing type errors (fetch stubs, BodyInit narrowing) unrelated to
-  // the shipping code; `bun test` still runs them. Re-include once cleaned.
-  "include": ["src/**/*.ts", "scripts/**/*.ts"],
-  "exclude": ["src/**/*.test.ts"]
+  // Tests and QA scripts are checked with the same contracts as the application.
+  "include": ["src/**/*.ts", "scripts/**/*.ts"]
 }

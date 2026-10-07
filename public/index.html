@@ -20,7 +20,7 @@
   <link rel="axon-feature" data-axon-style="/feat-drop.css?v=6e4c627f7631">
   <link rel="axon-feature" data-axon-style="/feat-ops.css?v=fe67fc81e5d7">
   <link rel="axon-feature" data-axon-style="/feat-notify.css?v=2c0d3df804df">
-  <link rel="axon-feature" data-axon-style="/feat-compose.css?v=3395e0f2f372">
+  <link rel="axon-feature" data-axon-style="/feat-compose.css?v=34a752b90e13">
   <link rel="axon-feature" data-axon-style="/feat-agents.css?v=03143ea26d1e">
   <link rel="axon-feature" data-axon-style="/agent-context.css?v=41d2320e73be">
   <link rel="axon-feature" data-axon-style="/feat-library.css?v=ae52177ccfd3">
@@ -28,8 +28,8 @@
   <link rel="axon-feature" data-axon-style="/dashboard.css?v=9c0cbcfa963d">
   <link rel="axon-feature" data-axon-style="/polish.css?v=3886aca50e96">
   <link rel="axon-feature" data-axon-style="/maintenance.css?v=c01ec4727f7f">
-  <link rel="axon-feature" data-axon-style="/backups.css?v=6f6c4143ee69">
-  <link rel="axon-feature" data-axon-style="/platform.css?v=86453659f274">
+  <link rel="axon-feature" data-axon-style="/backups.css?v=ffaabb464767">
+  <link rel="axon-feature" data-axon-style="/platform.css?v=7a3968af3a44">
   <link rel="axon-feature" data-axon-style="/vendor/webawesome/styles/themes/default.css?v=e19fff39b8c9">
   <link rel="stylesheet" href="/design-system.css?v=2f3d13b40e07">
   <link rel="stylesheet" href="/login.css?v=3eab62086046">
@@ -70,14 +70,17 @@
           <h1 id="login-title">Entrá a tu espacio</h1>
           <p class="login-intro" id="login-help">Usá el usuario configurado en tu servidor.</p>
           <form id="login-form" aria-describedby="login-help">
+            <div id="login-credentials">
             <label for="username">Usuario</label>
             <input type="text" id="username" name="username" placeholder="Tu usuario" autocomplete="username" autocapitalize="none" spellcheck="false" autofocus required>
             <label for="password">Contraseña</label>
             <div class="password-field"><input type="password" id="password" name="password" placeholder="Tu contraseña" autocomplete="current-password" required><button type="button" id="password-toggle" class="icon-btn" aria-label="Mostrar contraseña" aria-controls="password" aria-pressed="false"><i data-lucide="eye" aria-hidden="true"></i></button></div>
-            <label for="login-code" id="login-code-label" class="hidden">Código de tu autenticador</label>
-            <input type="text" id="login-code" name="code" class="hidden" placeholder="000000" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" aria-describedby="login-code-help">
-            <p id="login-code-help" class="login-code-help hidden">Si tu cuenta tiene verificación en dos pasos, ingresá los 6 dígitos de tu app (o un código de recuperación).</p>
+            </div>
+            <label for="login-code" id="login-code-label" class="hidden">Código de autenticación o recuperación</label>
+            <input type="text" id="login-code" name="code" class="hidden" placeholder="000000" autocomplete="one-time-code" inputmode="text" pattern="[0-9]{6}|[A-Za-z2-7]{4}-?[A-Za-z2-7]{4}" maxlength="9" aria-describedby="login-code-help">
+            <p id="login-code-help" class="login-code-help hidden">Ingresá los 6 dígitos de tu app o uno de tus códigos de recuperación.</p>
             <button type="submit" id="login-submit" class="btn-primary"><span id="login-submit-label">Ingresar</span><i data-lucide="arrow-right" class="login-submit-arrow" aria-hidden="true"></i><span class="login-submit-spinner" aria-hidden="true"></span></button>
+            <button type="button" id="login-back" class="btn-secondary hidden">Volver a usuario y contraseña</button>
             <p id="login-status" class="login-sr-only" role="status" aria-live="polite"></p>
             <div id="login-error" class="error" role="alert" aria-live="polite"></div>
           </form>
@@ -692,17 +695,17 @@
   <script defer src="/login.js?v=e2272554d7cb"></script>
   <link rel="axon-feature" data-axon-style="/agent-accounts.css?v=6243df72e07b">
   <link rel="axon-feature" data-axon-style="/agent-usage.css?v=d305c519568b">
-  <link rel="axon-feature" data-axon-style="/agent-consumption.css?v=28263d992053">
+  <link rel="axon-feature" data-axon-style="/agent-consumption.css?v=cceddd29f7b0">
   <script type="text/axon-feature" data-src="/terminal-tools.js?v=dfff049a9a58"></script>
   <link rel="stylesheet" href="/software.css?v=0f09c8cfae5b">
-  <script defer src="/app.js?v=a32a24c5e39b"></script>
-  <script defer src="/software.js?v=ac441cc9eeac"></script>
+  <script defer src="/app.js?v=455e45de2523"></script>
+  <script defer src="/software.js?v=573e80fe6c09"></script>
   <script defer src="/onboarding.js?v=8e8516b302ef"></script>
   <link rel="stylesheet" href="/host-storage.css?v=f6a41912b754">
   <script defer src="/host-storage.js?v=a5c65d59389f"></script>
   <link rel="stylesheet" href="/transfer-review.css?v=98bc9c35eadc">
   <script defer src="/transfer-review.js?v=205ff33f3b6d"></script>
-  <script type="text/axon-feature" data-src="/feat-files.js?v=3c0398260e26"></script>
+  <script type="text/axon-feature" data-src="/feat-files.js?v=d54004238247"></script>
   <script type="text/axon-feature" data-src="/feat-dropbox.js?v=c2aa192f3992"></script>
   <script type="text/axon-feature" data-src="/feat-scripts.js?v=735267350c01"></script>
   <script type="text/axon-feature" data-src="/feat-logs.js?v=8b7a506006d5"></script>
@@ -715,7 +718,7 @@
   <script type="text/axon-feature" data-src="/feat-compose.js?v=623fd75deaff"></script>
   <script type="text/axon-feature" data-src="/agent-context.js?v=19c37556f869"></script>
   <script type="text/axon-feature" data-src="/agent-usage.js?v=5df6a8396a83"></script>
-  <script type="text/axon-feature" data-src="/agent-consumption.js?v=f0da3b984bf4"></script>
+  <script type="text/axon-feature" data-src="/agent-consumption.js?v=cb3c980ce728"></script>
   <script type="text/axon-feature" data-src="/agent-accounts.js?v=006cd3dc8d1c"></script>
   <script type="text/axon-feature" data-src="/feat-agents.js?v=af16597b71c6"></script>
   <script type="text/axon-feature" data-src="/feat-library.js?v=49ae9b56987d"></script>
@@ -727,8 +730,8 @@
   <script type="text/axon-feature" data-src="/connections.js?v=e19949c25db8"></script>
   <script type="text/axon-feature" data-src="/settings.js?v=39555417b84c"></script>
   <script type="text/axon-feature" data-src="/view-controls.js?v=32eb2a959359"></script>
-  <script type="text/axon-feature" data-src="/platform.js?v=03e29b76648d"></script>
-  <script type="text/axon-feature" data-src="/backups.js?v=06cafe794cda"></script>
+  <script type="text/axon-feature" data-src="/platform.js?v=6c5119728b22"></script>
+  <script type="text/axon-feature" data-src="/backups.js?v=ff03c4b00250"></script>
   <script type="text/axon-feature" data-src="/platform-operations.js?v=0a8f4260ad19"></script>
   <script type="text/axon-feature" data-src="/shell.js?v=e3e27f204aee"></script>
   <script type="text/axon-feature" data-module="true" data-src="/navigation.js?v=13511c81dded"></script>

@@ -1,3 +1,4 @@
+import type { HttpFetch } from '../http-fetch';
 import { createHash, randomBytes } from 'node:crypto';
 import { PlatformStore } from '../platform/store';
 import { MaintenanceError, type Actor } from '../storage/types';
@@ -27,7 +28,7 @@ function downloadUrl(raw:string):URL {
 export class Drive implements CloudProvider {
   private refreshes=new Map<string,Promise<Account>>();
   readonly spec;
-  constructor(readonly id:DriveId,private store:PlatformStore,private vault:CloudVault,private http:typeof fetch=fetch){this.spec=SPECS[id];}
+  constructor(readonly id:DriveId,private store:PlatformStore,private vault:CloudVault,private http:HttpFetch=fetch){this.spec=SPECS[id];}
   private key(owner:string){return this.id+':'+owner;}
   private app(owner:string):App|undefined {
     const clientId=process.env[this.spec.env+'_CLIENT_ID'],clientSecret=process.env[this.spec.env+'_CLIENT_SECRET'];

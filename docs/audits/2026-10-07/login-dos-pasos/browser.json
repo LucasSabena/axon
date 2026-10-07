@@ -1,0 +1,235 @@
+{
+  "base": "http://127.0.0.1:3459",
+  "publicOnly": false,
+  "layouts": [
+    {
+      "mode": "dark",
+      "width": 1440,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "block",
+      "violations": []
+    },
+    {
+      "mode": "dark",
+      "width": 960,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "block",
+      "violations": []
+    },
+    {
+      "mode": "dark",
+      "width": 768,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "block",
+      "violations": []
+    },
+    {
+      "mode": "dark",
+      "width": 700,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "none",
+      "violations": []
+    },
+    {
+      "mode": "dark",
+      "width": 390,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "none",
+      "violations": []
+    },
+    {
+      "mode": "dark",
+      "width": 320,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "none",
+      "violations": []
+    },
+    {
+      "mode": "light",
+      "width": 1440,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "block",
+      "violations": []
+    },
+    {
+      "mode": "light",
+      "width": 960,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "block",
+      "violations": []
+    },
+    {
+      "mode": "light",
+      "width": 768,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "block",
+      "violations": []
+    },
+    {
+      "mode": "light",
+      "width": 700,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "none",
+      "violations": []
+    },
+    {
+      "mode": "light",
+      "width": 390,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "none",
+      "violations": []
+    },
+    {
+      "mode": "light",
+      "width": 320,
+      "overflow": false,
+      "boxInside": true,
+      "inputs": [
+        {
+          "id": "username",
+          "height": 48
+        },
+        {
+          "id": "password",
+          "height": 48
+        }
+      ],
+      "motion": "none",
+      "violations": []
+    }
+  ],
+  "flows": [
+    "theme switch and persistence",
+    "pause/resume and reduced motion",
+    "keyboard focus and password visibility",
+    "loading, duplicate prevention, rate-limit error and accessible recovery (simulated response)",
+    "connection error recovery (simulated network failure)",
+    "Password-confirmed second step, TOTP/recovery, retry, back and expiration (simulated responses)",
+    "real invalid credentials, Enter login, session cookie and reload",
+    "logout returns to new entrance",
+    "Real enabled 2FA: bad password stays in step one, correct password stays unauthenticated until a recovery code completes step two"
+  ],
+  "pageErrors": [],
+  "passed": true
+}

@@ -31,7 +31,7 @@
 .ag-consumption-daily caption { text-align:left; color:var(--text-dim); margin:8px 0; }
 .ag-consumption-source { font-size:11px; color:var(--text-dim); line-height:1.6; overflow-wrap:anywhere; }
 [data-agent-consumption-panel] { min-width:0; }
-.agc-tip { position:fixed; z-index:300; pointer-events:none; background:var(--bg-overlay); border:1px solid var(--border-strong); border-radius:var(--radius); padding:8px 10px; font-size:11px; box-shadow:var(--shadow-modal); max-width:280px; }
+.agc-tip { position:fixed; z-index:300; pointer-events:none; background:var(--bg-overlay); color:var(--text); border:1px solid var(--border-strong); border-radius:var(--radius); padding:8px 10px; font-size:11px; box-shadow:var(--shadow-modal); max-width:min(280px, calc(100vw - 16px)); box-sizing:border-box; overflow-wrap:anywhere; }
 .agc-tip > b { display:block; margin-bottom:5px; font-size:12px; overflow-wrap:anywhere; }
 .agc-tip-row { display:flex; align-items:center; gap:6px; padding:2px 0; }
 .agc-tip-row i { width:8px; height:8px; border-radius:2px; flex-shrink:0; }

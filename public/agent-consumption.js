@@ -139,6 +139,20 @@
       <p class="listener-note">¹ Razonamiento ya incluido en output; no se suma dos veces. ${esc(c.accountAttribution)}</p>
       <p class="ag-consumption-source">Cobertura: ${date(c.firstAt)} → ${date(c.lastAt)}. <a href="https://models.dev" target="_blank" rel="noopener noreferrer">models.dev</a> · precios consultados ${date(data.prices.fetchedAt)} · actualización automática cada ${data.prices.automaticHours} h. Historial actualizado ${date(data.generatedAt)}.</p>`;
   }
+  let tooltip, tooltipOwner;
+  const hideTooltip = () => { if (tooltip) tooltip.hidden = true; tooltipOwner = null; };
+  function sharedTooltip() {
+    if (tooltip) return tooltip;
+    tooltip = document.createElement('div'); tooltip.className = 'agc-tip'; tooltip.hidden = true;
+    document.body.append(tooltip);
+    window.addEventListener('scroll', hideTooltip, true);
+    document.addEventListener('axon:route', hideTooltip);
+    document.addEventListener('visibilitychange', hideTooltip);
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') hideTooltip(); });
+    window.addEventListener('blur', hideTooltip);
+    window.addEventListener('resize', hideTooltip);
+    return tooltip;
+  }
   globalThis.AxonAgentConsumption = {
     content,
     async mount(host, initialAgent) {
@@ -157,12 +171,17 @@
         <label>Cuenta del historial<select class="filter-input" data-consumption-filter="account"><option value="">Todas / sin identificar</option></select></label></div>
         <p data-consumption-feedback class="listener-note" role="status" aria-live="polite"></p><div data-consumption-results></div>`;
       const results = host.querySelector('[data-consumption-results]'), feedback = host.querySelector('[data-consumption-feedback]');
-      const tip = document.createElement('div'); tip.className = 'agc-tip'; tip.hidden = true; host.append(tip);
+      const tip = sharedTooltip(); hideTooltip();
       function moveTip(x, y) {
+        tooltipOwner = host;
         tip.hidden = false;
         const r = tip.getBoundingClientRect();
-        tip.style.left = Math.max(4, Math.min(x + 14, innerWidth - r.width - 8)) + 'px';
-        tip.style.top = Math.max(4, Math.min(y + 14, innerHeight - r.height - 8)) + 'px';
+        const gap = 10, edge = 8;
+        const width = document.documentElement.clientWidth, height = innerHeight;
+        const left = x + gap + r.width <= width - edge ? x + gap : x - r.width - gap;
+        const top = y + gap + r.height <= height - edge ? y + gap : y - r.height - gap;
+        tip.style.left = Math.max(edge, Math.min(left, width - r.width - edge)) + 'px';
+        tip.style.top = Math.max(edge, Math.min(top, height - r.height - edge)) + 'px';
       }
       results.addEventListener('pointerover', e => {
         const el = e.target.closest('[data-tip]'); if (!el) return;
@@ -178,11 +197,11 @@
         }
         moveTip(e.clientX, e.clientY);
       });
-      results.addEventListener('pointermove', e => { if (!tip.hidden) moveTip(e.clientX, e.clientY); });
+      results.addEventListener('pointermove', e => { if (tooltipOwner === host && !tip.hidden) moveTip(e.clientX, e.clientY); });
       results.addEventListener('pointerout', e => {
-        if (e.target.closest('[data-tip]') && e.relatedTarget?.closest('[data-tip]') !== e.target.closest('[data-tip]')) tip.hidden = true;
+        if (tooltipOwner === host && e.target.closest('[data-tip]') && e.relatedTarget?.closest('[data-tip]') !== e.target.closest('[data-tip]')) hideTooltip();
       });
-      results.addEventListener('pointerdown', () => { tip.hidden = true; });
+      results.addEventListener('pointerdown', hideTooltip);
       function accountName(id) { return data.accountLabels?.[id] || account(id); }
       function updateGroups() {
         const box = results.querySelector('[data-consumption-groups]');
@@ -202,6 +221,7 @@
         a.download = 'consumo-agentes.csv'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
       }
       function render() {
+        if (tooltipOwner === host) hideTooltip();
         const q = host.querySelector('[data-groups-q]'), refocus = q && document.activeElement === q;
         results.innerHTML = content(data, { ...view, provider: state.provider });
         if (refocus) { const el = host.querySelector('[data-groups-q]'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }

@@ -3,12 +3,11 @@ import { realpath, mkdir } from 'node:fs/promises';
 import { SECTIONS } from '../public/navigation-model.js';
 
 const entry = process.env.AXON_QA_PLAYWRIGHT_ENTRY;
-if (!entry) throw new Error('Set AXON_QA_PLAYWRIGHT_ENTRY to the installed Playwright entrypoint');
-const { chromium } = createRequire(await realpath(entry))('playwright');
+const { chromium } = entry ? createRequire(await realpath(entry))('playwright') : await import('playwright');
 const origin = process.env.AXON_QA_ORIGIN || 'http://127.0.0.1:3459';
 const output = process.env.AXON_QA_OUTPUT || '/tmp/axon-stability-20261006/local';
 await mkdir(output,{recursive:true});
-const browser = await chromium.launch({channel:'chrome',headless:true});
+const browser = await chromium.launch({headless:true,...(process.env.AXON_QA_BROWSER_CHANNEL ? {channel:process.env.AXON_QA_BROWSER_CHANNEL} : {})});
 const context = await browser.newContext({viewport:{width:1440,height:960},serviceWorkers:'block'});
 const errors: string[] = [], apiErrors: {url:string;status:number}[] = [], checks: string[] = [];
 let page;

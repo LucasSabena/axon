@@ -1,0 +1,19 @@
+{
+  "passed": true,
+  "at": "2026-10-07T13:13:32.063Z",
+  "checks": [
+    "Four-step wizard, native folder picker, physical destination, custom calendar interval and retention persist",
+    "Real encrypted Restic capture and verified restore test survive reload",
+    "Selected-file recovery verified against original bytes without changing originals",
+    "Editing to manual, pause, reload and resume preserve versions",
+    "Explicit recovery-key download",
+    "Transient failure preserves prior data and recovers with retry",
+    "Legacy /respaldos route stays compatible with /backups",
+    "Light and dark theme validation",
+    "Responsive 320, 390, 768, 1440 px and WCAG A/AA checks on overview, all steps, detail and recovery"
+  ],
+  "errors": [],
+  "snapshot": "5ab341db84a65000c0308a13e286e78527816db72d3f5f894c99f0658357c88e",
+  "recoveryVerified": true,
+  "usesProductionData": false
+}

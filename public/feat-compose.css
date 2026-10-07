@@ -90,7 +90,7 @@
 #tab-compose .cp-chip-mem {
   font-family: var(--font-mono);
   font-size: 0.68rem;
-  opacity: 0.75;
+  color: var(--text);
   padding-left: 6px;
   border-left: 1px solid currentColor;
 }

@@ -13,6 +13,7 @@ import {actor,body as maintenanceBody,only,protect,requestOrigin} from './storag
 import {MaintenanceError} from './storage/types';
 import { volumeForPath } from './file-volumes';
 import { hostVolumes, initHostStorage, resolveHostPath } from './host-storage';
+import { fileTreeSize } from './file-sizes';
 
 // ---------------------------------------------------------------------------
 // File manager routes — browse / read / edit / upload / download host files.
@@ -763,9 +764,7 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
       return c.json({ ok: false, error: 'El archivo no existe', detail: res.stderr || undefined }, 404);
     }
     const [size, mtime, atime, ctime, mode, modeStr, user, group, ftype, links, inode] = parts;
-    let blocks = 0;
-    const du = await hostExec(`du -sb -- ${shq(r.path)} 2>/dev/null | cut -f1`, { user: WRITE_USER, timeoutMs: 60_000 });
-    if (du.ok) blocks = parseInt(du.stdout.trim(), 10) || 0;
+    const blocks = await fileTreeSize(r.path, true).catch(() => null);
     return c.json({
       ok: true,
       path: r.path,
@@ -809,12 +808,8 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
   app.get('/api/files/dirsize', async (c) => {
     const r = await resolveAllowed(c.req.query('path'));
     if (!r.path) return c.json({ ok: false, error: r.error }, (r.status ?? 403) as 403);
-    const res = await hostExec(`du -sb -- ${shq(r.path)} 2>/dev/null | cut -f1`, {
-      user: WRITE_USER,
-      timeoutMs: 60_000,
-    });
-    if (!res.ok) return c.json({ ok: false, error: 'No se pudo calcular', detail: res.stderr }, 500);
-    return c.json({ ok: true, bytes: parseInt(res.stdout.trim(), 10) || 0 });
+    try { return c.json({ ok: true, bytes: await fileTreeSize(r.path) }); }
+    catch (error) { return c.json({ ok: false, error: (error as Error).message }, 500); }
   });
 
   // ---------- Free space for the status bar ----------

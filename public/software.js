@@ -35,6 +35,10 @@ function render(){
  el('software-notice').innerHTML=(snapshot.error?`<p class="software-warning">${esc(snapshot.error)}. Se conserva la última lectura. <button class="btn-secondary" data-retry>Reintentar</button></p>`:'')+(errors.length?`<details class="software-warning"><summary>${errors.length} fuentes necesitan revisión</summary>${errors.map(s=>`<p><strong>${esc(sourceLabel(s))}</strong>: ${esc(s.error)}</p>`).join('')}</details>`:'');
  el('software-toolbar').classList.toggle('hidden',mode==='sources');
  el('programs-grid').className='software-list';
+ // A table only exists when rows exist. Source cards and empty/loading
+ // messages are normal content and must not advertise missing table rows.
+ if(mode!=='sources'&&rows.length)el('programs-grid').setAttribute('role','table');
+ else el('programs-grid').removeAttribute('role');
  if(mode==='sources'){
   el('programs-grid').innerHTML=snapshot.sources.filter(s=>s.manager!=='metadata').map(s=>`<article class="software-source"><div><strong>${esc(sourceLabel(s))}</strong><p>${s.available?s.complete?'Inventario leído':'Inventario incompleto':'No disponible en este host'}</p><small>${esc(s.root||'')}</small></div><div><span>${esc(s.available?(s.updateState==='ok'?'Comprobado':states[s.updateState]||'Sólo lectura'):'No instalado')}</span>${s.metadataAt?`<p>Índices: ${esc(new Date(s.metadataAt).toLocaleString())}</p>`:''}${s.note?`<p>${esc(s.note)}</p>`:''}${s.manager==='apt'&&s.available&&snapshot.canAdministerSystem?'<button class="btn-secondary" data-indices>Actualizar índices</button>':''}</div></article>`).join('');
  }else{
@@ -106,7 +110,6 @@ const stateSelect=document.createElement('select');stateSelect.id='software-stat
 stateSelect.innerHTML='<option value="">Todos los estados</option>'+Object.entries(states).map(([v,l])=>`<option value="${esc(v)}"${v===state?' selected':''}>${esc(l)}</option>`).join('');
 el('software-toolbar').append(stateSelect);
 stateSelect.onchange=e=>{state=e.target.value;page=0;render();sync();};
-el('programs-grid').setAttribute('role','table');
 el('software-modes').onclick=e=>{const b=e.target.closest('[data-mode]');if(b){mode=b.dataset.mode;page=0;render();sync();}};
 el('software-prev').onclick=()=>{page--;render();sync();};el('software-next').onclick=()=>{page++;render();sync();};
 el('software-select-page').onclick=()=>{const ids=matching().slice(page*size,(page+1)*size).filter(p=>p.canUpdate).map(p=>p.id);const remove=ids.every(id=>selected.has(id));ids.forEach(id=>remove?selected.delete(id):selected.size<200&&selected.add(id));selectionLabel();};

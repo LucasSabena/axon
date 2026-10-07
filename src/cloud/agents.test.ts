@@ -25,7 +25,7 @@ class Provider implements CloudUploadProvider {
   async list(_owner:string,_source:string,p:string,cursor?:string){return {entries:[...this.files].filter(([v])=>v.startsWith(p+'/')).map(([v])=>this.entry(v)),cursor:cursor?null:'upstream-private-cursor'};}
   entry(p:string):CloudEntry{return {name:p.split('/').pop()||'root',path:p,type:this.files.has(p)?'file':'dir',size:this.files.get(p)?.length||0,modified:null,revision:'revision:'+p,hash:this.files.has(p)?dropboxContentHash(this.files.get(p)!):undefined,downloadable:true};}
   async metadata(_owner:string,_source:string,p:string){return this.entry(p);}
-  async content(_owner:string,_source:string,p:string,_revision?:string,range?:string){const b=this.files.get(p)!;const part=range?b.subarray(0,65536):b;return new Response(part,{status:range?206:200});}
+  async content(_owner:string,_source:string,p:string,_revision?:string,range?:string){const b=this.files.get(p)!;const part=range?b.subarray(0,65536):b;return new Response(new Uint8Array(part),{status:range?206:200});}
   async beginUpload(){const id=crypto.randomUUID();this.sessions.set(id,[]);return id;}
   async appendUpload(_owner:string,session:string,offset:number,b:Uint8Array){const chunks=this.sessions.get(session)!,received=chunks.reduce((n,b)=>n+b.length,0);if(offset!==received)return received;chunks.push(b.slice());if(this.loseAppend){this.loseAppend=false;throw new Error('lost response');}return offset+b.length;}
   async finishUpload(_owner:string,session:string,_offset:number,p:string){this.commits++;if(this.files.has(p))throw new UploadRejected('El archivo ya existe',409);this.files.set(p,Buffer.concat(this.sessions.get(session)!));if(this.loseCommit){this.loseCommit=false;throw new Error('lost commit response');}return this.entry(p);}
@@ -37,7 +37,7 @@ async function fixture(fn:(f:any)=>Promise<void>){
   const deps={store,hub,diagnostics,logs:async()=>[],cloud},app=machineApi(deps);
   const make=async(scopes=['cloud:read','cloud:upload'],folder='/allowed',owner='owner')=>store.createToken({name:'Videos',days:1,grants:[],cloudGrants:await cloud.grants(owner,[{provider:'dropbox',source:'account',root:folder,scopes}])},owner,[]);
   const key=await make(),identity=key.identity;
-  const request=(route:string,method='GET',body?:any,token=key.token,headers:any={})=>app.request('http://localhost'+route,{method,headers:{Authorization:'Bearer '+token,...(body!==undefined?{'Content-Type':body instanceof Uint8Array?'application/octet-stream':'application/json'}:{}),...headers},body:body instanceof Uint8Array?body:body===undefined?undefined:JSON.stringify(body)});
+  const request=(route:string,method='GET',body?:any,token=key.token,headers:any={})=>app.request('http://localhost'+route,{method,headers:{Authorization:'Bearer '+token,...(body!==undefined?{'Content-Type':body instanceof Uint8Array?'application/octet-stream':'application/json'}:{}),...headers},body:body instanceof Uint8Array?new Uint8Array(body):body===undefined?undefined:JSON.stringify(body)});
   try{await fn({root,store,vault,provider,cloud,key,identity,make,app,deps,request});}finally{store.close();await rm(root,{recursive:true,force:true});}
 }
 const start=(f:any,size:number,p='/allowed/video.mp4')=>f.cloud.start(f.identity,'dropbox',{source:'account',path:p,size,requestId:crypto.randomUUID()});
@@ -155,7 +155,7 @@ test('Dropbox adapter requests write scope explicitly and sends sequential sessi
     throw new Error('Unexpected fixture endpoint');
   };
   try{
-    const dbx=new Dropbox(store,vault,http as typeof fetch,''),by={actorId:'owner',sessionId:'session'};dbx.configure('owner','fixture-key');const read=new URL(dbx.authorize(by,'http://localhost'));expect(read.searchParams.get('scope')).not.toContain('write');await dbx.callback(by,read.searchParams.get('state'),'code');expect(dbx.status('owner').uploadGranted).toBe(false);await expect(dbx.beginUpload('owner')).rejects.toThrow('subidas');
+    const dbx=new Dropbox(store,vault,http,''),by={actorId:'owner',sessionId:'session'};dbx.configure('owner','fixture-key');const read=new URL(dbx.authorize(by,'http://localhost'));expect(read.searchParams.get('scope')).not.toContain('write');await dbx.callback(by,read.searchParams.get('state'),'code');expect(dbx.status('owner').uploadGranted).toBe(false);await expect(dbx.beginUpload('owner')).rejects.toThrow('subidas');
     const before=dbx.connectionIdentity('owner'),write=new URL(dbx.authorize(by,'http://localhost',true));expect(write.searchParams.get('scope')).toContain('files.content.write');await dbx.callback(by,write.searchParams.get('state'),'code');expect(dbx.connectionIdentity('owner')).toBe(before);
     const session=await dbx.beginUpload('owner'),b=new Uint8Array([1,2,3]);await dbx.appendUpload('owner',session,0,b);await dbx.finishUpload('owner',session,3,'/final.mp4');
     const append=calls.find(c=>c.url.endsWith('append_v2'));expect(append.arg.content_hash).toBe(dropboxContentHash(b));const finish=calls.find(c=>c.url.endsWith('/finish'));expect(finish.arg.commit).toEqual({path:'/final.mp4',mode:'add',autorename:false,strict_conflict:true});expect(finish.arg.content_hash).toBeUndefined();expect(JSON.stringify(store.list('dropbox-account'))).not.toContain('private-access');

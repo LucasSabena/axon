@@ -13,6 +13,18 @@
   const active=j=>['queued','running','waiting'].includes(j.state);
   const retryNote=j=>j.retryAt&&j.retryAt>Date.now()?' Reintenta ~'+new Date(j.retryAt).toLocaleTimeString('es-AR',{hour:'2-digit',minute:'2-digit'})+'.':'';
   const targets=p=>p.destinations?.length?p.destinations:[{id:'local',path:p.repository||'',label:p.repository?'Destino guardado':'Disco del sistema'}];
+  const repositoryPath=t=>t.path||(data?.availability?.root?data.availability.root+'/repository':'');
+  function jobProgress(j){
+    const phase={starting:'Preparando',capture:'Copiando archivos',verify:'Comprobando la recuperación', 'database-verify':'Comprobando la base de datos',partial:'Copia incompleta',done:'Finalizado'}[j.phase]||'En espera';
+    const p=j.progress;
+    return `<div data-progress-job="${esc(j.id)}"><small>${esc(phase)} · ${j.endedAt?'Terminó: '+date(j.endedAt):'Solicitada: '+date(j.createdAt)}</small>${active(j)&&p?`<small>${p.files_done??0}${p.total_files?' de '+p.total_files:''} archivos · ${bytes(p.bytes_done??0)}${p.total_bytes?' de '+bytes(p.total_bytes):''}</small>${j.phase==='capture'&&p.total_bytes>0?`<progress aria-label="Archivos copiados" max="${p.total_bytes}" value="${Math.min(p.bytes_done??0,p.total_bytes)}"></progress>`:''}`:''}</div>`;
+  }
+  function updateProgress(){
+    node.querySelectorAll('[data-progress-job]').forEach(box=>{
+      const job=data.jobs.find(j=>j.id===box.dataset.progressJob);
+      if(job)box.outerHTML=jobProgress(job);
+    });
+  }
   const sources=p=>p.sources?.length?p.sources:p.source?[p.source]:[];
   const frequency=p=>p.intervalDays===0||!p.dailyAt?'Cuando vos lo hagas':`${(p.intervalDays??1)===1?'Todos los días':'Cada '+(p.intervalDays??1)+' días'} a las ${p.dailyAt}`;
   const refreshIcons=()=>{if(window.lucide)lucide.createIcons({root:node});};
@@ -30,7 +42,7 @@
   }
   // El poll de 3s re-renderizaba todo: con la misma firma no se toca el DOM
   // (conserva foco, scroll y selección). Cambios → render normal.
-  const signature=()=>JSON.stringify([data?.jobs?.map(j=>[j.id,j.state,j.phase,j.message,j.retryAt,j.snapshot,j.verifiedAt,j.restoredPath,j.expired,j.bytes]),data?.policies?.map(p=>[p.id,p.enabled,p.revision,(p.schedule||[]).map(s=>s.nextAt)])]);
+  const signature=()=>JSON.stringify([data?.jobs?.map(j=>[j.id,j.state,j.phase,j.message,j.retryAt,j.snapshot,j.verifiedAt,j.restoredPath,j.expired,j.bytes,j.partial]),data?.policies?.map(p=>[p.id,p.enabled,p.revision,(p.schedule||[]).map(s=>s.nextAt)])]);
   const schedulePoll=()=>{if(data?.jobs.some(active)&&!wizard&&!restore)timer=setTimeout(()=>{if(signedIn&&AxonNavigation.current?.section==='backups')load({silent:true});},3000);};
   async function load(params={}){
     project=params.project??project;selected=params.plan??selected;clearTimeout(timer);const seq=++ticket;
@@ -39,7 +51,7 @@
     node.setAttribute('aria-busy','true');
     try{await read();if(seq!==ticket||wizard||restore)return;
       const sig=signature();
-      if(params.silent&&sig===lastSig){schedulePoll();return;}
+      if(params.silent&&sig===lastSig){updateProgress();schedulePoll();return;}
       lastSig=sig;render();if(params.job)node.querySelector(`[data-job="${CSS.escape(params.job)}"]`)?.scrollIntoView({block:'center'});
     }
     catch(e){if(seq===ticket)alertError(e,()=>load(params));}
@@ -59,7 +71,8 @@
     const j=targetJob(p,t),verified=data.jobs.filter(j=>j.policy.id===p.id&&coverage(j.policy)===coverage(p)&&j.mode==='backup'&&(j.destinationId||'local')===t.id&&j.state==='verified'&&!j.expired).sort((a,b)=>b.createdAt-a.createdAt)[0];
     const v=t.volume?disks.find(v=>t.volume.uuid?v.uuid===t.volume.uuid:v.id===t.volume.id):null;
     const offline=!diskError&&!!t.volume&&!v?.path;
-    return `<div class="bk-target-status">${icon('hard-drive')}<div><strong>${esc(t.label)}</strong><small>${diskError?'Estado del disco sin actualizar':offline?'Disco desconectado':v?bytes(v.available)+' libres':t.path?esc(t.path):'La copia queda en el servidor'}</small>${verified?`<small>Última copia comprobada: ${date(verified.verifiedAt)}</small>`:''}</div>${badge(offline?'waiting':j?.state||'queued',offline?'Disco desconectado':j?undefined:'Primera copia pendiente')}</div>`;
+    const path=repositoryPath(t);
+    return `<div class="bk-target-status">${icon('hard-drive')}<div><strong>${esc(t.label)}</strong><small>${diskError?'Estado del disco sin actualizar':offline?'Disco desconectado':v?v.available==null?'Espacio libre sin consultar':bytes(v.available)+' libres':'La copia queda en el servidor'}</small>${path?`<small class="bk-path">Ubicación: ${esc(path)}</small>${!offline?`<a class="bk-text-link" href="/archivos?path=${encodeURIComponent(path)}">Abrir ubicación en Archivos</a>`:''}`:''}${verified?`<small>Última copia comprobada: ${date(verified.verifiedAt)}</small>`:''}${j&&active(j)?jobProgress(j):''}</div>${badge(offline?'waiting':j?.state||'queued',offline?'Disco desconectado':j?.partial?'Copia incompleta':j?undefined:'Primera copia pendiente')}</div>`;
   }
   function render(){
     const policies=data.policies,detail=policies.find(p=>p.id===selected);
@@ -88,7 +101,15 @@
       try{await api('/api/backups/jobs/'+b.dataset.cancelJob+'/cancel',{method:'POST'});await load();}catch(err){alertError(err);}
     }));
     node.querySelector('[data-more-jobs]')?.addEventListener('click',e=>AxonUI.busy(e.currentTarget,loadMoreJobs));
-    node.querySelectorAll('[data-run]').forEach(b=>b.onclick=()=>AxonUI.busy(b,async()=>{try{await api('/api/backups/policies/'+b.dataset.run+'/run',{method:'POST',body:{}});toast('La copia quedó en la cola. Podés seguir usando AXON.','ok');await load();}catch(e){alertError(e);}}));
+    node.querySelectorAll('[data-run]').forEach(b=>b.onclick=()=>AxonUI.busy(b,async()=>{
+      const id=b.dataset.run,notice=document.createElement('p');notice.className='bk-notice';notice.setAttribute('role','status');notice.textContent='Solicitando la copia. Preparando el destino…';node.prepend(notice);
+      try{
+        const result=await api('/api/backups/policies/'+id+'/run',{method:'POST',body:{}});
+        selected=id;AxonNavigation.update('backups',{...(project?{project}:{}),plan:id,job:result.job.id});
+        if(!data.jobs.some(j=>j.id===result.job.id))data.jobs.unshift(result.job);
+        render();await load({plan:id,job:result.job.id});
+      }catch(e){notice.remove();alertError(e);}
+    }));
     node.querySelectorAll('[data-restore]').forEach(b=>b.onclick=()=>openRecovery(data.jobs.find(j=>j.id===b.dataset.restore)));
     node.querySelectorAll('[data-verify]').forEach(b=>b.onclick=()=>AxonUI.busy(b,async()=>{try{await api('/api/backups/jobs/'+b.dataset.verify+'/verify',{method:'POST',body:{}});await load();}catch(e){alertError(e);}}));
     node.querySelector('[data-key]').onclick=e=>AxonUI.busy(e.currentTarget,async()=>{
@@ -98,7 +119,7 @@
   }
   function detailMarkup(p){
     const jobs=data.jobs.filter(j=>j.policy.id===p.id).sort((a,b)=>b.createdAt-a.createdAt),versions=jobs.filter(j=>j.mode==='backup'&&!j.expired);
-    return `<button class="bk-back" data-all>${icon('arrow-left')}Todos mis backups</button><section class="bk-detail"><div class="bk-section-title"><div><h3>${esc(p.name)}</h3><p>${esc(frequency(p))} · ${p.retentionDays?'Versiones durante '+p.retentionDays+' días':'Versiones sin límite de tiempo'}</p></div><div class="bk-actions"><button class="btn-secondary" data-edit>Editar ajustes</button><button class="btn-secondary" data-pause>${p.enabled?'Pausar':'Reanudar'}</button><button class="btn-danger" data-delete-policy="${esc(p.id)}">Eliminar</button><button class="btn-primary" data-run="${esc(p.id)}" ${!p.enabled||!data.availability.restic?'disabled':''}>Hacer copia ahora</button></div></div><div class="bk-detail-grid"><div><h4>Qué se copia</h4>${p.kind==='postgres'?`<p>${p.databases.map(esc).join(', ')}</p>`:sources(p).map(s=>`<p class="bk-path">${icon('folder')}${esc(s)}</p>`).join('')}${p.diskMode?'<p>Archivos del disco elegido. No incluye otros discos ni es una imagen arrancable. Las bases en uso necesitan su propio backup.</p>':''}${p.exclusions?.length?`<details><summary>${p.exclusions.length} exclusiones</summary><p>${p.exclusions.map(esc).join(', ')}</p></details>`:''}</div><div><h4>Dónde se guardan</h4>${targets(p).map(t=>targetSummary(p,t)).join('')}</div></div></section><section><div class="bk-section-title"><h3>Versiones para recuperar</h3><span>${versions.length} registro${versions.length===1?'':'s'}</span></div><div class="bk-history">${versions.map(j=>`<article class="bk-version" data-job="${esc(j.id)}"><div><strong>${date(j.createdAt)}</strong><small>${esc(j.destinationLabel||'Disco del sistema')}</small>${badge(j.state)}<p>${esc((j.message||'Preparando la copia.')+retryNote(j))}</p>${j.snapshot?`<small>${j.files??'—'} archivos · ${bytes(j.bytes)}</small>`:''}${j.retentionError?`<p>${esc(j.retentionError)}</p>`:''}</div>${active(j)?`<div class="bk-actions"><button class="btn-secondary" data-cancel-job="${esc(j.id)}">Cancelar</button></div>`:j.snapshot?`<div class="bk-actions"><button class="btn-secondary" data-verify="${esc(j.id)}">Comprobar</button><button class="btn-primary" data-restore="${esc(j.id)}">Recuperar</button></div>`:''}</article>`).join('')||'<div class="bk-empty"><h4>Tu primera copia está por hacerse</h4><p>Podés esperar al horario elegido o hacerla ahora.</p></div>'}</div>${data.jobsTotal>data.jobs.length?`<button class="btn-secondary" data-more-jobs>Cargar registros anteriores (${data.jobsTotal-data.jobs.length} más)</button>`:''}</section>${jobs.some(j=>j.mode!=='backup')?`<section><h3>Recuperaciones y comprobaciones</h3>${jobs.filter(j=>j.mode!=='backup').slice(0,20).map(j=>`<div class="bk-version" data-job="${esc(j.id)}"><div><strong>${j.mode==='restore'?'Recuperación':'Comprobación'} · ${date(j.createdAt)}</strong>${badge(j.state)}<p>${esc((j.message||'En espera.')+retryNote(j))}</p>${j.mode==='restore'&&j.policy.kind==='postgres'&&j.restoredPath?'<small>Volcados .sql — reimportalos con psql dentro del contenedor PostgreSQL.</small>':''}</div>${active(j)?`<button class="btn-secondary" data-cancel-job="${esc(j.id)}">Cancelar</button>`:''}${j.restoredPath?`<a class="btn-secondary" href="/archivos?path=${encodeURIComponent(j.restoredPath)}">Abrir copia recuperada</a>`:''}</div>`).join('')}</section>`:''}`;
+    return `<button class="bk-back" data-all>${icon('arrow-left')}Todos mis backups</button><section class="bk-detail"><div class="bk-section-title"><div><h3>${esc(p.name)}</h3><p>${esc(frequency(p))} · ${p.retentionDays?'Versiones durante '+p.retentionDays+' días':'Versiones sin límite de tiempo'}</p></div><div class="bk-actions"><button class="btn-secondary" data-edit>Editar ajustes</button><button class="btn-secondary" data-pause>${p.enabled?'Pausar':'Reanudar'}</button><button class="btn-danger" data-delete-policy="${esc(p.id)}">Eliminar</button><button class="btn-primary" data-run="${esc(p.id)}" ${!p.enabled||!data.availability.restic?'disabled':''}>Hacer copia ahora</button></div></div><div class="bk-detail-grid"><div><h4>Qué se copia</h4>${p.kind==='postgres'?`<p>${p.databases.map(esc).join(', ')}</p>`:sources(p).map(s=>`<p class="bk-path">${icon('folder')}${esc(s)}</p>`).join('')}${p.diskMode?'<p>Archivos del disco elegido. No incluye otros discos ni es una imagen arrancable. Las bases en uso necesitan su propio backup.</p>':''}${p.exclusions?.length?`<details><summary>${p.exclusions.length} exclusiones</summary><p>${p.exclusions.map(esc).join(', ')}</p></details>`:''}</div><div><h4>Dónde se guardan</h4><p class="bk-inline-note">El destino contiene un repositorio cifrado, no carpetas sueltas. Usá “Recuperar” para abrir tus archivos. El espacio del repositorio puede ser menor que el tamaño de los archivos protegidos.</p>${targets(p).map(t=>targetSummary(p,t)).join('')}</div></div></section><section><div class="bk-section-title"><h3>Versiones para recuperar</h3><span>${versions.length} registro${versions.length===1?'':'s'}</span></div><div class="bk-history">${versions.map(j=>`<article class="bk-version" data-job="${esc(j.id)}"><div><strong>${date(j.createdAt)}</strong><small>${esc(j.destinationLabel||'Disco del sistema')}</small>${badge(j.state,j.partial&&j.mode!=='restore'?'Copia incompleta':undefined)}<p>${esc((j.message||'Preparando la copia.')+retryNote(j))}</p>${jobProgress(j)}${j.snapshot?`<small>${j.files??'—'} archivos · ${bytes(j.bytes)}</small>`:''}${j.retentionError?`<p>${esc(j.retentionError)}</p>`:''}</div>${active(j)?`<div class="bk-actions"><button class="btn-secondary" data-cancel-job="${esc(j.id)}">Cancelar</button></div>`:j.snapshot?`<div class="bk-actions"><button class="btn-secondary" data-verify="${esc(j.id)}">Comprobar</button><button class="btn-primary" data-restore="${esc(j.id)}">Recuperar</button></div>`:''}</article>`).join('')||'<div class="bk-empty"><h4>Tu primera copia está por hacerse</h4><p>Podés esperar al horario elegido o hacerla ahora.</p></div>'}</div>${data.jobsTotal>data.jobs.length?`<button class="btn-secondary" data-more-jobs>Cargar registros anteriores (${data.jobsTotal-data.jobs.length} más)</button>`:''}</section>${jobs.some(j=>j.mode!=='backup')?`<section><h3>Recuperaciones y comprobaciones</h3>${jobs.filter(j=>j.mode!=='backup').slice(0,20).map(j=>`<div class="bk-version" data-job="${esc(j.id)}"><div><strong>${j.mode==='restore'?'Recuperación':'Comprobación'} · ${date(j.createdAt)}</strong>${badge(j.state,j.partial&&j.mode!=='restore'?'Copia incompleta':undefined)}<p>${esc((j.message||'En espera.')+retryNote(j))}</p>${jobProgress(j)}${j.mode==='restore'&&j.policy.kind==='postgres'&&j.restoredPath?'<small>Volcados .sql — reimportalos con psql dentro del contenedor PostgreSQL.</small>':''}</div>${active(j)?`<button class="btn-secondary" data-cancel-job="${esc(j.id)}">Cancelar</button>`:''}${j.restoredPath?`<a class="btn-secondary" href="/archivos?path=${encodeURIComponent(j.restoredPath)}">Abrir copia recuperada</a>`:''}</div>`).join('')}</section>`:''}`;
   }
   function openWizard(policy){
     clearTimeout(timer);++ticket;

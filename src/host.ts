@@ -47,9 +47,9 @@ function buildArgv(command: string, user: ExecUser, timeoutSec = 0): string[] {
         ? t(['bash', '-lc', command])
         : ['runuser', '-u', runAs, '--', ...t(['bash', '-lc', USER_PATH_EXPORT + command])];
     }
-    // Non-root on host (dev mode): can't escalate, run as ourselves. `timeout`
-    // may not exist here; killing the direct bash child is enough.
-    return ['bash', '-c', USER_PATH_EXPORT + command];
+    // Direct-host development uses the same process-group timeout as Docker.
+    // Killing bash alone leaves its children holding stdout and the request open.
+    return t(['bash', '-c', USER_PATH_EXPORT + command]);
   }
   if (runAs === 'root') {
     return [...NSENTER, ...t(['bash', '-lc', command])];
@@ -74,13 +74,14 @@ export async function hostExec(
     const timer = setTimeout(() => {
       try { proc.kill('SIGKILL'); } catch { /* already gone */ }
     }, timeoutMs + 10_000);
-    const [stdout, stderr, code] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
-    clearTimeout(timer);
-    return { ok: code === 0, code, stdout, stderr, command };
+    try {
+      const [stdout, stderr, code] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      return { ok: code === 0, code, stdout, stderr, command };
+    } finally { clearTimeout(timer); }
   } catch (err) {
     return { ok: false, code: -1, stdout: '', stderr: String(err), command };
   }

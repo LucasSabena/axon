@@ -1,0 +1,11 @@
+{
+  "passed": true,
+  "at": "2026-10-07T13:13:13.683Z",
+  "checks": [
+    "Reloadable project context and persistent read-only diagnosis",
+    "Token creation UI, project and action permissions, legacy isolation and immediate revocation",
+    "Four feature views at 1440, 768, 390 and 320 px",
+    "Transient read error preserves data and retry recovers"
+  ],
+  "errors": []
+}

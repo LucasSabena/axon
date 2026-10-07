@@ -80,7 +80,7 @@ tail -f "$HOME/.local/share/axon-install/update.log"
 # O esperar desde la misma terminal:
 axon update --wait
 # Instalar una publicación concreta:
-axon update --ref v1.2.0 --wait
+axon update --ref v1.3.1 --wait
 ```
 
 La actualización obtiene una revisión concreta de GitHub y construye la imagen **antes de detener la versión actual**. Durante el cambio hace una copia de los datos del panel con la aplicación detenida, conserva `.env` y comprueba que `/api/health` responda con la revisión nueva. El frontend y el backend salen de la misma imagen; no se monta `public/` por separado.
@@ -108,7 +108,7 @@ La página **Backups** guía en cuatro pasos: qué proteger, en qué discos guar
 
 El host necesita **Restic** y Python; el panel indica si falta Restic. [Preparar el servidor](docs/installation.md#dependencias-para-backups). Copiar los archivos de un disco no crea una imagen arrancable del sistema. [Guía y alcance de Backups](docs/backups-2026-10-06/README.md).
 
-La [publicación 1.2.0](https://github.com/LucasSabena/axon/releases/tag/v1.2.0) incluye Backups, conexiones de almacenamiento en la nube, acceso para agentes por API/MCP, inventario de software e iconos, nuevo login y correcciones de navegación y caché. [Notas y actualización](docs/releases/v1.2.0.md).
+La [publicación 1.3.1](https://github.com/LucasSabena/axon/releases/tag/v1.3.1) corrige autenticación y doble verificación, copias incompletas, ubicación y progreso de backups, tamaños de carpetas, uploads interrumpidos y tooltips de consumo. Incluye pruebas de regresión y QA de las 24 secciones. [Notas y actualización](docs/releases/v1.3.1.md).
 
 ## Si ya tenías AXON instalado con Compose
 

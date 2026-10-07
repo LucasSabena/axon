@@ -1,3 +1,4 @@
+import type { HttpFetch } from '../http-fetch';
 import { createHash, randomBytes } from 'node:crypto';
 import { PlatformStore } from '../platform/store';
 import { MaintenanceError, type Actor } from '../storage/types';
@@ -29,7 +30,7 @@ export function sharedUrl(value: unknown): string {
 }
 export class Dropbox {
   private refreshes = new Map<string, Promise<Account>>();
-  constructor(readonly store: PlatformStore, private vault: CloudVault, private http: typeof fetch = fetch, private envClient = process.env.DROPBOX_CLIENT_ID || '') {}
+  constructor(readonly store: PlatformStore, private vault: CloudVault, private http: HttpFetch = fetch, private envClient = process.env.DROPBOX_CLIENT_ID || '') {}
   clientId(owner: string): string { return this.envClient || this.store.get<{clientId:string}>('dropbox-app', owner)?.clientId || ''; }
   configure(owner: string, value: unknown) {
     if (this.envClient) throw new MaintenanceError('La aplicación está configurada por el servidor', 409);

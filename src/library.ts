@@ -6,6 +6,7 @@ import {MaintenanceError} from './storage/types';
 import {volumeForPath,volumeContains} from './file-volumes';
 import { getConnInfo } from 'hono/bun';
 import type { Context, Hono, MiddlewareHandler } from 'hono';
+import { appendUploadBlock } from './file-uploads';
 import { readdir, stat, readFile, writeFile, mkdir, realpath, rename as fsRename } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -255,7 +256,8 @@ async function hostDirExists(p: string): Promise<boolean> {
 }
 
 async function init(): Promise<void> {
-  try {
+  if (process.env.AXON_QA_ROOT) home = process.env.AXON_QA_ROOT;
+  else try {
     const r = await hostExec('printf %s "$HOME"', { user: 'user', timeoutMs: 10_000 });
     if (r.ok && r.stdout.trim().startsWith('/')) home = r.stdout.trim();
   } catch { /* keep guess */ }
@@ -1566,7 +1568,7 @@ export const libraryHostGuard: MiddlewareHandler = async (c, next) => {
 
 // ---------- Uploads (chunked, appended on the host) ----------
 
-interface Upload { id: string; dir: string; name: string; part: string; size: number; received: number; t: number }
+interface Upload { id: string; dir: string; name: string; part: string; size: number; received: number; t: number; cancelled?: boolean }
 const uploads = new Map<string, Upload>();
 // Per-upload promise chain: two concurrent chunks must not both pass the
 // offset check and interleave appends into a corrupt part file.
@@ -1580,34 +1582,6 @@ function publicOrigin(): string {
   } catch {
     throw new Error('AXON_PUBLIC_ORIGIN inválido — debe ser una URL absoluta (p. ej. https://axon.example.com)');
   }
-}
-
-async function appendToHost(part: string, body: ReadableStream<Uint8Array> | null): Promise<{ ok: boolean; n: number; error?: string }> {
-  if (!body) return { ok: false, n: 0, error: 'Cuerpo vacío' };
-  const proc = hostSpawnInteractive(`cat >> ${shq(part)}`, { user: 'user' });
-  const stdin = proc.stdin as { write(d: Uint8Array): number | Promise<number>; flush(): number | Promise<number>; end(): void };
-  // A wedged remote `cat` must not hold the upload lock forever — bound the
-  // append at 5 minutes (the chunk itself is capped at 64 MiB).
-  const timer = setTimeout(() => killHostProc(proc), 300_000);
-  let n = 0;
-  try {
-    const r = body.getReader();
-    while (true) {
-      const { done, value } = await r.read();
-      if (done) break;
-      n += value.length;
-      if (n > CHUNK_MAX) throw new Error('Chunk demasiado grande');
-      await stdin.write(value);
-      await stdin.flush();
-    }
-  } catch (e) {
-    try { stdin.end(); } catch { /* closed */ }
-    await proc.exited;
-    return { ok: false, n, error: String((e as Error)?.message || e) };
-  } finally { clearTimeout(timer); }
-  try { stdin.end(); } catch { /* closed */ }
-  const [code, err] = await Promise.all([proc.exited, new Response(proc.stderr as ReadableStream).text()]);
-  return code === 0 ? { ok: true, n } : { ok: false, n, error: err.trim() || `exit ${code}` };
 }
 
 async function addPathToIndex(hp: string, carry?: Partial<Item>): Promise<Item | null> {
@@ -2122,8 +2096,8 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers): void 
     const b = await c.req.json<{ name: string; size: number; dir?: string; rel?: string }>().catch(() => ({} as never));
     const name = sanitizeName(b.name);
     const size = Number(b.size);
-    if (!name) return fail(c, 400, 'Nombre inválido');
-    if (!Number.isFinite(size) || size < 0) return fail(c, 400, 'Tamaño inválido');
+    if (!name || Buffer.byteLength(name, 'utf8') > 255) return fail(c, 400, 'Nombre inválido');
+    if (!Number.isSafeInteger(size) || size < 0) return fail(c, 400, 'Tamaño inválido');
     const kind = KIND_BY_EXT[extOf(name)] || 'other';
     let dir = await resolveInRoots(b.dir || `${state.uploadRoot}/${KIND_FOLDER[kind]}`);
     if (!dir) return fail(c, 403, 'Carpeta destino fuera de la biblioteca');
@@ -2153,20 +2127,28 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers): void 
     // a future change cannot orphan this gate's release path.
     await prev?.catch(() => {});
     try {
+      if (u.cancelled || uploads.get(u.id) !== u) return fail(c, 410, 'La subida se interrumpió');
       await hostVolumes.roots(u.dir);
       const offset = Number(c.req.query('offset') || 0);
       const st = await stat(hostToContainer(u.part)).catch(() => null);
       const have = st?.size ?? -1;
       if (have < 0) return fail(c, 410, 'El archivo parcial desapareció');
+      if (have !== u.received) return fail(c, 409, 'El archivo parcial cambió; reiniciá la subida');
       if (offset !== have) return c.json({ ok: false, error: 'offset', received: have }, 409);
-      const r = await appendToHost(u.part, c.req.raw.body);
-      const after = (await stat(hostToContainer(u.part)).catch(() => null))?.size ?? have;
-      u.received = after;
-      u.t = Date.now();
-      if (!r.ok) return fail(c, 500, 'Falló la escritura del bloque', { detail: r.error, received: after });
-      if (after > u.size) return fail(c, 400, 'Se recibieron más bytes de los declarados');
-      return c.json({ ok: true, received: after });
+      try {
+        if (!c.req.raw.body) return fail(c, 400, 'Bloque vacío');
+        const bytes = await appendUploadBlock(u.part, c.req.raw.body, Math.min(CHUNK_MAX, u.size - have));
+        u.received = have + bytes;
+        return c.json({ ok: true, received: u.received });
+      } catch {
+        // Failed blocks were never acknowledged. Restore the previous offset
+        // so retry sends that block once, including interrupted/oversized bodies.
+        const rollback = await hostExec(`truncate -s ${have} -- ${shq(u.part)}`, { user: 'user', timeoutMs: 10_000 });
+        if (!rollback.ok) u.cancelled = true;
+        return fail(c, 500, 'Falló la escritura del bloque', { received: have });
+      }
     } finally {
+      u.t = Date.now();
       release();
       if (uploadLocks.get(u.id) === gate) uploadLocks.delete(u.id);
     }
@@ -2192,6 +2174,7 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers): void 
     const u = uploads.get(c.req.param('uid'));
     if (!u) return fail(c, 404, 'Subida no encontrada');
     return withUploadLock(u.id, async () => {
+      if (u.cancelled || uploads.get(u.id) !== u) return fail(c, 410, 'La subida se interrumpió');
       await hostVolumes.roots(u.dir);
       const st = await stat(hostToContainer(u.part)).catch(() => null);
       if (!st || st.size !== u.size) return fail(c, 400, `Subida incompleta (${st?.size ?? 0} de ${u.size} bytes)`);

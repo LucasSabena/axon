@@ -1,0 +1,18 @@
+{
+  "passed": true,
+  "health": {
+    "ok": true,
+    "version": "1.3.0",
+    "revision": "7cad571-audit-ea30a8399f4d"
+  },
+  "checks": [
+    "Real DATOS directory total exceeds 25 GB",
+    "Live backup policy, versions and exact Files link visible on desktop and mobile",
+    "Files row displays 28 GB instead of 155 B",
+    "Real consumption hover stays near mouse and inside viewport; navigation hides it"
+  ],
+  "dirSize": 29619754165,
+  "jobsPreserved": 14,
+  "errors": [],
+  "mutations": "No backups created, restored, cancelled or deleted in production"
+}

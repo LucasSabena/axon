@@ -1,4 +1,5 @@
 import { initHostStorage, resolveHostPath, hostVolumes, availableStorage } from './host-storage';
+import packageInfo from '../package.json';
 import { $ } from 'bun';
 import { Hono } from 'hono';
 import { browserWriteGuard, requestOriginAllowed, safePairTarget } from './browser-security';
@@ -18,7 +19,8 @@ import {
   verifySessionToken,
   setSessionHooks,
 } from './auth';
-import { loadConfig, saveConfig } from './config';
+import { loadConfig, saveConfig, updateConfigAuth } from './config';
+import { LoginChallenges } from './login-challenges';
 import { domainsForPorts, domainsForProject } from './domain-associations';
 import { validateSettings, isForbiddenWebhookHost, maskWebhookUrl } from './settings-validation';
 import { getServerStats, getServerHosts } from './stats';
@@ -82,6 +84,7 @@ import { loadHeartbeats, recordHeartbeat, lastState, allHeartbeats, uptimePct, p
 import { registerFilesRoutes } from './files';
 import { registerNavigationRoutes } from './navigation';
 import { privateApiResponses } from './response-cache';
+import { boundedRequestBody } from './request-body';
 import { registerEventRoutes, loadEvents, recordEvent } from './events';
 import { registerAlertRoutes, startAlertLoop } from './alerts';
 import { registerScriptRoutes, startScriptScheduler } from './scripts';
@@ -227,6 +230,7 @@ heartbeatTick().catch(() => {});
 const app = new Hono();
 app.use('/api/*', privateApiResponses);
 registerQaBoundary(app, maintenanceQaRoot);
+app.use('*', boundedRequestBody);
 
 // gzip text responses (JS/CSS/HTML/JSON ~500KB → ~150KB). Skips
 // already-encoded bodies, downloads, and SSE (excluded by content-type).
@@ -350,6 +354,21 @@ function loginLocked(c: any): Response | null {
   return fail(c, 429, `Demasiados intentos fallidos — probá en ${Math.max(1, Math.ceil(sec / 60))} min`);
 }
 
+// Credential changes and recovery-code logins share one reauthentication
+// boundary, so concurrent requests cannot consume the same code or authenticate
+// against a password that another request is currently replacing.
+let authRequestQueue: Promise<void> = Promise.resolve();
+const serializeAuth = async (_c: any, next: () => Promise<void>) => {
+  const previous = authRequestQueue;
+  let release: () => void;
+  authRequestQueue = new Promise<void>(resolve => { release = resolve; });
+  await previous;
+  try { await next(); } finally { release(); }
+};
+app.use('/api/login', serializeAuth);
+app.use('/api/auth/*', serializeAuth);
+
+const loginChallenges = new LoginChallenges();
 app.post('/api/login', async (c) => {
   const locked = loginLocked(c);
   if (locked) return locked;
@@ -358,32 +377,44 @@ app.post('/api/login', async (c) => {
   if (Number(c.req.header('content-length') || 0) > 8192) return fail(c, 413, 'Solicitud demasiado grande');
   const rawBody = await c.req.text();
   if (rawBody.length > 8192) return fail(c, 413, 'Solicitud demasiado grande');
-  const parsed = (() => { try { const v = JSON.parse(rawBody); return v && typeof v === 'object' ? v : {}; } catch { return {}; } })() as { username?: unknown; password?: unknown; code?: unknown };
-  const username = typeof parsed.username === 'string' ? parsed.username : '';
+  const parsed = (() => { try { const v = JSON.parse(rawBody); return v && typeof v === 'object' ? v : {}; } catch { return {}; } })() as { username?: unknown; password?: unknown; code?: unknown; challenge?: unknown };
+  let username = typeof parsed.username === 'string' ? parsed.username : '';
   const password = typeof parsed.password === 'string' ? parsed.password : '';
   const code = typeof parsed.code === 'string' ? parsed.code : undefined;
-  // Always run PBKDF2 — short-circuiting on a wrong username would leak via
-  // timing which usernames exist.
-  const passOk = await verifyPassword(password, config.auth.passwordHash);
-  let valid = passOk && username === config.auth.username;
+  const challenge = typeof parsed.challenge === 'string' ? parsed.challenge : undefined;
+  let valid = false;
+  if (parsed.challenge !== undefined) {
+    const verifiedUser = loginChallenges.get(parsed.challenge, config.auth, clientIp(c));
+    if (!verifiedUser) return fail(c, 410, 'La verificación venció. Volvé a ingresar tu usuario y contraseña.');
+    username = verifiedUser; valid = true;
+  } else {
+    // Never disclose 2FA before the password is correct; wrong usernames still
+    // run PBKDF2 so the first step preserves its generic failure contract.
+    const passOk = await verifyPassword(password, config.auth.passwordHash);
+    valid = passOk && username === config.auth.username;
+    if (valid && config.auth.totpSecret && !code) {
+      return c.json({ ok: true, requiresSecondFactor: true, challenge: loginChallenges.issue(config.auth, clientIp(c)), expiresIn: 300 });
+    }
+  }
   if (valid && config.auth.totpSecret) {
-    // Second factor — a wrong/missing code counts as a failed login too, so
-    // an attacker holding the password can't grind 6-digit codes freely.
     valid = verifyTotp(config.auth.totpSecret, code || '');
-    if (!valid && consumeRecoveryCode(config.auth.totpRecovery, code || '')) {
+    const recovery = [...(config.auth.totpRecovery || [])];
+    if (!valid && consumeRecoveryCode(recovery, code || '')) {
+      await updateConfigAuth(config, auth => { auth.totpRecovery = recovery; });
       valid = true;
-      await saveConfig(config);
       recordEvent('auth', `Login con código de recuperación — quedan ${config.auth.totpRecovery!.length}`);
       notify('Código de recuperación usado', `Quedan ${config.auth.totpRecovery!.length}. Si no fuiste vos, revisá tu 2FA en Configuración.`, 4).catch(() => {});
     }
   }
   if (!valid) {
     noteLoginFail(c, username);
+    if (challenge) loginChallenges.fail(challenge);
     // Same message whether the password or the TOTP code was wrong — a
     // distinct "bad code" error would confirm password guesses. The frontend
     // learns totpEnabled from /api/me, not from this error.
-    return fail(c, 401, 'Credenciales inválidas');
+    return fail(c, 401, challenge ? 'El código no es válido. Probá otra vez.' : 'Credenciales inválidas');
   }
+  if (challenge) loginChallenges.consume(challenge);
   loginGuard.delete(clientIp(c));
   recordEvent('auth', `Login exitoso desde ${clientIp(c)}`);
   const token = await createSession(username);
@@ -444,10 +475,9 @@ async function onboardingProbe() {
 const onboardingDeps = {
   getConfig: () => config,
   saveAuth: async (username: string, passwordHash: string, consumedTokenHash: string) => {
-    config.auth.username = username;
-    config.auth.passwordHash = passwordHash;
-    config.auth.setupTokenHash = consumedTokenHash;
-    await saveConfig(config);
+    await updateConfigAuth(config, auth => {
+      auth.username = username; auth.passwordHash = passwordHash; auth.setupTokenHash = consumedTokenHash;
+    });
   },
   hashPassword,
   startSession: async (c: any, username: string) => {
@@ -470,7 +500,7 @@ app.use('/api/*', async (c,next)=>{if(/^\/api\/(storage|maintenance|home|compose
 app.route('/api/v1',machineApi(platformDependencies));
 app.get('/api/health', c => {
   c.header('Cache-Control', 'no-store');
-  return c.json({ ok: true, version: process.env.AXON_VERSION || '1.2.0', revision: process.env.AXON_REVISION || 'development', ...(maintenanceQaRoot ? {qa:true} : {}) });
+  return c.json({ ok: true, version: process.env.AXON_VERSION || packageInfo.version, revision: process.env.AXON_REVISION || 'development', ...(maintenanceQaRoot ? {qa:true} : {}) });
 });
 app.use('/api/*', requireAuth);
 app.use('/api/*',async(c,next)=>{
@@ -533,11 +563,9 @@ app.post('/api/auth/totp/enable', async (c) => {
     noteLoginFail(c, user);
     return fail(c, 401, 'Código inválido');
   }
-  config.auth.totpSecret = pending.secret;
   const recovery = generateRecoveryCodes();
-  config.auth.totpRecovery = recovery.map(hashRecoveryCode);
+  await updateConfigAuth(config, auth => { auth.totpSecret = pending.secret; auth.totpRecovery = recovery.map(hashRecoveryCode); });
   totpPending.delete(user);
-  await saveConfig(config);
   recordEvent('auth', '2FA activado');
   notify('2FA activado', 'Los próximos logins van a pedir el código del autenticador.', 3).catch(() => {});
   return c.json({ ok: true, recovery });
@@ -560,8 +588,8 @@ app.post('/api/auth/password', async (c) => {
     return fail(c, 401, 'La contraseña actual no es correcta.');
   }
   if (body.current === password) return fail(c, 400, 'La contraseña nueva es igual a la actual.');
-  config.auth.passwordHash = await hashPassword(password);
-  await saveConfig(config);
+  const passwordHash = await hashPassword(password);
+  await updateConfigAuth(config, auth => { auth.passwordHash = passwordHash; });
   const sid = sessionIdFromRequest(c);
   for (const s of listSessions().issued) if (s.jti !== sid) await revokeSession(s.jti);
   recordEvent('auth', `Contraseña actualizada por ${c.get('user')}`);
@@ -579,9 +607,7 @@ app.post('/api/auth/totp/disable', async (c) => {
     noteLoginFail(c, user);
     return fail(c, 401, 'Código o contraseña inválidos');
   }
-  delete config.auth.totpSecret;
-  delete config.auth.totpRecovery;
-  await saveConfig(config);
+  await updateConfigAuth(config, auth => { delete auth.totpSecret; delete auth.totpRecovery; });
   recordEvent('auth', `2FA desactivado por ${user}`);
   notify('2FA desactivado', 'El login vuelve a pedir solo usuario y contraseña.', 4).catch(() => {});
   return c.json({ ok: true });
