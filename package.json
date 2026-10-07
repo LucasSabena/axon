@@ -34,7 +34,8 @@
     "build:ui": "bun run scripts/build-ui.ts",
     "qa:platform:database": "bun --no-env-file run scripts/platform-database-qa.ts",
     "test:software": "python3 -m unittest discover -s src -p test_software_host.py",
-    "test:installer": "python3 -m unittest discover -s deployment -p \"test_*.py\""
+    "test:installer": "python3 -m unittest discover -s deployment -p \"test_*.py\"",
+    "qa:audit": "bun --no-env-file run scripts/audit-browser-qa.ts"
   },
   "dependencies": {
     "@awesome.me/webawesome": "3.14.0",

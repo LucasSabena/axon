@@ -1,4 +1,5 @@
-import { mkdir, readFile, rename, writeFile } from 'fs/promises';
+import { readFile } from 'fs/promises';
+import { atomicPrivateWrite } from './atomic-file';
 import * as path from 'path';
 import type { Context, Hono } from 'hono';
 import type { AppConfig } from './types';
@@ -38,24 +39,34 @@ export function onboardingStep(state: OnboardingFile | null): OnboardingStep {
 const FILE = path.join(path.dirname(process.env.CONFIG_PATH || '/app/data/config.json'), 'onboarding.json');
 
 let saveQueue: Promise<void> = Promise.resolve();
+let mutationQueue: Promise<void> = Promise.resolve();
+
+function serializeMutation<T>(fn: () => Promise<T>): Promise<T> {
+  const operation = mutationQueue.catch(() => {}).then(fn);
+  mutationQueue = operation.then(() => {}, () => {});
+  return operation;
+}
+
+export const setupTokenHash = (token: string) => new Bun.CryptoHasher('sha256').update(token).digest('hex');
 
 // No cache — `axon reset-onboarding` can rewrite the file under a running
 // server, and reads are small + rare (only the onboarding endpoints).
 export async function loadOnboarding(): Promise<OnboardingFile | null> {
   try {
     const parsed = JSON.parse(await readFile(FILE, 'utf-8'));
-    return parsed && parsed.version === 1 ? parsed : null;
-  } catch {
+    if (!parsed || parsed.version !== 1 || typeof parsed.createdAt !== 'string' ||
+        (parsed.setupToken !== undefined && (typeof parsed.setupToken !== 'string' || !parsed.setupToken)) ||
+        (parsed.manualDone !== undefined && !Array.isArray(parsed.manualDone))) throw new Error('Primeros pasos inválidos');
+    return parsed;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     return null;
   }
 }
 
 function saveOnboarding(next: OnboardingFile | null): Promise<void> {
   const operation = saveQueue.catch(() => {}).then(async () => {
-    await mkdir(path.dirname(FILE), { recursive: true });
-    const temp = `${FILE}.${process.pid}.tmp`;
-    await writeFile(temp, JSON.stringify(next, null, 2) + '\n', { encoding: 'utf-8', mode: 0o600 });
-    await rename(temp, FILE);
+    await atomicPrivateWrite(FILE, JSON.stringify(next, null, 2) + '\n');
   });
   saveQueue = operation;
   return operation;
@@ -96,7 +107,7 @@ const MANUAL_ITEMS = new Set(['explore']);
 export interface OnboardingDeps {
   getConfig: () => AppConfig;
   /** Replaces config.auth credentials and persists the config file. */
-  saveAuth: (username: string, passwordHash: string) => Promise<void>;
+  saveAuth: (username: string, passwordHash: string, consumedTokenHash: string) => Promise<void>;
   hashPassword: (password: string) => Promise<string>;
   /** Mints the session cookie + registry entry for a just-created account. */
   startSession: (c: Context, username: string) => Promise<void>;
@@ -119,6 +130,12 @@ const MIN_PASSWORD = 8;
 // endpoint is the only unauthenticated mutation: it requires the one-time
 // token the installer prints, and shares the login brute-force lockout.
 export function registerOnboardingPublic(app: Hono, deps: OnboardingDeps): void {
+  // Serialize the whole read/validate/write operation, not just file writes.
+  // Two concurrent uses of one token must never both replace credentials.
+  app.use('/api/onboarding/*', async (c, next) => {
+    if (c.req.method === 'POST') await serializeMutation(next);
+    else await next();
+  });
   app.get('/api/onboarding/status', async (c) => {
     const step = onboardingStep(await loadOnboarding());
     return c.json({ ok: true, step, pending: step === 'setup' });
@@ -132,7 +149,7 @@ export function registerOnboardingPublic(app: Hono, deps: OnboardingDeps): void 
       return fail(c, 429, `Demasiados intentos — probá en ${Math.max(1, Math.ceil(sec / 60))} min`);
     }
     const state = await loadOnboarding();
-    if (!state?.setupToken || state.completedAt) {
+    if (!state?.setupToken || state.completedAt || deps.getConfig().auth.setupTokenHash === setupTokenHash(state.setupToken)) {
       return fail(c, 403, 'La configuración inicial ya está hecha. Iniciá sesión normalmente.');
     }
     const body = await c.req.json<{ token?: string; username?: string; password?: string }>().catch(() => ({} as { token?: string; username?: string; password?: string }));
@@ -148,7 +165,9 @@ export function registerOnboardingPublic(app: Hono, deps: OnboardingDeps): void 
     if (password.length < MIN_PASSWORD || password.length > 200) {
       return fail(c, 400, `La contraseña necesita al menos ${MIN_PASSWORD} caracteres.`);
     }
-    await deps.saveAuth(username, await deps.hashPassword(password));
+    // Persist token consumption with credentials. If the following wizard
+    // write fails or the process dies, the token cannot replace the account.
+    await deps.saveAuth(username, await deps.hashPassword(password), setupTokenHash(state.setupToken));
     const { setupToken: _consumed, ...rest } = state;
     await saveOnboarding({ ...rest });
     deps.recordEvent('auth', `Cuenta de administrador creada — ${username}`);

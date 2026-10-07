@@ -443,9 +443,10 @@ async function onboardingProbe() {
 
 const onboardingDeps = {
   getConfig: () => config,
-  saveAuth: async (username: string, passwordHash: string) => {
+  saveAuth: async (username: string, passwordHash: string, consumedTokenHash: string) => {
     config.auth.username = username;
     config.auth.passwordHash = passwordHash;
+    config.auth.setupTokenHash = consumedTokenHash;
     await saveConfig(config);
   },
   hashPassword,
@@ -469,7 +470,7 @@ app.use('/api/*', async (c,next)=>{if(/^\/api\/(storage|maintenance|home|compose
 app.route('/api/v1',machineApi(platformDependencies));
 app.get('/api/health', c => {
   c.header('Cache-Control', 'no-store');
-  return c.json({ ok: true, version: process.env.AXON_VERSION || '1.2.0', revision: process.env.AXON_REVISION || 'development' });
+  return c.json({ ok: true, version: process.env.AXON_VERSION || '1.2.0', revision: process.env.AXON_REVISION || 'development', ...(maintenanceQaRoot ? {qa:true} : {}) });
 });
 app.use('/api/*', requireAuth);
 app.use('/api/*',async(c,next)=>{
@@ -1885,6 +1886,7 @@ registerComposeRoutes(app, {
 // The jlesage image publishes remote debugging on 127.0.0.1:9222 when
 // CHROMIUM_REMOTE_DEBUGGING=1 — this only opens tabs in the running session.
 app.get('/api/browser/status', async c => {
+  if (maintenanceQaRoot) return c.json({ok:true,available:false,fixture:true});
   const response = await fetch('http://127.0.0.1:5800/', {signal:AbortSignal.timeout(4000)}).catch(() => null);
   await response?.body?.cancel().catch(() => {});
   return c.json({ok:true, available:!!response?.ok});

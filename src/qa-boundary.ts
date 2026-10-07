@@ -14,7 +14,7 @@ export function registerQaBoundary(app:Hono,root:string|null){
  if(!root)return;
  app.use('*',async(c,next)=>{
   const p=c.req.path;
-  if(p.startsWith('/p/')||p.startsWith('/ws/')||p.startsWith('/api/browser'))return c.json({ok:false,error:'QA: acceso operativo bloqueado'},403);
+  if(p.startsWith('/p/')||p.startsWith('/ws/')||(p.startsWith('/api/browser')&&p!=='/api/browser/status'))return c.json({ok:false,error:'QA: acceso operativo bloqueado'},403);
   if(!['GET','HEAD'].includes(c.req.method)){
    const safe=/^\/api\/(login|logout|home\/links|home\/import(?:-preview)?|storage\/scans(?:\/[^/]+\/cancel)?|storage\/exclusions|storage\/plans|maintenance\/migrations\/[^/]+\/(compare|evidence))$/.test(p);
    // These operations only consume server-side items from the owned QA home.

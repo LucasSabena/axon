@@ -209,6 +209,8 @@ export interface AppConfig {
   auth: {
     username: string;
     passwordHash: string;
+    /** Proof that an installer token was consumed in the same write as credentials. */
+    setupTokenHash?: string;
     totpSecret?: string;
     // SHA-256 hashes de los códigos de recuperación de un solo uso (2FA).
     totpRecovery?: string[];
