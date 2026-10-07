@@ -30,8 +30,16 @@ async function sign(payload: SessionPayload): Promise<string> {
 
 async function verify(token: string): Promise<SessionPayload | null> {
   try {
-    const [body, signature] = token.split('.');
+    if (token.length > 8192) return null;
+    const parts = token.split('.');
+    if (parts.length !== 2) return null;
+    const [body, signature] = parts;
     if (!body || !signature) return null;
+    // Legacy revocations hash the raw token. Accept exactly one encoding of
+    // signed bytes: suffixes, ignored whitespace and alternate base64 padding
+    // must not turn a revoked token into a different registry identity.
+    const canonical = (value: string) => /^[A-Za-z0-9+/]+={0,2}$/.test(value) && btoa(atob(value)) === value;
+    if (!canonical(body) || !canonical(signature)) return null;
 
     const data = Uint8Array.from(atob(body), (c) => c.charCodeAt(0));
     const sig = Uint8Array.from(atob(signature), (c) => c.charCodeAt(0));
@@ -49,7 +57,9 @@ async function verify(token: string): Promise<SessionPayload | null> {
 
     const payload = JSON.parse(new TextDecoder().decode(data)) as SessionPayload;
     // exp must be a finite number — a non-numeric one would never expire.
-    if (typeof payload.exp !== 'number' || !Number.isFinite(payload.exp) || payload.exp < Date.now() / 1000) return null;
+    if (!payload || typeof payload.username !== 'string' || !payload.username || payload.username.length > 128 ||
+        (payload.jti !== undefined && (typeof payload.jti !== 'string' || !payload.jti || payload.jti.length > 128)) ||
+        typeof payload.exp !== 'number' || !Number.isFinite(payload.exp) || payload.exp <= Date.now() / 1000) return null;
     return payload;
   } catch {
     return null;
@@ -110,7 +120,10 @@ export async function createSession(username: string): Promise<string> {
 
 // For the raw WS upgrade path (outside Hono middleware).
 export async function verifySessionToken(token: string): Promise<SessionPayload | null> {
-  return verify(token);
+  const payload = await verify(token);
+  if (!payload) return null;
+  const id = payload.jti || `tok-${new Bun.CryptoHasher('sha256').update(token).digest('hex').slice(0, 32)}`;
+  return revokedCheck?.(id) ? null : payload;
 }
 
 export async function getSession(c: Context): Promise<SessionPayload | null> {
@@ -120,7 +133,7 @@ export async function getSession(c: Context): Promise<SessionPayload | null> {
   // token that never entered the revocation registry.
   const match = cookie.match(new RegExp(`(?:^|;\\s*)${COOKIE_NAME}=([^;]+)`));
   if (!match) return null;
-  return verify(match[1]);
+  return verifySessionToken(match[1]);
 }
 
 export function setSessionCookie(c: Context, token: string): void {

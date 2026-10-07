@@ -1,7 +1,7 @@
 import type { Context, Hono } from 'hono';
-import { chmod, mkdir, writeFile } from 'fs/promises';
 import { readFileSync } from 'fs';
 import * as path from 'path';
+import { atomicPrivateWrite } from './atomic-file';
 
 // ---------- Session / device registry ----------
 // Session tokens are stateless signed `base64(payload).sig` cookies
@@ -41,6 +41,12 @@ let writeQueue: Promise<void> = Promise.resolve();
 function loadSync(): void {
   try {
     const obj = JSON.parse(readFileSync(FILE, 'utf-8'));
+    if (!obj || !Array.isArray(obj.issued) || !Array.isArray(obj.revoked) ||
+        obj.issued.some((s: any) => !s || typeof s.jti !== 'string' || !s.jti || !Number.isFinite(s.created)) ||
+        obj.revoked.some((r: any) => !(typeof r === 'string' && r) &&
+          !(r && typeof r.jti === 'string' && r.jti && Number.isFinite(r.exp)))) {
+      throw new Error('Registro de sesiones inválido');
+    }
     const cutoff = Date.now() - ISSUED_MAX_AGE_MS;
     for (const s of obj?.issued || []) {
       if (s && typeof s.jti === 'string' && Number.isFinite(s.created) && s.created > cutoff) {
@@ -62,7 +68,10 @@ function loadSync(): void {
         revoked.set(r.jti, r.exp);
       }
     }
-  } catch { /* missing/corrupt — start fresh */ }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+      throw new Error('No se pudo cargar el registro de sesiones; recuperá una copia válida antes de iniciar AXON.', { cause: error });
+  }
 }
 loadSync();
 
@@ -70,21 +79,18 @@ function saveSoon(): void {
   if (saveTimer) return;
   saveTimer = setTimeout(() => {
     saveTimer = null;
-    writeQueue = writeQueue.then(async () => {
-      try {
-        await mkdir(path.dirname(FILE), { recursive: true, mode: 0o700 });
-        await writeFile(
-          FILE,
-          JSON.stringify({ issued: [...issued.values()], revoked: [...revoked.entries()].map(([jti, exp]) => ({ jti, exp })) }, null, 1),
-          { encoding: 'utf-8', mode: 0o600 }
-        );
-        // writeFile's mode only applies on creation — keep an older
-        // world-readable sessions.json private too.
-        await chmod(FILE, 0o600).catch(() => {});
-      } catch { /* disk errors are non-fatal */ }
-    });
+    void flushSessions().catch(() => console.error('[sessions] No se pudo guardar la actividad de sesiones'));
   }, SAVE_DEBOUNCE_MS);
   (saveTimer as { unref?: () => void })?.unref?.();
+}
+
+/** Security mutations are acknowledged only after their complete state is durable. */
+export function flushSessions(): Promise<void> {
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+  const text = JSON.stringify({ issued: [...issued.values()], revoked: [...revoked.entries()].map(([jti, exp]) => ({ jti, exp })) }, null, 1);
+  const operation = writeQueue.catch(() => {}).then(() => atomicPrivateWrite(FILE, text));
+  writeQueue = operation;
+  return operation;
 }
 
 function tokenHash(token: string): string {
@@ -133,7 +139,7 @@ function normalizeId(jtiOrToken: string | null | undefined): string | null {
 //   recordSession(sessionIdForToken(token), username, c.req.header('user-agent'))
 // Best long-term fix: add `jti: crypto.randomUUID()` to the payload in
 // auth.ts createSession() so revoking doesn't depend on token hashing.
-export function recordSession(jtiOrToken: string, username: string, ua: string): void {
+export async function recordSession(jtiOrToken: string, username: string, ua: string): Promise<void> {
   const jti = normalizeId(jtiOrToken);
   if (!jti) return;
   const now = Date.now();
@@ -145,8 +151,8 @@ export function recordSession(jtiOrToken: string, username: string, ua: string):
     created: existing?.created ?? now,
     lastSeen: now,
   });
-  revoked.delete(jti); // a freshly recorded id must not stay denied
-  saveSoon();
+  // Recording activity must never undo an existing revocation.
+  await flushSessions();
 }
 
 // Update lastSeen — call from the auth middleware on each request. The write
@@ -186,7 +192,7 @@ function revokedHas(jti: string): boolean {
   return true;
 }
 
-export function revokeSession(jtiOrToken: string): void {
+export async function revokeSession(jtiOrToken: string): Promise<void> {
   const jti = normalizeId(jtiOrToken);
   if (!jti) return;
   if (revoked.size >= REVOKED_CAP) {
@@ -196,7 +202,7 @@ export function revokeSession(jtiOrToken: string): void {
     pruneRevoked();
   }
   revoked.set(jti, revokedExpiry(jti));
-  saveSoon();
+  await flushSessions();
 }
 
 export function isRevoked(jtiOrToken: string): boolean {
@@ -251,7 +257,7 @@ export function registerSessionRoutes(app: Hono): void {
   });
 
   // Registered before /:jti/revoke so 'revoke-others' isn't eaten by :jti.
-  app.post('/api/sessions/revoke-others', (c) => {
+  app.post('/api/sessions/revoke-others', async (c) => {
     const current = sessionIdFromRequest(c);
     if (!current) {
       // Old-format token we can't tie to a registry entry — do nothing, don't fail.
@@ -261,24 +267,26 @@ export function registerSessionRoutes(app: Hono): void {
     let n = 0;
     for (const s of issued.values()) {
       if (s.jti !== current && !revokedHas(s.jti)) {
-        revokeSession(s.jti);
+        await revokeSession(s.jti);
         n++;
       }
     }
     return c.json({ ok: true, revoked: n });
   });
 
-  app.post('/api/sessions/:jti/revoke', (c) => {
+  app.post('/api/sessions/:jti/revoke', async (c) => {
     const p = c.req.param('jti');
     // The UI sends the 12-char prefix shown by GET /api/sessions; shorter
     // prefixes are rejected to avoid prefix-collision revocations.
-    if (p.length < 6) return fail(c, 400, 'Identificador de sesión demasiado corto');
-    const target = [...issued.keys()].find((j) => j === p || j.startsWith(p));
+    if (p.length < 12) return fail(c, 400, 'Identificador de sesión demasiado corto');
+    const matches = [...issued.keys()].filter((j) => j === p || j.startsWith(p));
+    if (matches.length > 1) return fail(c, 409, 'Identificador de sesión ambiguo');
+    const target = matches[0];
     if (!target) {
       if ([...revoked.keys()].some((j) => j === p || j.startsWith(p))) return c.json({ ok: true });
       return fail(c, 404, 'Sesión no encontrada');
     }
-    revokeSession(target);
+    await revokeSession(target);
     return c.json({ ok: true });
   });
 }

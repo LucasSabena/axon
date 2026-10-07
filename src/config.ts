@@ -1,5 +1,5 @@
-import { readFile, writeFile, mkdir, rename, chmod } from 'fs/promises';
-import * as path from 'path';
+import { readFile, chmod } from 'fs/promises';
+import { atomicPrivateWrite } from './atomic-file';
 import { hashPassword } from './auth';
 import type { AppConfig } from './types';
 
@@ -25,13 +25,26 @@ export async function loadConfig(): Promise<AppConfig> {
     // Holds passwordHash/totpSecret — fix the mode if an older release or a
     // manual edit left it group/world-readable.
     await chmod(CONFIG_PATH, 0o600).catch(() => {});
-  } catch {
+  } catch (error) {
+    // Only a missing file is a fresh install. Corrupt JSON, inaccessible data,
+    // and invalid credentials must never replace the administrator's state.
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`No se pudo cargar la configuración en ${CONFIG_PATH}`, { cause: error });
     const initialPassword = crypto.randomUUID() + crypto.randomUUID();
     config = {
       auth: { username: 'admin', passwordHash: await hashPassword(initialPassword) },
       domains: [],
     } as AppConfig;
     console.log(`[axon] No config found at ${CONFIG_PATH} — generated one-time admin password: ${initialPassword}`);
+    config.settings = { ...DEFAULT_SETTINGS };
+    await saveConfig(config);
+  }
+  if (!config || typeof config !== 'object' || Array.isArray(config) ||
+      !config.auth || typeof config.auth.username !== 'string' || !config.auth.username ||
+      typeof config.auth.passwordHash !== 'string' || !/^[^:]+:[A-Za-z0-9+/]{43}=$/.test(config.auth.passwordHash) ||
+      (config.settings != null && (typeof config.settings !== 'object' || Array.isArray(config.settings))) ||
+      (config.domains != null && !Array.isArray(config.domains)) ||
+      (config.projects != null && !Array.isArray(config.projects))) {
+    throw new Error(`Configuración inválida en ${CONFIG_PATH}; conservá el archivo y recuperá una copia válida.`);
   }
   config.settings = { ...DEFAULT_SETTINGS, ...(config.settings || {}) };
   if (process.env.PROJECT_SCAN_DIRS) {
@@ -56,12 +69,7 @@ let saveQueue: Promise<void> = Promise.resolve();
 export function saveConfig(config: AppConfig): Promise<void> {
   const text = JSON.stringify(config, null, 2);
   const operation = saveQueue.catch(() => {}).then(async () => {
-    await mkdir(path.dirname(CONFIG_PATH), { recursive: true, mode: 0o700 });
-    const temp = `${CONFIG_PATH}.${process.pid}.tmp`;
-    // mode travels with the temp file across rename — config.json contains
-    // the password hash and TOTP secret, it must stay owner-only.
-    await writeFile(temp, text, { encoding: 'utf-8', mode: 0o600 });
-    await rename(temp, CONFIG_PATH);
+    await atomicPrivateWrite(CONFIG_PATH, text);
   });
   saveQueue = operation;
   return operation;

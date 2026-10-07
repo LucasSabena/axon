@@ -387,8 +387,8 @@ app.post('/api/login', async (c) => {
   loginGuard.delete(clientIp(c));
   recordEvent('auth', `Login exitoso desde ${clientIp(c)}`);
   const token = await createSession(username);
+  await recordSession(token, username, c.req.header('user-agent') || '');
   setSessionCookie(c, token);
-  recordSession(token, username, c.req.header('user-agent') || '');
   return c.json({ ok: true });
 });
 
@@ -396,7 +396,7 @@ app.post('/api/logout', async (c) => {
   // Revoke server-side too — the cookie is stateless, so clearing it alone
   // leaves the signed token valid for the rest of its TTL.
   const token = c.req.header('cookie')?.match(/(?:^|;\s*)axon_session=([^;]+)/)?.[1];
-  if (token) revokeSession(token);
+  if (token) await revokeSession(token);
   clearSessionCookie(c);
   return c.json({ ok: true });
 });
@@ -451,8 +451,8 @@ const onboardingDeps = {
   hashPassword,
   startSession: async (c: any, username: string) => {
     const token = await createSession(username);
+    await recordSession(token, username, c.req.header('user-agent') || '');
     setSessionCookie(c, token);
-    recordSession(token, username, c.req.header('user-agent') || '');
   },
   backupCount: () => platformBackups.policies().length,
   probe: onboardingProbe,
@@ -562,7 +562,7 @@ app.post('/api/auth/password', async (c) => {
   config.auth.passwordHash = await hashPassword(password);
   await saveConfig(config);
   const sid = sessionIdFromRequest(c);
-  for (const s of listSessions().issued) if (s.jti !== sid) revokeSession(s.jti);
+  for (const s of listSessions().issued) if (s.jti !== sid) await revokeSession(s.jti);
   recordEvent('auth', `Contraseña actualizada por ${c.get('user')}`);
   notify('Contraseña actualizada', 'Las demás sesiones y dispositivos quedaron cerradas.', 3).catch(() => {});
   return c.json({ ok: true });
@@ -622,8 +622,8 @@ app.post('/pair', async (c) => {
   if (!t || !exp || Date.now() > exp) return fail(c, 410, 'Este link de vinculación venció o no es válido.');
   pairTokens.delete(t);
   const token = await createSession('paired-device');
+  await recordSession(token, 'paired-device', c.req.header('user-agent') || '');
   setSessionCookie(c, token);
-  recordSession(token, 'paired-device', c.req.header('user-agent') || '');
   // Optional in-app target after pairing (e.g. /p/4321/ for the embedded
   // browser) — same-origin paths only, never an open redirect.
   return c.json({ ok: true, next: safePairTarget(String(body.next || '/')) });
