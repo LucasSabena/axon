@@ -72,8 +72,10 @@
 }
 .agent-row:hover { background: var(--accent-soft); }
 .agent-row.active { background: var(--accent-soft); outline: 1px solid var(--accent); }
-.agent-row.agent-off { opacity: .45; }
-.agent-row.agent-resid { opacity: .7; }
+/* Installation status is stated in the subtitle/badge. Keep actionable rows
+   readable; dimming the whole button also destroys its text contrast. */
+.agent-row.agent-off .agent-ic,
+.agent-row.agent-resid .agent-ic { color: var(--text-dim); }
 
 .agent-ic {
   width: 26px; height: 26px;

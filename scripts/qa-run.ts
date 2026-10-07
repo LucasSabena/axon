@@ -24,7 +24,7 @@ try {
     if (!ready) await new Promise(resolve => setTimeout(resolve, 100));
   }
   if (!ready) throw new Error('QA fixture did not start');
-  for (const [name, script] of [['stability', 'scripts/stability-browser-qa.ts'], ['screens', 'scripts/audit-browser-qa.ts'], ['login', 'scripts/login-browser-qa.cjs'], ['auth', 'scripts/auth-state-qa.ts'], ['platform', 'scripts/platform-browser-qa.cjs'], ['backups', 'scripts/backups-browser-qa.cjs'], ['consumption', 'scripts/agent-consumption-browser-qa.cjs']]) {
+  for (const [name, script] of [['stability', 'scripts/stability-browser-qa.ts'], ['screens', 'scripts/audit-browser-qa.ts'], ['agent-states', 'scripts/agent-states-browser-qa.ts'], ['login', 'scripts/login-browser-qa.cjs'], ['auth', 'scripts/auth-state-qa.ts'], ['platform', 'scripts/platform-browser-qa.cjs'], ['backups', 'scripts/backups-browser-qa.cjs'], ['consumption', 'scripts/agent-consumption-browser-qa.cjs']]) {
     testProcess = Bun.spawn(['bun', '--no-env-file', 'run', script], { env: { ...process.env, AXON_QA_ORIGIN: origin, AXON_QA_OUTPUT: path.join(output, name) }, stdout: 'inherit', stderr: 'inherit' });
     const status = await testProcess.exited;
     if (status !== 0) process.exitCode = 1;
