@@ -81,6 +81,7 @@ import type { AppConfig, DomainMapping, DomainStatus, Project } from './types';
 import { notify, setNotifyUrl, notifyConfigured } from './notify';
 import { generateTotpSecret, verifyTotp, totpUri, generateRecoveryCodes, hashRecoveryCode, consumeRecoveryCode } from './totp';
 import { loadHeartbeats, recordHeartbeat, lastState, allHeartbeats, uptimePct, pruneHeartbeats } from './heartbeats';
+import { FileCatalog, registerFileCatalogRoutes } from './file-catalog';
 import { registerFilesRoutes } from './files';
 import { registerNavigationRoutes } from './navigation';
 import { privateApiResponses } from './response-cache';
@@ -91,9 +92,11 @@ import { registerScriptRoutes, startScriptScheduler } from './scripts';
 import { parseLogsSrc, startLogsSocket, stopLogsSocket, registerLogsRoutes } from './logs';
 import type { LogsWsData } from './logs';
 import { registerMetricsRoutes } from './metrics';
+import { registerFanRoutes, fixtureFanRunner } from './fans';
+import { registerUsbRoutes, fixtureUsbRunner } from './usb';
 import { registerDropRoutes, startDropSweeper, dropPathReferences } from './drop';
 import { registerLibraryRoutes, libraryHostGuard, libraryFileOperation } from './library';
-import { registerSessionRoutes, recordSession, sessionIdForToken, sessionIdFromRequest, isRevoked, touchSession, revokeSession, listSessions } from './sessions';
+import { registerSessionRoutes, recordSession, sessionIdForToken, sessionIdFromRequest, isRevoked, touchSession, revokeSession, listSessions, onSessionRevoked } from './sessions';
 import { registerOnboardingPublic, registerOnboardingRoutes } from './onboarding';
 import { registerOpsRoutes } from './ops';
 import { registerOptimizerRoutes } from './optimizer';
@@ -115,6 +118,7 @@ import { MaintenanceError } from './storage/types';
 import { StorageService } from './storage/service';
 import { scanRoot, scanRoots } from './storage/scan';
 import { registerStorageRoutes } from './storage/routes';
+import { DiskManager, fixtureDiskRunner, registerDiskRoutes } from './storage/disks';
 import {libraryTransferReview} from './library';
 import {HostCleaner} from './storage/cleaner';
 import {FileTransfers} from './file-transfers';
@@ -167,9 +171,10 @@ await loadEvents();
   }
 }
 setNotifyUrl(config.settings.notifyUrl, config.settings.notifyProvider);
-setSessionHooks({ isRevoked, touch: touchSession });
+setSessionHooks({ isRevoked, touch: (sid, c, payload) => touchSession(sid, { username: payload.username, expiresAt: payload.exp * 1000, ua: c.req.header('user-agent') || '', ip: clientIp(c) }) });
 
 const platformStore = new PlatformStore(path.join(path.dirname(process.env.CONFIG_PATH || '/app/data/config.json'),'platform'));
+const fileCatalog=new FileCatalog(platformStore);
 const projectHub = new ProjectHub(platformStore,{
   projects:getProjects, processes:listPortProcesses, containers:maintenanceQaRoot ? async() => [] : hubContainers, domains:() => config.domains,
   home:maintenanceQaRoot ? async() => maintenanceQaRoot : fileHostHome,
@@ -418,7 +423,7 @@ app.post('/api/login', async (c) => {
   loginGuard.delete(clientIp(c));
   recordEvent('auth', `Login exitoso desde ${clientIp(c)}`);
   const token = await createSession(username);
-  await recordSession(token, username, c.req.header('user-agent') || '');
+  await recordSession(token, username, c.req.header('user-agent') || '', clientIp(c));
   setSessionCookie(c, token);
   return c.json({ ok: true });
 });
@@ -482,7 +487,7 @@ const onboardingDeps = {
   hashPassword,
   startSession: async (c: any, username: string) => {
     const token = await createSession(username);
-    await recordSession(token, username, c.req.header('user-agent') || '');
+    await recordSession(token, username, c.req.header('user-agent') || '', clientIp(c));
     setSessionCookie(c, token);
   },
   backupCount: () => platformBackups.policies().length,
@@ -649,7 +654,7 @@ app.post('/pair', async (c) => {
   if (!t || !exp || Date.now() > exp) return fail(c, 410, 'Este link de vinculación venció o no es válido.');
   pairTokens.delete(t);
   const token = await createSession('paired-device');
-  await recordSession(token, 'paired-device', c.req.header('user-agent') || '');
+  await recordSession(token, 'paired-device', c.req.header('user-agent') || '', clientIp(c));
   setSessionCookie(c, token);
   // Optional in-app target after pairing (e.g. /p/4321/ for the embedded
   // browser) — same-origin paths only, never an open redirect.
@@ -1825,7 +1830,7 @@ const fileOperations = new FileOperations(maintenanceRepo, maintenanceQaRoot ? a
 if(!maintenanceQaRoot)fileOperations.onVolumes(async()=> (await hostVolumes.snapshot()).volumes.filter(v=>v.path&&v.readable).map(v=>({path:v.path!,mountId:v.mountId})));
 fileOperations.onChanged(async(action,from,to)=>{
   if(action==='purge'){recordEvent('file','Borrado definitivo verificado','Elemento retirado de la papelera; irreversible');return;}
-  await libraryFileOperation(action,from,to);recordEvent('file',action==='send'?'Elemento enviado a papelera':'Elemento restaurado','Operación verificada; no implica espacio liberado');});
+  await fileCatalog.change(action,from,to);await libraryFileOperation(action,from,to);recordEvent('file',action==='send'?'Elemento enviado a papelera':'Elemento restaurado','Operación verificada; no implica espacio liberado');});
 const fileTransfers=new FileTransfers(maintenanceRepo,maintenanceQaRoot?async()=>maintenanceQaRoot:fileHostHome);
 fileTransfers.onValidate(async(mode,from,to)=>{
   if(maintenanceQaRoot&&(![from,to].every(p=>p.startsWith(maintenanceQaRoot+'/'))))throw new MaintenanceError('QA: transferencia fuera de la fixture',403);
@@ -1849,7 +1854,7 @@ fileTransfers.onReview(async(mode,from,to)=>{
 });
 fileOperations.onBeforeWrite(()=>fileTransfers.reconcilePending());
 setInterval(()=>{void fileTransfers.reconcilePending().catch(()=>{});},5000).unref();
-fileTransfers.onChanged(async(mode,from,to,review)=>{await libraryFileOperation(mode,from,to,review);recordEvent('file',mode==='move'?'Movimiento verificado':'Copia verificada','Operación durable; no implica ahorro de disco');});
+fileTransfers.onChanged(async(mode,from,to,review)=>{await fileCatalog.change(mode,from,to);await libraryFileOperation(mode,from,to,review);recordEvent('file',mode==='move'?'Movimiento verificado':'Copia verificada','Operación durable; no implica ahorro de disco');});
 registerFilesRoutes(app, fileOperations,fileTransfers,maintenanceQaRoot||undefined);
 registerCloudRoutes(app, platformStore, cloudVaultDir, cloudProviders, cloudAgents);
 registerEventRoutes(app);
@@ -1858,8 +1863,11 @@ registerScriptRoutes(app);
 registerLogsRoutes(app);
 registerMetricsRoutes(app);
 registerDropRoutes(app);
-registerLibraryRoutes(app,fileTransfers);
+registerFileCatalogRoutes(app,fileCatalog);
+registerLibraryRoutes(app,fileTransfers,fileCatalog);
 registerSessionRoutes(app);
+registerFanRoutes(app, maintenanceQaRoot ? fixtureFanRunner() : undefined);
+registerUsbRoutes(app, maintenanceQaRoot ? fixtureUsbRunner() : undefined);
 registerOnboardingRoutes(app, onboardingDeps);
 registerOpsRoutes(app);
 registerOptimizerRoutes(app, async () => config, () => composeOpsGuard());
@@ -1896,6 +1904,7 @@ const hostCleaner = maintenanceQaRoot?new HostCleaner(async()=>maintenanceQaRoot
 const storageService = new StorageService(maintenanceRepo, () => maintenanceQaRoot ? Promise.resolve([{id:'qa-cache',path:path.join(maintenanceQaRoot,'scan-fixture'),title:'Caché de prueba aislada',adapterId:'packages'}]) : scanRoots(config.projects), scanRoot,undefined,hostCleaner);
 fileOperations.useCleaner(hostCleaner);
 registerStorageRoutes(app, storageService, fileOperations);
+registerDiskRoutes(app, new DiskManager(maintenanceQaRoot ? fixtureDiskRunner() : undefined));
 registerHomeLinkRoutes(app, new HomeLinks(maintenanceRepo), () => knownHomeLinks(config.domains,allHeartbeats()));
 const installations = maintenanceQaRoot ? async () => ['homepage','filebrowser','portainer'].map(name => ({id:'qa-'+name,name,backend:'docker',scope:'fixture',version:'fixture',executablePath:null,coverage:'Fixture de QA; no es una instalación real',references:[],container:{id:'qa-'+name,project:'qa-isolated',service:name,state:'fixture',mounts:[{source:maintenanceQaRoot,destination:'/data',type:'bind'}],configFiles:[],image:name+':fixture'},blockers:['Fixture: ninguna retirada autorizada']})) : async () => [...await physicalInstallations(await getPrograms()), ...await dockerInstallations()];
 const composeDrafts=new ComposeDrafts(maintenanceRepo),composeReleases=new ComposeReleases(maintenanceRepo,composeDrafts,fileHostHome);
@@ -2026,10 +2035,18 @@ type WsData = WsProxyData | WsTermData | LogsWsData;
 interface WsCred { token: string; sid: string | null; timer?: ReturnType<typeof setInterval> }
 const wsCredentials = new WeakMap<WsData, WsCred>();
 const WS_REVALIDATE_MS = 30_000;
+const sessionSockets = new Map<string, Set<Bun.ServerWebSocket<WsData>>>();
+onSessionRevoked(sid => {
+  for (const ws of sessionSockets.get(sid) || []) { try { ws.close(4401, 'Sesión revocada'); } catch {} }
+});
 
 function armWsRevalidation(ws: Bun.ServerWebSocket<WsData>): void {
   const cred = wsCredentials.get(ws.data);
   if (!cred) return;
+  if (cred.sid) {
+    if (isRevoked(cred.sid)) { ws.close(4401, 'Sesión revocada'); return; }
+    const sockets = sessionSockets.get(cred.sid) || new Set(); sockets.add(ws); sessionSockets.set(cred.sid, sockets);
+  }
   cred.timer = setInterval(async () => {
     try {
       const dead = (cred.sid ? isRevoked(cred.sid) : false) || !(await verifySessionToken(cred.token));
@@ -2196,6 +2213,7 @@ export default {
   websocket: {
     open(ws: Bun.ServerWebSocket<WsData>) {
       armWsRevalidation(ws);
+      if (ws.readyState !== WebSocket.OPEN) return;
       if (ws.data.kind === 'term') { startTermSocket(ws); return; }
       if (ws.data.kind === 'logs') { startLogsSocket(ws as Bun.ServerWebSocket<LogsWsData>); return; }
       // Handlers were attached in fetch() before upgrade — just link the
@@ -2245,6 +2263,8 @@ export default {
     close(ws: Bun.ServerWebSocket<WsData>) {
       const cred = wsCredentials.get(ws.data);
       if (cred?.timer) clearInterval(cred.timer);
+      if (cred?.sid) { const sockets = sessionSockets.get(cred.sid); sockets?.delete(ws); if (!sockets?.size) sessionSockets.delete(cred.sid); }
+      wsCredentials.delete(ws.data);
       if (ws.data.kind === 'logs') { stopLogsSocket(ws.data); return; }
       if (ws.data.kind === 'term') {
         // Killing runuser orphans bash→script→tmux-client on the host; detach

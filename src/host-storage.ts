@@ -3,11 +3,15 @@ import { realpath, stat } from 'node:fs/promises';
 import { FileVolumes, fixtureVolumes, volumeContains, uniqueVolumes } from './file-volumes';
 import { HOST_USER, hostToContainer, containerToHost, readHostFile } from './host';
 import { MaintenanceError } from './storage/types';
+import { DiskVisibility } from './storage/disk-visibility';
+
+export let diskVisibility = new DiskVisibility(path.join(path.dirname(process.env.CONFIG_PATH||'/app/data/config.json'),'disk-visibility.json'));
 
 export let hostVolumes = new FileVolumes(undefined,undefined,path.join(path.dirname(process.env.CONFIG_PATH||'/app/data/config.json'),'volume-mounts.json'));
 let fixtureRoot:string|undefined;
 let warnedRootUser=false;
 export function initHostStorage(qa?:string,volumes?:FileVolumes){fixtureRoot=qa;hostVolumes=volumes||(qa?fixtureVolumes(qa):new FileVolumes(undefined,undefined,path.join(path.dirname(process.env.CONFIG_PATH||'/app/data/config.json'),'volume-mounts.json')));
+ diskVisibility=new DiskVisibility(path.join(qa||path.dirname(process.env.CONFIG_PATH||'/app/data/config.json'),'disk-visibility.json'));
  if(!qa&&HOST_USER==='root'&&!warnedRootUser){warnedRootUser=true;console.warn('[axon] HOST_USER no está definido: las escrituras de archivos correrán como root. Configurá HOST_USER con una cuenta del host sin privilegios.');}
 }
 const ROOTS=['/home','/etc','/var','/opt','/srv','/tmp','/mnt','/media','/run/media','/data','/boot','/usr'];

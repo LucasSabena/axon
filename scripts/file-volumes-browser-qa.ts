@@ -16,7 +16,7 @@ try {
  await page.goto(origin+'/archivos');
  await page.locator('#username').fill('qa');await page.locator('#password').fill('axon-local-qa');
  await page.locator('#login-form button[type=submit]').click();
- await page.locator('[data-volume="fixture-external"]').waitFor();
+ await page.locator('#fm-disks-open').click();await page.locator('[data-volume="fixture-external"]').waitFor();await page.locator('#fm-disks-close').click();
  console.log('QA: signed in, disks visible');
  const inventory=await page.evaluate(async()=>await (await fetch('/api/files/volumes')).json());
  const home=inventory.volumes.find((v:any)=>v.id==='fixture-internal').path;
@@ -30,7 +30,7 @@ try {
  const select=async()=>{await page.locator('.fm-row[data-name="nota.txt"] input[type=checkbox]').check();};
  await navigate(source);await select();await page.locator('#fm-sel-copy').click();
  await page.locator('#fm-clipboard:not(.hidden)').waitFor();
- await page.locator('[data-volume="fixture-external"]').click();
+ await page.locator('#fm-disks-open').click();await page.locator('[data-volume="fixture-external"]').click();
  await page.waitForFunction((p:string)=>(document.querySelector('#fm-location') as HTMLInputElement)?.value===p,home+'/external-drive');
  await navigate(destination);await page.locator('#fm-paste-btn').click();
  await page.locator('.fm-row[data-name="nota.txt"]').waitFor();
@@ -58,7 +58,7 @@ try {
   await page.screenshot({path:`/tmp/axon-disks-${width}.png`,fullPage:true});
  }
  await page.route('**/api/files/volumes',(route:any)=>route.fulfill({status:503,json:{ok:false,error:'Fallo de inventario'}}));
- await page.locator('#fm-volumes-refresh').click();await page.locator('#fm-volumes-error:not(.hidden)').waitFor();
+ await page.locator('#fm-disks-open').click();await page.locator('#fm-volumes-refresh:not([disabled])').click();await page.locator('#fm-volumes-error:not(.hidden)').waitFor();
  assert(await page.locator('[data-volume="fixture-external"]').isVisible(),'Failed refresh erased existing disk snapshot');
  await page.unroute('**/api/files/volumes');await page.locator('#fm-volumes-refresh').click();await page.locator('#fm-volumes-error.hidden').waitFor({state:'attached'});
  await page.route('**/api/files/volumes',(route:any)=>route.fulfill({json:{ok:true,devices:[],volumes:inventory.volumes.filter((v:any)=>v.id!=='fixture-external')}}));

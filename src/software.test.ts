@@ -5,6 +5,34 @@ const row=(overrides:Partial<SoftwareInstallation>={}):SoftwareInstallation=>({i
 const snapshot=(installations:SoftwareInstallation[],errors=false):SoftwareSnapshot=>({ok:true,installations,sources:[{id:'prefix',manager:'pnpm',scope:'user',user:'any-user',available:true,complete:!errors,updateState:errors?'error':'ok',error:errors?'Source unavailable':undefined}],checkedAt:Date.now(),home:'/srv/home/custom',user:'any-user',canAdministerSystem:false});
 const metadata=async()=>({'dist-tags':{latest:'1.2.0'},time:{'1.2.0':'2020-01-01T00:00:00Z'}});
 describe('native software discovery and update contract',()=>{
+ test('cold HTTP reads and repeated refreshes share a scan without waiting for a stalled manager',async()=>{
+  let release!:()=>void,calls=0;const gate=new Promise<void>(resolve=>release=resolve);
+  const service=new SoftwareService(async(req,progress)=>{calls++;const value=snapshot([row()]);progress?.(value.sources[0],value.installations);if(!req.updates)await gate;return value;},async()=>({}),async()=>[],metadata);
+  const app=new Hono();registerSoftwareRoutes(app,service);
+  const first=await (await app.request('/api/software')).json();expect(first.loading).toBe(true);
+  await new Promise(resolve=>setTimeout(resolve,0));
+  const second=await (await app.request('/api/software?fresh=1')).json();expect(second.installations[0].packageName).toBe('unlisted-tool');expect(second.loading).toBe(true);expect(calls).toBe(1);
+  release();await service.settled();expect(calls).toBe(2);
+ });
+ test('a slow native source cannot withhold a completed global candidate',async()=>{
+  let release!:()=>void;const gate=new Promise<void>(resolve=>release=resolve);
+  const service=new SoftwareService(async(req,progress)=>{const value=snapshot([row()]);if(req.updates){progress?.(value.sources[0],value.installations);await gate;}return value;},async()=>({}),async()=>[],metadata);
+  await service.get();await new Promise(resolve=>setTimeout(resolve,0));
+  const partial=service.status();expect(partial.checking).toBe(true);expect(partial.installations[0].targetVersion).toBe('1.2.0');expect(partial.installations[0].canUpdate).toBe(true);
+  const before=partial.installations[0].iconUrl;release();const final=await service.settled();expect(final.installations[0].iconUrl).toBe(before);
+ });
+ test('serving many cached icons never restarts inventory discovery',async()=>{
+  let calls=0;const service=new SoftwareService(async()=>{calls++;return snapshot([row()]);},async()=>({}),async()=>[],metadata),app=new Hono();registerSoftwareRoutes(app,service);
+  await service.settled();(service as any).snapshot.checkedAt=Date.now()-61000;
+  const before=calls;await Promise.all(Array.from({length:12},()=>app.request('/api/software/icons/native-unlisted')));expect(calls).toBe(before);
+ });
+ test('a failed partial scan exposes its error and stops until an explicit retry',async()=>{
+  let calls=0;
+  const service=new SoftwareService(async(req,progress)=>{calls++;const value=snapshot([row()]);progress?.(value.sources[0],value.installations);throw Error('Host disconnected');},async()=>({}),async()=>[],metadata);
+  service.status();await new Promise(resolve=>setTimeout(resolve,0));
+  const failed=service.status();expect(failed.error).toBe('Host disconnected');expect(failed.loading).toBe(false);expect(failed.installations).toHaveLength(1);expect(calls).toBe(1);
+  service.status(true);await new Promise(resolve=>setTimeout(resolve,0));expect(calls).toBe(2);
+ });
  test('white vendor marks remain visible in both themes without recoloring native artwork',async()=>{
   const response=await softwareIcon(row({packageName:'@openai/codex'}));
   expect(response.headers.get('Content-Type')).toBe('image/svg+xml');
@@ -61,6 +89,8 @@ describe('native software discovery and update contract',()=>{
  });
  test('the routes expose native records and reject caller-supplied commands',async()=>{
   const service=new SoftwareService(async()=>snapshot([row()]),async()=>({}),async()=>[],metadata),app=new Hono();registerSoftwareRoutes(app,service);
+  const first=await app.request('/api/software');expect(first.headers.get('Cache-Control')).toContain('no-store');expect((await first.json()).checking).toBe(true);
+  await service.settled();
   expect((await (await app.request('/api/software')).json()).installations[0].packageName).toBe('unlisted-tool');
   const r=await app.request('/api/software/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd:'touch /host/file',planId:'forged'})});expect(r.status).toBe(409);
  });

@@ -13,7 +13,7 @@
       <div class="section-header">
         <h2>Archivos</h2>
         <div class="section-actions">
-          <input type="text" id="fm-filter" class="filter-input" placeholder="Filtrar…">
+          <input type="text" id="fm-filter" class="filter-input" placeholder="Buscar por nombre o etiqueta…" aria-label="Buscar archivos y carpetas">
           <button id="fm-search-btn" class="btn-secondary fm-search-btn" title="Búsqueda recursiva en esta carpeta (Ctrl+F)">${icon('search')}</button>
           <div class="fm-view-switch" role="group" aria-label="Vista">
             <button class="fm-vbtn" id="fm-view-list" data-view="list" title="Vista de lista">${icon('list')}</button>
@@ -22,33 +22,46 @@
           </div>
           <button id="fm-hidden-btn" class="btn-secondary" title="Mostrar/ocultar archivos ocultos (Ctrl+H)">${icon('eye-off')}</button>
           <button id="fm-upload-btn" class="btn-secondary" title="Subir archivos">${icon('upload')} Subir</button>
-          <button id="fm-upload-dir-btn" class="btn-secondary" title="Subir una carpeta completa">${icon('folder-up')} Carpeta</button>
-          <button id="fm-new-file-btn" class="btn-secondary" title="Crear un archivo (Ctrl+Alt+N)">${icon('file-plus')} Nuevo archivo</button>
-          <button id="fm-mkdir-btn" class="btn-secondary">${icon('folder-plus')} Nueva carpeta</button>
+          <button id="fm-create-btn" class="btn-secondary" popovertarget="fm-create-menu">${icon('plus')} Nuevo ${icon('chevron-down')}</button>
           <button id="fm-refresh-btn" class="btn-secondary" title="Actualizar">${icon('refresh-cw')}</button>
         </div>
       </div>
-      <div class="fm-breadcrumb" id="fm-breadcrumb"></div>
       <div class="location-bar"><div class="page-history">
         <button class="icon-btn" data-axon-back title="Atrás" aria-label="Atrás">${icon('arrow-left')}</button>
         <button class="icon-btn" data-axon-forward title="Adelante" aria-label="Adelante">${icon('arrow-right')}</button>
         <button class="icon-btn" id="fm-parent" title="Carpeta superior (Alt+↑)" aria-label="Carpeta superior">${icon('arrow-up')}</button>
-      </div><form id="fm-location-form"><input id="fm-location" aria-label="Carpeta actual" placeholder="Ir a una carpeta…" autocomplete="off" spellcheck="false"></form>
+      </div><div class="fm-address"><nav class="fm-breadcrumb" id="fm-breadcrumb" aria-label="Carpeta actual"></nav><form id="fm-location-form"><input id="fm-location" aria-label="Carpeta actual" placeholder="Ir a una carpeta…" autocomplete="off" spellcheck="false"></form></div>
+      <button class="icon-btn" id="fm-edit-location" title="Escribir una ruta (Ctrl+Shift+L)" aria-label="Escribir una ruta">${icon('pencil')}</button>
+      <button type="button" id="fm-disks-open" class="btn-secondary" aria-haspopup="dialog" aria-controls="fm-disks-dialog">${icon('hard-drive')}<span id="fm-disk-label">Discos</span>${icon('chevron-down')}</button>
+      <button type="button" id="fm-trash" class="icon-btn" title="Papelera del disco actual" aria-label="Abrir papelera">${icon('trash-2')}</button>
       <button class="icon-btn" data-axon-copy title="Copiar enlace" aria-label="Copiar enlace">${icon('link')}</button>
       <button class="icon-btn" id="fm-keys" title="Atajos de teclado" aria-label="Atajos de teclado">${icon('keyboard')}</button></div>
-      <p class="listener-note fm-note">Archivos del servidor — lectura directa; las escrituras corren como tu usuario del host.</p>
-      <div class="fm-devices" aria-label="Discos del servidor">
-        <div class="fm-device-tools"><strong>Discos</strong><button id="fm-volumes-refresh" class="icon-btn" aria-label="Actualizar discos" title="Actualizar discos">${icon('refresh-cw')}</button></div>
-        <div id="fm-volumes" class="fm-volume-list"><span class="listener-note">Buscando discos…</span></div>
-        <p id="fm-volumes-error" class="listener-note hidden" role="status"></p>
-        <button type="button" id="fm-trash" class="fm-volume fm-trash-entry" title="Elementos eliminados del disco actual o del escritorio">${icon('trash-2')}<span><strong>Papelera</strong><small>Restaurar o borrar definitivamente</small></span></button>
-      </div>
+      <div class="fm-filter-row"><div class="catalog-bar" id="fm-catalog-bar" aria-label="Organización y filtros">
+        <label>Ver<select id="fm-mark"><option value="">Esta carpeta</option>${Object.entries(AxonFileCatalog.marks).map(([k,[,label]])=>`<option value="${k}">${label}</option>`).join('')}</select></label>
+        <label>Tipo<select id="fm-kind"><option value="">Todo</option><option value="dir">Carpetas</option><option value="file">Archivos</option></select></label>
+        <label>Color<select id="fm-color"><option value="">Todos</option>${Object.entries(AxonFileCatalog.colors).map(([c,label])=>`<option value="${c}">${label}</option>`).join('')}</select></label>
+        <label>Etiqueta<select id="fm-tag"><option value="">Todas</option></select></label>
+        <button id="fm-organize-folder" class="btn-secondary">${icon('tags')}Organizar carpeta</button>
+      </div><div class="catalog-quick" id="fm-quick"></div></div>
       <div id="fm-clipboard" class="fm-clipboard hidden" aria-live="polite">
         <span id="fm-clipboard-label"></span>
         <button id="fm-paste-btn" class="btn-primary">${icon('clipboard-paste')} Pegar acá</button>
         <button id="fm-clipboard-clear" class="icon-btn" aria-label="Vaciar portapapeles">${icon('x')}</button>
       </div>
     </div>
+    <div id="fm-create-menu" class="fm-create-menu" popover aria-label="Crear o subir">
+      <button id="fm-mkdir-btn" class="btn-secondary">${icon('folder-plus')} Nueva carpeta</button>
+      <button id="fm-new-file-btn" class="btn-secondary" title="Crear un archivo (Ctrl+Alt+N)">${icon('file-plus')} Nuevo archivo</button>
+      <button id="fm-upload-dir-btn" class="btn-secondary" title="Subir una carpeta completa">${icon('folder-up')} Subir carpeta</button>
+    </div>
+    <dialog id="fm-disks-dialog" class="fm-disks-dialog" aria-labelledby="fm-disks-title">
+      <div class="fm-disks-heading"><h2 id="fm-disks-title">Discos del servidor</h2><button type="button" id="fm-disks-close" class="icon-btn" aria-label="Cerrar discos">${icon('x')}</button></div>
+      <p class="listener-note">Elegí un disco para explorar sus archivos. Acá podés consultar el espacio disponible.</p>
+      <div id="fm-volumes" class="fm-volume-list"><span class="listener-note">Buscando discos…</span></div>
+      <p id="fm-volumes-error" class="listener-note hidden" role="status"></p>
+      <div class="fm-disks-actions"><a class="btn-secondary" href="/almacenamiento?view=disks">Administrar discos</a><button id="fm-volumes-refresh" class="btn-secondary">${icon('refresh-cw')} Actualizar discos</button></div>
+      <p class="listener-note">Los archivos se leen directamente del servidor. Los cambios se realizan con los permisos de tu usuario.</p>
+    </dialog>
     <div class="fm-main" id="fm-main">
       <div class="fm-list" id="fm-list">
         <div class="table-wrapper fm-table-wrap" id="fm-table-wrap">
@@ -84,11 +97,19 @@
             <button id="fm-prev-close" class="fm-pact" title="Cerrar (Esc)">${icon('x')}</button>
           </div>
         </div>
+        <div class="fm-prev-navigation" aria-label="Navegar archivos">
+          <button type="button" class="fm-pact" id="fm-prev-previous" aria-label="Archivo anterior">${icon('chevron-left')}</button>
+          <span id="fm-prev-position" role="status"></span>
+          <button type="button" class="fm-pact" id="fm-prev-next" aria-label="Archivo siguiente">${icon('chevron-right')}</button>
+        </div>
         <div class="fm-prev-meta" id="fm-prev-meta"></div>
         <div class="fm-prev-body" id="fm-prev-body"></div>
       </div>
     </div>
-    <div class="fm-statusbar" id="fm-statusbar"></div>
+    <div class="fm-footer">
+      <div class="fm-statusbar" id="fm-statusbar"></div>
+      <button type="button" id="fm-transfers-btn" class="fm-transfers-btn" title="Historial de transferencias" aria-label="Ver historial de transferencias">${icon('arrow-left-right')}<span class="fm-transfers-label">Transferencias</span><span id="fm-transfers-count">0</span></button>
+    </div>
     <div class="fm-typeahead hidden" id="fm-typeahead"></div>
     <div class="fm-editor hidden" id="fm-editor">
       <div class="fm-editor-bar">
@@ -96,12 +117,17 @@
         <span class="fm-dirty-dot hidden" id="fm-dirty-dot" title="Cambios sin guardar">●</span>
         <span class="badge badge-other hidden" id="fm-editor-flag"></span>
         <div class="section-actions">
+          <div id="fm-document-modes" class="fm-view-switch hidden" role="group" aria-label="Modo del documento">
+            <button type="button" id="fm-document-read" class="fm-vbtn" aria-pressed="false">${icon('book-open')} Visualizador</button>
+            <button type="button" id="fm-document-edit" class="fm-vbtn" aria-pressed="true">${icon('pencil')} Editor</button>
+          </div>
           <button id="fm-save-btn" class="btn-primary">${icon('save')} Guardar</button>
           <button id="fm-back-btn" class="btn-secondary">${icon('arrow-left')} Volver</button>
         </div>
       </div>
       <textarea id="fm-editor-text" class="mono" aria-label="Contenido del archivo" spellcheck="false" wrap="off"></textarea>
-      <p class="listener-note">Ctrl/Cmd+S guarda · Tab indenta (Shift+Tab quita) · Esc vuelve a la lista</p>
+      <div id="fm-editor-preview" class="fm-editor-preview hidden"></div>
+      <p class="listener-note" id="fm-editor-help">Ctrl/Cmd+S guarda · Tab indenta (Shift+Tab quita) · Esc vuelve a la lista</p>
     </div>
     <input type="file" id="fm-file-input" class="hidden" multiple>
     <input type="file" id="fm-dir-input" class="hidden" webkitdirectory>
@@ -109,6 +135,7 @@
       <span id="fm-sel-count"></span>
       <button id="fm-sel-all" class="btn-secondary" title="Seleccionar todo">${icon('check-square')} Todos</button>
       <button id="fm-sel-dl" class="btn-secondary">${icon('download')} Descargar</button>
+      <button id="fm-sel-organize" class="btn-secondary">${icon('tags')} Organizar</button>
       <button id="fm-sel-copy" class="btn-secondary">${icon('copy')} Copiar</button>
       <button id="fm-sel-move" class="btn-secondary">${icon('scissors')} Mover</button>
       <button id="fm-sel-del" class="btn-danger">${icon('trash-2')} Eliminar</button>
@@ -167,6 +194,7 @@
     dirSizes: new Map(), // path -> {bytes, ts} — lazy du cache
     df: null,         // {avail,total} free-space for the status bar
     navId: 0,         // bumped on navigate — stale async writes are dropped
+    catalogMark:'',catalogColor:'',catalogTag:'',catalogKind:'',
     searchMode: false,
     searchQ: '',
     searchResults: null, // [{type,path,name,dir}] while searching
@@ -182,6 +210,18 @@
     return i <= 0 ? '/' : p.slice(0, i);
   };
 
+  function syncCatalogControls(){
+    el('fm-mark').value=S.catalogMark;
+    el('fm-kind').value=S.catalogKind;el('fm-color').value=S.catalogColor;
+    el('fm-tag').innerHTML='<option value="">Todas</option>'+AxonFileCatalog.tags().map(t=>`<option value="${esc(t)}">${esc(t)}</option>`).join('');el('fm-tag').value=S.catalogTag;
+    const pins=AxonFileCatalog.entries().filter(r=>r.available&&r.metadata.pinned).slice(0,12);
+    el('fm-quick').innerHTML=pins.length?'<span>Acceso rápido</span>'+pins.map(r=>`<a href="/archivos?${new URLSearchParams(r.kind==='dir'?{path:r.path}:{path:parentOf(r.path),item:r.path.split('/').pop()})}"${AxonFileCatalog.attr(r.path)}>${icon(r.kind==='dir'?'folder':'file')} ${esc(r.path.split('/').pop())}</a>`).join(''):'';
+    refreshIcons();
+  }
+  el('fm-mark').onchange=e=>{toggleSearch(false);S.catalogMark=e.target.value;S.sel.clear();syncCatalogControls();render();updateSelbar();window.AxonNavigation?.update('files',fileParams());};
+  for(const [id,key] of [['fm-kind','catalogKind'],['fm-color','catalogColor'],['fm-tag','catalogTag']])el(id).onchange=e=>{S[key]=e.target.value;render();window.AxonNavigation?.update('files',fileParams());};
+  el('fm-organize-folder').onclick=()=>AxonFileCatalog.edit([S.cwd]);
+  document.addEventListener('axon:catalog',()=>{syncCatalogControls();if(!S.editingPath)render();});
   // ---------- Formatting ----------
   function fmtSize(n) {
     if (n == null || Number.isNaN(n)) return '—';
@@ -272,6 +312,7 @@
     }
     el('fm-breadcrumb').innerHTML = html;
     el('fm-breadcrumb').lastElementChild?.setAttribute('aria-current', 'location');
+    el('fm-breadcrumb').scrollLeft=el('fm-breadcrumb').scrollWidth;
     refreshIcons();
     renderVolumes();
     renderClipboard();
@@ -299,6 +340,8 @@
   }
   function renderVolumes() {
     const current=volumeAt(S.cwd);
+    el('fm-disk-label').textContent=current?.name || 'Discos';
+    el('fm-disks-open').title=current ? `${current.name} · ${fmtSize(current.available)} libres · Ver discos` : 'Ver discos del servidor';
     const mounted = (window.AxonStorage?.uniqueVolumes(S.volumes)||S.volumes).map(v=>{
       const selected=current?.id===v.id;
       const state=!v.path?'Sin montar':v.readOnly?'Sólo lectura':!v.readable?'Sin permiso':v.available===null?'Montado':`${fmtSize(v.available)} libres`;
@@ -307,7 +350,7 @@
         ${icon(v.external?'usb':'hard-drive')}<span><strong>${esc(v.name)}</strong><small>${v.size?fmtSize(v.size)+' · ':''}${esc(state)}${!v.path&&v.canMount?' · Montar':''}</small></span>
       </button>`;
     });
-    for(const d of S.devices)if(!S.volumes.some(v=>v.diskId===d.id))mounted.push(`<span class="fm-volume">${icon(d.external?'usb':'hard-drive')}<span><strong>${esc(d.name)}</strong><small>${fmtSize(d.size)} · Sin volumen navegable</small></span></span>`);
+    for(const d of S.devices)if(!d.hidden&&!S.volumes.some(v=>v.diskId===d.id))mounted.push(`<span class="fm-volume">${icon(d.external?'usb':'hard-drive')}<span><strong>${esc(d.name)}</strong><small>${fmtSize(d.size)} · Sin volumen navegable</small></span></span>`);
     el('fm-volumes').innerHTML=mounted.join('') || '<span class="listener-note">No hay volúmenes disponibles. Revisá la conexión de los discos.</span>';
     refreshIcons();
   }
@@ -318,6 +361,7 @@
       const data=await api('/api/files/volumes',{fresh:true,signal:AbortSignal.timeout(35_000)});
       const previous=volumeAt(S.cwd);S.volumes=data.volumes || [];S.devices=data.devices || [];
       el('fm-volumes-error').classList.add('hidden');
+      el('fm-disks-open').classList.remove('fm-disks-warning');
       if(previous?.path && previous.path!=='/' && !S.volumes.some(v=>v.id===previous.id && v.mountId===previous.mountId)){
         S.entries=[];S.sel.clear();render();
         setState('El disco fue desconectado o cambió su montaje. Elegí un disco disponible.');
@@ -326,9 +370,16 @@
     } catch(err) {
       el('fm-volumes-error').textContent='No se pudieron actualizar los discos. La lista puede estar desactualizada. Usá Actualizar discos para reintentar.';
       el('fm-volumes-error').classList.remove('hidden');
+      el('fm-disks-open').classList.add('fm-disks-warning');
+      el('fm-disks-open').title='No se pudieron actualizar los discos. Abrí Discos para reintentar.';
     } finally {S.volumesBusy=false;el('fm-volumes-refresh').disabled=false;}
   }
   el('fm-volumes-refresh').addEventListener('click',refreshVolumes);
+  const disksDialog=el('fm-disks-dialog');
+  el('fm-disks-open').addEventListener('click',()=>{disksDialog.showModal();void refreshVolumes();});
+  el('fm-disks-close').addEventListener('click',()=>disksDialog.close());
+  disksDialog.querySelector('a').addEventListener('click',()=>disksDialog.close());
+  window.addEventListener('axon:disk-visibility',refreshVolumes);
   el('fm-trash').addEventListener('click',()=>{
     const disk=volumeAt(S.cwd), local=(S.trashDirs||[]).find(p=>disk?.path&&disk.path!=='/'&&p.startsWith(disk.path+'/'));
     navigate(local||S.trashDir||'~/.local/share/Trash/files');
@@ -336,12 +387,12 @@
   el('fm-volumes').addEventListener('click',async e=>{
     const button=e.target.closest('[data-volume]');if(!button)return;
     const v=S.volumes.find(v=>v.id===button.dataset.volume);if(!v)return;
-    if(v.path){navigate(v.path);return;}
+    if(v.path){disksDialog.close();navigate(v.path);return;}
     button.disabled=true;button.setAttribute('aria-busy','true');
     try {
       const result=await api(`/api/files/volumes/${encodeURIComponent(v.id)}/mount`,{method:'POST',body:{}});
-      await refreshVolumes();if(result.path)navigate(result.path);
-    } catch(err){errToast(err);button.disabled=false;button.removeAttribute('aria-busy');}
+      await refreshVolumes();if(result.path){disksDialog.close();navigate(result.path);}
+    } catch(err){el('fm-volumes-error').textContent=err.message;el('fm-volumes-error').classList.remove('hidden');button.disabled=false;button.removeAttribute('aria-busy');}
   });
   function renderClipboard() {
     const clip=S.clip;
@@ -379,7 +430,7 @@
     return sortedEntries().filter(
       (e) =>
         (S.showHidden || !e.name.startsWith('.')) &&
-        (!q || e.name.toLowerCase().includes(q))
+        AxonFileCatalog.matches(join(S.cwd,e.name),{query:q,color:S.catalogColor,tag:S.catalogTag,kind:S.catalogKind},e.type==='dir'?'dir':'file')
     );
   }
   const hiddenCount = () => S.entries.filter((e) => e.name.startsWith('.')).length;
@@ -404,6 +455,7 @@
       } else {
         acts = `<div class="fm-acts">
           ${e.type !== 'dir' ? `<button class="fm-act" data-act="download" title="Descargar">${icon('download')}</button>` : `<button class="fm-act" data-act="zipdl" title="Descargar como .zip">${icon('archive')}</button>`}
+          <button class="fm-act" data-act="organize" aria-label="Organizar ${esc(e.name)}" title="Colores, etiquetas y marcas">${icon('tags')}</button>
           <button class="fm-act" data-act="rename" title="Renombrar">${icon('pencil')}</button>
           <button class="fm-act fm-act-danger" data-act="delete" title="Eliminar">${icon('trash-2')}</button>
         </div>`;
@@ -412,10 +464,10 @@
     const selected = !isUp && S.sel.has(e.name);
     const hidden = !isUp && e.name.startsWith('.');
     const cut = !isUp && isCutName(e.name);
-    return `<tr class="fm-row${isUp ? ' fm-up' : ''}${selected ? ' fm-selected' : ''}${hidden ? ' fm-hidden' : ''}${cut ? ' fm-cut' : ''}" data-name="${esc(e.name)}" data-type="${esc(e.type)}"${isUp ? '' : ' draggable="true"'}>
+    return `<tr class="fm-row${isUp ? ' fm-up' : ''}${selected ? ' fm-selected' : ''}${hidden ? ' fm-hidden' : ''}${cut ? ' fm-cut' : ''}" data-name="${esc(e.name)}" data-type="${esc(e.type)}"${isUp?'':AxonFileCatalog.attr(join(S.cwd,e.name))}${isUp ? '' : ' draggable="true"'}>
       <td class="fm-selcell">${isUp ? '' : `<input type="checkbox" class="fm-check" aria-label="Seleccionar ${esc(e.name)}" ${selected ? 'checked' : ''} tabindex="-1">`}</td>
       <td class="icon-cell">${ic}</td>
-      <td class="fm-name"${e.trashOrig ? ` title="${esc(`Ubicación original: ${e.trashOrig}${S.trashNames[e.name]?.ts ? ` · Eliminado: ${fmtDate(Date.parse(S.trashNames[e.name].ts))}` : ''}`)}"` : ''}>${esc(dispName(e))}${linkBadge}</td>
+      <td class="fm-name"${e.trashOrig ? ` title="${esc(`Ubicación original: ${e.trashOrig}${S.trashNames[e.name]?.ts ? ` · Eliminado: ${fmtDate(Date.parse(S.trashNames[e.name].ts))}` : ''}`)}"` : ''}>${esc(dispName(e))}${linkBadge}${isUp?'':AxonFileCatalog.badges(join(S.cwd,e.name))}</td>
       <td class="num"${!isUp && e.type === 'dir' ? ` data-dirsize="${esc(join(S.cwd, e.name))}"` : ''}>${isUp ? '—' : e.type === 'dir' ? dirSizeLabel(join(S.cwd, e.name)) : fmtSize(e.size)}</td>
       <td class="fm-mtime">${isUp ? '' : fmtDate(e.mtime)}</td>
       <td class="mono fm-mode">${esc(e.mode || '')}</td>
@@ -498,9 +550,10 @@
   // ---------- Recursive search ----------
   // The filter input doubles as the search box in search mode — results show
   // as a flat list of hits with their containing path.
-  let searchTimer = 0;
+  let searchTimer = 0, searchGeneration=0, searchController;
 
   function toggleSearch(on) {
+    if(on!==false)S.catalogMark='';
     const next = on !== undefined ? on : !S.searchMode;
     if (next === S.searchMode) return;
     S.searchMode = next;
@@ -518,38 +571,41 @@
       // input would otherwise keep the stale search text while S.filter
       // still holds the old value.
       inp.value = S.filter || '';
-      inp.placeholder = 'Filtrar…';
+      inp.placeholder = 'Buscar por nombre o etiqueta…';
     }
     render();
   }
   const exitSearch = () => toggleSearch(false);
 
   function scheduleSearch() {
-    clearTimeout(searchTimer);
+    clearTimeout(searchTimer);searchGeneration++;searchController?.abort();
     const q = S.searchQ.trim();
     if (q.length < 2) {
       S.searchResults = null;
       render();
       return;
     }
+    S.searchPending=true;S.searchResults=null;render();
     searchTimer = setTimeout(runSearch, 350);
   }
 
   async function runSearch() {
     const q = S.searchQ.trim();
     if (q.length < 2 || !S.searchMode) return;
-    const nav = ++S.navId;
+    const nav=S.navId,generation=searchGeneration;searchController?.abort();searchController=new AbortController();
     try {
       const data = await api(
         `/api/files/search?path=${encodeURIComponent(S.cwd)}&q=${encodeURIComponent(q)}`,
-        { signal: AbortSignal.timeout(30_000) }
+        { signal: AbortSignal.any([searchController.signal,AbortSignal.timeout(30_000)]) }
       );
-      if (!S.searchMode || nav !== S.navId) return;
-      S.searchResults = data.results || [];
+      if (!S.searchMode || nav !== S.navId || generation!==searchGeneration || q!==S.searchQ.trim()) return;
+      const annotated=AxonFileCatalog.entries().filter(r=>r.available&&(r.path===S.cwd||r.path.startsWith(S.cwd+'/'))&&AxonFileCatalog.matches(r.path,{query:q},r.kind)).map(r=>({path:r.path,type:r.kind,name:r.path.split('/').pop(),dir:parentOf(r.path)}));
+      S.searchResults = [...new Map([...(data.results||[]),...annotated].map(r=>[r.path,r])).values()].sort((a,b)=>(a.type==='dir'?0:1)-(b.type==='dir'?0:1)||a.name.localeCompare(b.name,'es'));
+      S.searchPending=false;
       render();
       if (data.truncated) toast('Muchos resultados — afiná la búsqueda', 'warn', '', 2500);
     } catch (err) {
-      if (S.searchMode) errToast(err);
+      if (S.searchMode&&generation===searchGeneration&&nav===S.navId&&!searchController.signal.aborted){S.searchPending=false;render();setState('No se pudo buscar. Volvé a escribir para reintentar.');errToast(err);}
     }
   }
 
@@ -557,28 +613,31 @@
     el('fm-table-wrap').classList.remove('hidden');
     el('fm-grid').classList.add('hidden');
     el('fm-cols').classList.add('hidden');
-    const res = S.searchResults || [];
+    const res = (S.searchResults || []).filter(r=>(S.showHidden||!r.path.slice(S.cwd.length).split('/').some(n=>n.startsWith('.')))&&AxonFileCatalog.matches(r.path,{color:S.catalogColor,tag:S.catalogTag,kind:S.catalogKind},r.type));
     el('fm-tbody').innerHTML = res
       .map((r) => {
         const rel = r.dir === S.cwd ? '.' : r.dir.startsWith(S.cwd + '/') ? r.dir.slice(S.cwd.length + 1) : r.dir;
-        return `<tr class="fm-row fm-search-hit" data-dir="${esc(r.dir)}" data-name="${esc(r.name)}" data-type="${esc(r.type)}">
+        return `<tr class="fm-row fm-search-hit" data-dir="${esc(r.dir)}" data-name="${esc(r.name)}" data-type="${esc(r.type)}"${AxonFileCatalog.attr(r.path)}>
           <td class="fm-selcell"></td>
           <td class="icon-cell">${icon(iconFor(r))}</td>
-          <td class="fm-name">${esc(r.name)} <span class="fm-search-dir">${esc(rel)}</span></td>
+          <td class="fm-name">${esc(r.name)}${AxonFileCatalog.badges(r.path)} <span class="fm-search-dir">${esc(rel)}</span></td>
           <td class="num"></td><td class="fm-mtime"></td><td></td>
           <td class="fm-actcell"><div class="fm-acts">
             ${r.type !== 'dir' ? `<button class="fm-act" data-act="download" title="Descargar">${icon('download')}</button>` : ''}
+            <button class="fm-act" data-act="organize" aria-label="Organizar ${esc(r.name)}">${icon('tags')}</button>
             <button class="fm-act" data-act="goto" title="Ir a la carpeta">${icon('folder-open')}</button>
           </div></td>
         </tr>`;
       })
       .join('');
-    setState(res.length || S.searchQ.trim().length < 2 ? (S.searchQ.trim().length < 2 ? 'Escribí al menos 2 letras' : '') : 'Sin resultados');
+    setState(res.length?'':S.catalogMark?'Todavía no hay elementos con esta marca. Usá Organizar en un archivo o carpeta.':S.searchQ.trim().length<2?'Escribí al menos 2 letras':S.searchPending?'Buscando…':'Sin resultados');
     updateStatusbar();
   }
 
   // ---------- View dispatcher ----------
   function render() {
+    if (S.preview) syncPreviewNavigation();
+    if(S.catalogMark){S.searchResults=AxonFileCatalog.entries().filter(r=>r.available&&AxonFileCatalog.matches(r.path,{mark:S.catalogMark,query:S.filter},r.kind)).map(r=>({path:r.path,type:r.kind,name:r.path.split('/').pop(),dir:parentOf(r.path)}));renderSearch();refreshIcons(sec);return;}
     if (S.searchMode) {
       renderSearch();
       refreshIcons();
@@ -656,9 +715,9 @@
       inner = `<img class="fm-thumb" loading="lazy" draggable="false" alt="" src="/api/files/preview?path=${encodeURIComponent(join(S.cwd, e.name))}&w=160"><span class="fm-thumb-fb">${icon(iconFor(e))}</span>`;
     } else inner = `<span class="fm-card-ic-big">${icon(iconFor(e))}</span>`;
     const meta = isUp ? '' : e.type === 'dir' ? 'Carpeta' : fmtSize(e.size);
-    return `<div class="fm-card${sel ? ' fm-selected' : ''}${hidden ? ' fm-hidden' : ''}${cut ? ' fm-cut' : ''}${isUp ? ' fm-up' : ''}" data-name="${esc(e.name)}" data-type="${esc(e.type)}" title="${esc(e.trashOrig || e.name)}"${isUp ? '' : ' draggable="true"'}>
+    return `<div class="fm-card${sel ? ' fm-selected' : ''}${hidden ? ' fm-hidden' : ''}${cut ? ' fm-cut' : ''}${isUp ? ' fm-up' : ''}" data-name="${esc(e.name)}" data-type="${esc(e.type)}" title="${esc(e.trashOrig || e.name)}"${isUp?'':AxonFileCatalog.attr(join(S.cwd,e.name))}${isUp ? '' : ' draggable="true"'}>
       <div class="fm-card-ic">${inner}</div>
-      <div class="fm-card-name">${esc(dispName(e))}</div>
+      <div class="fm-card-name">${esc(dispName(e))}${isUp?'':AxonFileCatalog.badges(join(S.cwd,e.name))}</div>
       <div class="fm-card-meta">${meta}</div>
     </div>`;
   }
@@ -687,7 +746,7 @@
     }
     const q = S.filter.trim().toLowerCase();
     const rows = col.entries.filter(
-      (e) => (S.showHidden || !e.name.startsWith('.')) && (!q || e.name.toLowerCase().includes(q))
+      (e) => (S.showHidden || !e.name.startsWith('.')) && AxonFileCatalog.matches(join(col.path,e.name),{query:q,color:S.catalogColor,tag:S.catalogTag,kind:S.catalogKind},e.type==='dir'?'dir':'file')
     );
     let html = '';
     if (last && parentOf(S.cwd) !== '/') {
@@ -698,8 +757,8 @@
         const sel = col.sel.has(e.name);
         const hidden = e.name.startsWith('.');
         const cut = S.clip && S.clip.mode === 'cut' && S.clip.dir === col.path && S.clip.names.includes(e.name);
-        return `<div class="fm-col-row${sel ? ' fm-selected' : ''}${hidden ? ' fm-hidden' : ''}${cut ? ' fm-cut' : ''}" data-col="${i}" data-name="${esc(e.name)}" data-type="${esc(e.type)}" title="${esc(e.trashOrig || e.name)}" draggable="true">
-          ${icon(iconFor(e))}<span class="fm-col-name">${esc(dispName(e))}</span>${e.type === 'dir' ? icon('chevron-right', 'fm-col-chev') : ''}
+        return `<div class="fm-col-row${sel ? ' fm-selected' : ''}${hidden ? ' fm-hidden' : ''}${cut ? ' fm-cut' : ''}" data-col="${i}" data-name="${esc(e.name)}" data-type="${esc(e.type)}"${AxonFileCatalog.attr(join(col.path,e.name))} title="${esc(e.trashOrig || e.name)}" draggable="true">
+          ${icon(iconFor(e))}<span class="fm-col-name">${esc(dispName(e))}${AxonFileCatalog.badges(join(col.path,e.name))}</span>${e.type === 'dir' ? icon('chevron-right', 'fm-col-chev') : ''}
         </div>`;
       })
       .join('');
@@ -722,6 +781,7 @@
 
   // Push a directory column onto the stack and fetch its entries.
   async function drill(path, fromRoute = false) {
+    await AxonFileCatalog.load().catch(()=>toast('No se pudo cargar la organización. Usá Actualizar para reintentar.','warn'));syncCatalogControls();
     if (window.AxonNavigation?.ready && !window.AxonNavigation.applying && !fromRoute) {
       const snapshot = captureFiles();
       snapshot.cols = [...snapshot.cols, { path, sel: [], top: 0 }];
@@ -809,7 +869,7 @@
   // ---------- Status bar ----------
   function updateStatusbar() {
     const bar = el('fm-statusbar');
-    if (S.searchMode) {
+    if (S.searchMode||S.catalogMark) {
       const n = S.searchResults?.length;
       bar.innerHTML = S.searchResults === null ? 'Buscando…' : `${n} resultado${n === 1 ? '' : 's'} — Enter abre, Esc sale`;
       return;
@@ -832,10 +892,7 @@
     if (S.clip) {
       txt += ` · ${S.clip.names.length} en portapapeles (${S.clip.mode === 'cut' ? 'cortar' : 'copiar'})`;
     }
-    if (S.df) {
-      txt += ` · <span class="fm-df">${fmtSize(S.df.avail)} libres</span>`;
-    }
-    bar.innerHTML = txt;
+    bar.innerHTML = `<span class="fm-status-text">${txt}</span>${S.df?`<span class="fm-df">${fmtSize(S.df.avail)} libres</span>`:''}`;
   }
 
   // ---------- Navigation ----------
@@ -846,6 +903,7 @@
       const prior = fileLocations[target] || (target===S.cwd ? captureFiles() : undefined);
       return nav.go(nav.url('files', { ...fileParams(), path: target, item: null, edit: null, ...(target!==S.cwd?{search:null,q:S.filter || null}:{}) }), { view: prior });
     }
+    S.catalogMark='';syncCatalogControls();
     S.navId++;
     void refreshVolumes();
     const request = S.navId;
@@ -871,6 +929,7 @@
       S.renderLimit = RENDER_PAGE;
       if (!S.home && data.home) S.home = data.home;
       if (inTrash(data.path)) await loadTrashNames(data.path);
+      await AxonFileCatalog.load(true).catch(()=>toast('No se pudo cargar la organización. Usá Actualizar para reintentar.','warn'));if(request!==S.navId)return;syncCatalogControls();
       S.entries = trashify(data.entries || [], data.path);
       renderCrumbs();
       render();
@@ -910,6 +969,7 @@
       const data = await api(`/api/files?path=${encodeURIComponent(S.cwd)}`, {
         signal: AbortSignal.timeout(20_000),
       });
+      await AxonFileCatalog.load().catch(()=>{});
       const list = data.entries || [];
       // Column view keeps ancestor listings on screen; refresh them too or
       // external changes stay invisible until the next drill.
@@ -956,64 +1016,6 @@
   let previewGeneration = 0;
   const previewUrl = (p) => `/api/files/preview?path=${encodeURIComponent(p)}`;
 
-  // Minimal markdown → HTML for the preview pane. Everything passes through
-  // esc() first; links only render for safe schemes, so no script can slip in.
-  function mdToHtml(src) {
-    const inline = (s) =>
-      esc(s)
-        .replace(/`([^`\n]+)`/g, '<code>$1</code>')
-        .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (m, t, u) =>
-          /^(https?:|mailto:|#|\.?\/)/i.test(u)
-            ? `<a href="${u}" target="_blank" rel="noopener noreferrer">${t}</a>`
-            : t
-        )
-        .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
-        .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
-    const lines = String(src).split('\n');
-    const out = [];
-    let i = 0;
-    const isList = (l) => /^\s*([-*+]|\d+\.)\s+/.test(l);
-    const isBlock = (l) =>
-      /^(#{1,6}\s|```|>\s?)/.test(l) || isList(l) || /^\s*(-{3,}|\*{3,})\s*$/.test(l);
-    while (i < lines.length) {
-      const l = lines[i];
-      if (/^```/.test(l)) {
-        const buf = [];
-        i++;
-        while (i < lines.length && !/^```/.test(lines[i])) buf.push(lines[i++]);
-        i++;
-        out.push(`<pre class="fm-md-pre"><code>${esc(buf.join('\n'))}</code></pre>`);
-      } else if (!l.trim()) {
-        i++;
-      } else if (/^(#{1,6})\s+/.test(l)) {
-        const m = /^(#{1,6})\s+(.*)$/.exec(l);
-        out.push(`<h${m[1].length}>${inline(m[2])}</h${m[1].length}>`);
-        i++;
-      } else if (isList(l)) {
-        const tag = /^\s*\d+\./.test(l) ? 'ol' : 'ul';
-        const items = [];
-        while (i < lines.length && isList(lines[i])) {
-          items.push(`<li>${inline(lines[i].replace(/^\s*([-*+]|\d+\.)\s+/, ''))}</li>`);
-          i++;
-        }
-        out.push(`<${tag}>${items.join('')}</${tag}>`);
-      } else if (/^>\s?/.test(l)) {
-        const buf = [];
-        while (i < lines.length && /^>\s?/.test(lines[i])) buf.push(lines[i++].replace(/^>\s?/, ''));
-        out.push(`<blockquote>${buf.map(inline).join('<br>')}</blockquote>`);
-      } else if (/^\s*(-{3,}|\*{3,})\s*$/.test(l)) {
-        out.push('<hr>');
-        i++;
-      } else {
-        const buf = [l];
-        i++;
-        while (i < lines.length && lines[i].trim() && !isBlock(lines[i])) buf.push(lines[i++]);
-        out.push(`<p>${buf.map(inline).join('<br>')}</p>`);
-      }
-    }
-    return out.join('\n');
-  }
-
   function renderPrevFallback(msg) {
     const body = el('fm-prev-body');
     body.innerHTML = `
@@ -1047,6 +1049,7 @@
     documentPreview?.destroy(); documentPreview = null;
     const generation = ++previewGeneration;
     S.preview = { path: p, name, kind };
+    syncPreviewNavigation();
     window.AxonRecent?.add({section:'files',name,path:p,url:window.AxonNavigation.url('files',{...fileParams(),item:name,edit:null})});
     el('fm-preview').classList.remove('hidden');
     el('fm-resize').classList.remove('hidden');
@@ -1056,7 +1059,7 @@
     el('fm-prev-meta').textContent = entry
       ? `${fmtSize(entry.size)} · ${fmtDate(entry.mtime)}${entry.mode ? ' · ' + entry.mode : ''}`
       : '';
-    el('fm-prev-edit').classList.toggle('hidden', kind !== 'text');
+    el('fm-prev-edit').classList.toggle('hidden', kind !== 'text' && !window.AxonDocumentViewer?.isMarkdown(name));
 
     const body = el('fm-prev-body');
     body.innerHTML = '<div class="fm-pv-loading">Cargando…</div>';
@@ -1100,7 +1103,7 @@
       });
     } else if (kind === 'document') {
       documentPreview = window.AxonDocumentViewer.mount(body, {
-        name, sourceUrl: previewUrl(p), documentUrl: '/api/files/document?path=' + encodeURIComponent(p),
+        name, path: p, sourceUrl: previewUrl(p), textUrl: '/api/files/read?path=' + encodeURIComponent(p), documentUrl: '/api/files/document?path=' + encodeURIComponent(p),
         downloadUrl: '/api/files/download?path=' + encodeURIComponent(p),
       });
     } else if (kind === 'text') {
@@ -1111,19 +1114,10 @@
             renderPrevFallback('Archivo binario — sin vista de texto');
             return;
           }
-          if (['md', 'markdown'].includes(extOf(name))) {
-            const div = document.createElement('div');
-            div.className = 'fm-pv-md';
-            div.innerHTML = mdToHtml(data.content || '');
-            body.innerHTML = '';
-            body.appendChild(div);
-          } else {
-            const pre = document.createElement('pre');
-            pre.className = 'fm-pv-text mono';
-            pre.textContent = data.content || '';
-            body.innerHTML = '';
-            body.appendChild(pre);
-          }
+          const pre = document.createElement('pre');
+          pre.className = 'fm-pv-text mono';
+          pre.textContent = data.content || '';
+          body.replaceChildren(pre);
           if (data.truncated) {
             const note = document.createElement('div');
             note.className = 'fm-pv-note';
@@ -1197,29 +1191,75 @@
     document.addEventListener('mouseup', up);
   });
 
-  // Arrow keys walk through previewable files while the pane is open.
+  function previewQueue() {
+    return visibleEntries().filter(entry => entry.type !== 'dir').map(entry => entry.name);
+  }
+  function syncPreviewNavigation() {
+    const queue = previewQueue(), index = queue.indexOf(S.preview?.name);
+    el('fm-prev-previous').disabled = index <= 0;
+    el('fm-prev-next').disabled = index < 0 || index >= queue.length - 1;
+    el('fm-prev-position').textContent = index < 0 ? '' : `${index + 1} / ${queue.length}`;
+  }
+  function stepPreview(delta) {
+    const queue = previewQueue(), index = queue.indexOf(S.preview?.name);
+    if (index >= 0 && queue[index + delta]) openPreview(queue[index + delta]);
+  }
+  el('fm-prev-previous').onclick = () => stepPreview(-1);
+  el('fm-prev-next').onclick = () => stepPreview(1);
   document.addEventListener('keydown', (e) => {
     if (!S.preview || !sec.classList.contains('active') || S.editingPath || e.target.closest('.axon-doc')) return;
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-    if (document.querySelector('.modal:not(.hidden)')) return;
+    if (document.querySelector('.modal:not(.hidden), dialog[open], :popover-open')) return;
     const tag = (e.target.tagName || '').toLowerCase();
     if (['input', 'textarea', 'video', 'audio', 'select', 'iframe'].includes(tag)) return;
-    const names = S.entries
-      .filter((x) => x.type !== 'dir' && kindFor(x.name) !== 'text')
-      .map((x) => x.name);
-    const i = names.indexOf(S.preview.name);
-    if (i < 0) return;
-    const next = e.key === 'ArrowLeft' ? names[i - 1] : names[i + 1];
-    if (!next) return;
     e.preventDefault();
-    openPreview(next);
+    stepPreview(e.key === 'ArrowLeft' ? -1 : 1);
   });
 
   // ---------- Editor ----------
-  async function openEditor(p, fromRoute = false) {
+  let editorPreview = null;
+  let editorTruncated = false, editorBinary = false;
+  let documentMode = 'edit';
+  const markdownFile = p => window.AxonDocumentViewer?.isMarkdown(p);
+  function setDocumentMode(mode, updateRoute = true, focus = true) {
+    const markdown = markdownFile(S.editingPath);
+    documentMode = markdown && mode === 'read' ? 'read' : 'edit';
+    const reading = documentMode === 'read';
+    el('fm-document-modes').classList.toggle('hidden', !markdown);
+    for (const [id, selected] of [['fm-document-read', reading], ['fm-document-edit', !reading]]) {
+      el(id).classList.toggle('active', selected); el(id).setAttribute('aria-pressed', String(selected));
+    }
+    el('fm-editor-text').classList.toggle('hidden', reading);
+    el('fm-editor-preview').classList.toggle('hidden', !reading);
+    editorPreview?.destroy(); editorPreview = null;
+    if (reading) {
+      editorPreview = window.AxonDocumentViewer.mount(el('fm-editor-preview'), {
+        name: S.editingPath.split('/').pop(), path: S.editingPath,
+        content: el('fm-editor-text').value, truncated: editorTruncated, binary: editorBinary,
+        note: isDirty() ? 'Vista de tus cambios sin guardar' : 'Vista de lectura',
+        downloadUrl: '/api/files/download?path=' + encodeURIComponent(S.editingPath),
+      });
+      if (focus) el('fm-editor-preview').querySelector('.axon-doc').focus();
+    } else if (focus) el('fm-editor-text').focus();
+    el('fm-editor-help').textContent = markdown
+      ? 'Visualizador ↔ Editor: Ctrl/Cmd+E · Ctrl/Cmd+S guarda · Esc vuelve a la lista'
+      : 'Ctrl/Cmd+S guarda · Tab indenta (Shift+Tab quita) · Esc vuelve a la lista';
+    if (updateRoute) window.AxonNavigation?.update('files', fileParams());
+  }
+  el('fm-document-read').addEventListener('click', () => setDocumentMode('read'));
+  el('fm-document-edit').addEventListener('click', () => setDocumentMode('edit'));
+  document.addEventListener('keydown', e => {
+    if (!sec.classList.contains('active') || !S.editingPath || document.querySelector('.modal:not(.hidden)')) return;
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e' && markdownFile(S.editingPath)) {
+      e.preventDefault(); setDocumentMode(documentMode === 'read' ? 'edit' : 'read');
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's' && documentMode === 'read') {
+      e.preventDefault(); el('fm-save-btn').click();
+    }
+  });
+  async function openEditor(p, fromRoute = false, mode = 'edit') {
     const nav = window.AxonNavigation;
     if (nav?.ready && !nav.applying && !fromRoute) {
-      return nav.go(nav.url('files', { ...fileParams(), path: parentOf(p), item: p.split('/').pop(), edit: '1' }), { view: captureFiles(), transient: true });
+      return nav.go(nav.url('files', { ...fileParams(), path: parentOf(p), item: p.split('/').pop(), edit: mode === 'read' ? null : '1' }), { view: captureFiles(), transient: true });
     }
     const routeParams=nav?.current?.params;
     try {
@@ -1229,6 +1269,7 @@
       S.editingPath = data.path;
       S.editRevision=data.revision;
       const binary = data.binary || String(data.content || '').includes('\u0000');
+      editorTruncated = Boolean(data.truncated); editorBinary = Boolean(binary);
       S.readOnly = Boolean(data.truncated) || binary;
 
       el('fm-editor-name').textContent = data.path;
@@ -1252,17 +1293,18 @@
 
       el('fm-main').classList.add('hidden');
       el('fm-editor').classList.remove('hidden');
-      el('fm-editor-text').focus();
+      setDocumentMode(binary ? 'edit' : mode, false);
     } catch (err) {
       errToast(err);
     }
   }
 
   function closeEditor(refresh) {
-    if (window.AxonNavigation?.ready && !window.AxonNavigation.applying && window.AxonNavigation.current.params.edit) {
+    if (window.AxonNavigation?.ready && !window.AxonNavigation.applying && window.AxonNavigation.current.params.item) {
       window.AxonNavigation.close({ ...fileParams(), item: null, edit: null }); return;
     }
     S.editingPath = null;
+    editorPreview?.destroy(); editorPreview = null;
     S.readOnly = false;
     S.originalContent = '';
     updateDirty();
@@ -1336,7 +1378,7 @@
         method: 'POST',
         body: { path: savedPath, content: bytes,revision:S.editRevision },
       });
-      if (S.editingPath === savedPath) { S.editRevision=result.revision;S.originalContent = content; updateDirty(); }
+      if (S.editingPath === savedPath) { S.editRevision=result.revision;S.originalContent = content; updateDirty(); if(documentMode === 'read') setDocumentMode('read', false, false); }
       toast(`Guardado: ${savedPath.split('/').pop()}`, 'ok', '', 3000);
       return true;
     } catch (err) {
@@ -1515,7 +1557,7 @@
   });
 
   document.addEventListener('keydown', (e) => {
-    if (sec.classList.contains('fm-cloud-mode')) return;
+    if (sec.classList.contains('fm-cloud-mode') || document.querySelector('dialog[open], :popover-open')) return;
     if (e.key !== 'Escape' && e.target.closest('.axon-doc')) return;
     if (e.key !== 'Escape') return;
     // Modals handle their own Escape (or block the editor close while open).
@@ -1591,6 +1633,7 @@
       download(p, name);
     } else if (act === 'zipdl') {
       downloadZip(p);
+    } else if (act === 'organize') { AxonFileCatalog.edit([p]);
     } else if (act === 'rename') {
       const nn = await fmPrompt('Renombrar', `Nuevo nombre para «${name}»`, name, true);
       if (!nn || nn === name) return;
@@ -1718,7 +1761,8 @@
       // Search hits live in another directory — act on tr.dataset.dir.
       if (tr.classList.contains('fm-search-hit')) {
         const dir = tr.dataset.dir;
-        if (actBtn.dataset.act === 'download') download(join(dir, tr.dataset.name), tr.dataset.name);
+        if(actBtn.dataset.act==='organize')AxonFileCatalog.edit([join(dir,tr.dataset.name)]);
+        else if (actBtn.dataset.act === 'download') download(join(dir, tr.dataset.name), tr.dataset.name);
         else if (actBtn.dataset.act === 'goto') {
           const name = tr.dataset.name;
           exitSearch();
@@ -1766,6 +1810,7 @@
   // Shared "activate an entry" logic for the list and grid views.
   function openEntry(name, type) {
     if (type === 'dir') return navigate(join(S.cwd, name));
+    if (markdownFile(name)) return openEditor(join(S.cwd, name), false, 'read');
     // Text/code goes straight to the editor; media and everything else opens
     // the preview pane (unknown types get a fallback card there).
     if (kindFor(name) === 'text') openEditor(join(S.cwd, name));
@@ -2216,15 +2261,30 @@
     if (rec.error) throw Object.assign(new Error(rec.error), rec.cancelled ? { cancelled: true } : {});
   }
 
+  let transferOperations=[],transferDialog=null;
+  el('fm-transfers-btn').onclick=()=>{
+    if(transferDialog)return;
+    const focus=document.activeElement,history=document.createElement('dialog');
+    history.id='fm-transfer-history';history.className='fm-transfer-dialog';history.setAttribute('aria-labelledby','fm-transfer-title');
+    transferDialog=history;
+    history.addEventListener('close',()=>{history.remove();transferDialog=null;focus?.focus();});
+    history.addEventListener('click',e=>{if(e.target.closest('[data-close]'))history.close();});
+    document.body.append(history);renderTransferHistory();history.showModal();
+  };
+  function renderTransferHistory(){
+    const history=transferDialog;if(!history)return;
+    history.innerHTML=`<div class="fm-transfer-heading"><h3 id="fm-transfer-title">Historial de transferencias (${transferOperations.length})</h3><button type="button" class="icon-btn" data-close aria-label="Cerrar">${icon("x")}</button></div><p>Los movimientos entre discos conservan un original recuperable. No liberan espacio automáticamente.</p>${transferOperations.map(op=>`<article><b>${esc(op.mode==='move'?'Movimiento':'Copia')} · ${esc(op.state)}</b><p class="maint-path">${esc(op.from)} → ${esc(op.to)}</p><p>${esc(op.message||'Resultado en curso')}</p>${op.recoveryPath?`<p>Original conservado: <span class="maint-path">${esc(op.recoveryPath)}</span>. Podés copiarlo desde Archivos a un destino libre.</p>`:''}${op.partialPath?`<p>Contenido parcial conservado: <span class="maint-path">${esc(op.partialPath)}</span>. Revisalo antes de decidir qué conservar.</p>`:''}${op.mode==='move'&&['verified','interrupted'].includes(op.state)?`<button class="btn-secondary" data-transfer-recover="${esc(op.id)}">Devolver original al origen</button>`:''}<button class="btn-secondary" data-transfer-refresh="${esc(op.id)}">Comprobar resultado</button></article>`).join('')||'<p>Todavía no hay transferencias.</p>'}`;
+    history.querySelectorAll('[data-transfer-recover]').forEach(b=>b.onclick=async()=>{if(!await confirmDialog('Recuperar original','Se devuelve el original a su origen si está libre; se conservan las copias.'))return;try{await api(`/api/files/transfers/${b.dataset.transferRecover}/recover`,{method:'POST',body:{}});await restoreTransfers();}catch(e){errToast(e);}});
+    history.querySelectorAll('[data-transfer-refresh]').forEach(b=>b.onclick=async()=>{b.disabled=true;try{await api(`/api/files/transfers/${b.dataset.transferRefresh}`,{fresh:true});await restoreTransfers();}catch(e){errToast(e);}finally{b.disabled=false;}});
+    refreshIcons(history);
+  }
+
   async function restoreTransfers(){
     try {
       const result=await api('/api/files/transfers',{fresh:true});
       for(const op of result.operations||[])if(['running','planned','cancel-requested'].includes(op.state)&&!S.jobs.has(op.id))trackJob(op.id,op.to.split('/').pop());
-      let history=document.getElementById('fm-transfer-history');
-      if(!history){history=document.createElement('details');history.id='fm-transfer-history';history.className='maint-panel';sec.append(history);}
-      history.innerHTML=`<summary>Historial de transferencias (${result.operations.length})</summary><p>Los movimientos entre discos conservan un original recuperable. No liberan espacio automáticamente.</p>${result.operations.map(op=>`<article><b>${esc(op.mode==='move'?'Movimiento':'Copia')} · ${esc(op.state)}</b><p class="maint-path">${esc(op.from)} → ${esc(op.to)}</p><p>${esc(op.message||'Resultado en curso')}</p>${op.recoveryPath?`<p>Original conservado: <span class="maint-path">${esc(op.recoveryPath)}</span>. Podés copiarlo desde Archivos a un destino libre.</p>`:''}${op.partialPath?`<p>Contenido parcial conservado: <span class="maint-path">${esc(op.partialPath)}</span>. Revisalo antes de decidir qué conservar.</p>`:''}${op.mode==='move'&&['verified','interrupted'].includes(op.state)?`<button class="btn-secondary" data-transfer-recover="${esc(op.id)}">Devolver original al origen</button>`:''}<button class="btn-secondary" data-transfer-refresh="${esc(op.id)}">Comprobar resultado</button></article>`).join('')||'<p>Todavía no hay transferencias.</p>'}`;
-      history.querySelectorAll('[data-transfer-recover]').forEach(b=>b.onclick=async()=>{if(!await confirmDialog('Recuperar original','Se devuelve el original a su origen si está libre; se conservan las copias.'))return;try{await api(`/api/files/transfers/${b.dataset.transferRecover}/recover`,{method:'POST',body:{}});await restoreTransfers();}catch(e){errToast(e);}});
-      history.querySelectorAll('[data-transfer-refresh]').forEach(b=>b.onclick=async()=>{b.disabled=true;try{await api(`/api/files/transfers/${b.dataset.transferRefresh}`,{fresh:true});await restoreTransfers();}catch(e){errToast(e);}finally{b.disabled=false;}});
+      transferOperations=result.operations||[];el('fm-transfers-count').textContent=String(transferOperations.length);
+      renderTransferHistory();
     }catch(e){errToast(e);}
   }
 
@@ -2513,7 +2573,7 @@
     e.preventDefault();
     const { name, type } = row.dataset;
     const colI = row.dataset.col !== undefined ? parseInt(row.dataset.col, 10) : null;
-    const basePath = colI !== null ? S.cols[colI]?.path || S.cwd : S.cwd;
+    const basePath = row.dataset.dir || (colI !== null ? S.cols[colI]?.path || S.cwd : S.cwd);
     const p = join(basePath, name);
     // Right-click selects the row, but never deselects a multi-selection
     // that already contains it.
@@ -2523,7 +2583,7 @@
       S.anchor = name;
       applySelToDom();
     }
-    const items = [];
+    const items = [{icon:'tags',label:'Colores, etiquetas y marcas…',run:()=>AxonFileCatalog.edit((row.dataset.dir?[name]:S.sel.has(name)?[...S.sel]:[name]).map(n=>join(basePath,n)))}];
     const trashCtx = inTrash(basePath);
     if (trashCtx) {
       // Trash items get restore + real permanent delete. Structure dirs
@@ -2613,6 +2673,7 @@
   });
 
   // ---------- Selection bar actions ----------
+  el('fm-sel-organize').addEventListener('click',()=>AxonFileCatalog.edit([...S.sel].map(n=>join(S.cwd,n))));
   el('fm-sel-clear').addEventListener('click', clearSel);
   el('fm-sel-all').addEventListener('click', () => {
     for (const n of visibleNames()) S.sel.add(n);
@@ -2862,7 +2923,7 @@
 
   document.addEventListener('keydown', (e) => {
     if (!sec.classList.contains('active') || sec.classList.contains('fm-cloud-mode') || S.editingPath || e.target.closest('.axon-doc')) return;
-    if (document.querySelector('.modal:not(.hidden)')) return;
+    if (document.querySelector('.modal:not(.hidden), dialog[open], :popover-open')) return;
     const tag = (e.target.tagName || '').toLowerCase();
     if (['input', 'textarea', 'select'].includes(tag) || e.target.isContentEditable) return;
     const mod = e.ctrlKey || e.metaKey;
@@ -3756,8 +3817,8 @@
   const fileLocations = (() => { try { const d=JSON.parse(localStorage.getItem('axon:file-locations:v1') || '{}');return d && typeof d==='object' && !Array.isArray(d)?d:{}; } catch { return {}; } })();
   function fileParams() {
     if (sec.classList.contains('fm-cloud-mode')) return window.AxonDropbox.params();
-    return { path: S.cwd || '~', view: S.view, sort: S.sort.key, order: S.sort.dir === 1 ? 'asc' : 'desc', q: (S.searchMode?S.searchQ:S.filter) || null, search:S.searchMode?'1':null, hidden: S.showHidden ? '1' : '0',
-      item: S.editingPath?.split('/').pop() || S.preview?.name || null, edit: S.editingPath ? '1' : null };
+    return { mark:S.catalogMark||null,color:S.catalogColor||null,tag:S.catalogTag||null,kind:S.catalogKind||null,path: S.cwd || '~', view: S.view, sort: S.sort.key, order: S.sort.dir === 1 ? 'asc' : 'desc', q: (S.searchMode?S.searchQ:S.filter) || null, search:S.searchMode?'1':null, hidden: S.showHidden ? '1' : '0',
+      item: S.editingPath?.split('/').pop() || S.preview?.name || null, edit: S.editingPath && documentMode === 'edit' ? '1' : null };
   }
   function captureFiles() {
     if (sec.classList.contains('fm-cloud-mode')) return window.AxonDropbox.capture();
@@ -3775,6 +3836,11 @@
     return snapshot;
   }
   async function restoreFiles(params, snapshot) {
+    if (S.editingPath && join(params.path || S.cwd, params.item || '') === S.editingPath && isDirty()) {
+      setDocumentMode(params.edit === '1' ? 'edit' : 'read', false);
+      return;
+    }
+    editorPreview?.destroy(); editorPreview = null;
     S.editingPath = null;
     closePreview(true);
     if (['dropbox','gdrive','onedrive'].includes(params.source) && window.AxonCloud) { await window.AxonDropbox.restore(params, snapshot); return; }
@@ -3786,6 +3852,7 @@
     el('fm-filter').value = S.filter;
     sec.querySelectorAll('.fm-vbtn').forEach(b=>b.classList.toggle('active',b.dataset.view===S.view));
     await navigate(params.path || '~', true);
+    S.catalogMark=Object.hasOwn(AxonFileCatalog.marks,params.mark||'')?params.mark:'';S.catalogColor=params.color||'';S.catalogTag=params.tag||'';S.catalogKind=['dir','file'].includes(params.kind)?params.kind:'';syncCatalogControls();render();
     await restoreTransfers();
     if (window.AxonNavigation.current.section !== 'files' || window.AxonNavigation.current.params !== params) return;
     snapshot ||= fileLocations[S.cwd];
@@ -3809,7 +3876,7 @@
     if(snapshot?.focus && S.cursor) sec.querySelector(`[data-name="${CSS.escape(S.cursor)}"]`)?.focus({preventScroll:true});
     if(params.item && !params.item.includes('/') && available.has(params.item)) {
       S.cursor=params.item;
-      if(params.edit==='1') await openEditor(join(S.cwd,params.item),true); else openPreview(params.item,true);
+      if(params.edit==='1' || markdownFile(params.item)) await openEditor(join(S.cwd,params.item),true,params.edit==='1' ? 'edit' : 'read'); else openPreview(params.item,true);
     }
     if(params.action==='upload') { el('fm-file-input').click(); }
     window.AxonNavigation.update('files',fileParams());
@@ -3818,15 +3885,25 @@
   window.AxonPages ||= {};
   window.AxonPages.files={capture:captureFiles,params:fileParams,restore:restoreFiles,dirty:isDirty,
     canLeave:async next=>{
-      if(!isDirty() || (next.section==='files' && next.params.edit==='1' && join(next.params.path || S.cwd,next.params.item || '')===S.editingPath)) return true;
+      if(!isDirty() || (next.section==='files' && join(next.params.path || S.cwd,next.params.item || '')===S.editingPath)) return true;
       return confirmDialog('Cambios sin guardar','Si salís del editor se pierden los cambios de este archivo.','Salir sin guardar');
-    }, leave:()=>closePreview(true)};
-  el('fm-location-form').addEventListener('submit',e=>{e.preventDefault();navigate(el('fm-location').value.trim());});
+    }, leave:()=>{closePreview(true);editorPreview?.destroy();editorPreview=null;}};
+  const address=sec.querySelector('.fm-address');
+  const editLocation=()=>{address.classList.add('is-editing');el('fm-location').focus();el('fm-location').select();};
+  const closeLocation=()=>{address.classList.remove('is-editing');el('fm-location').value=S.cwd;};
+  el('fm-edit-location').addEventListener('click',editLocation);
+  el('fm-location').addEventListener('blur',closeLocation);
+  el('fm-location').addEventListener('keydown',e=>{if(e.key==='Escape'){e.preventDefault();e.stopPropagation();closeLocation();el('fm-edit-location').focus();}});
+  el('fm-location-form').addEventListener('submit',e=>{e.preventDefault();const path=el('fm-location').value.trim();closeLocation();navigate(path);});
+  const createMenu=el('fm-create-menu');
+  el('fm-create-btn').addEventListener('click',()=>{const rect=el('fm-create-btn').getBoundingClientRect();createMenu.style.top=`${rect.bottom+6}px`;createMenu.style.left=`${Math.max(8,Math.min(rect.right-210,innerWidth-218))}px`;});
+  createMenu.addEventListener('click',e=>{if(e.target.closest('button'))createMenu.hidePopover();});
+  document.addEventListener('axon:route',()=>{if(disksDialog.open)disksDialog.close();if(createMenu.matches(':popover-open'))createMenu.hidePopover();});
   el('fm-parent').addEventListener('click',()=>navigate(parentOf(S.cwd)));
   el('fm-keys').addEventListener('click',showHelp);
   document.addEventListener('keydown',e=>{
-    if(!sec.classList.contains('active') || sec.classList.contains('fm-cloud-mode')) return;
-    if((e.ctrlKey||e.metaKey)&&e.shiftKey&&e.key.toLowerCase()==='l'){e.preventDefault();el('fm-location').focus();el('fm-location').select();}
+    if(!sec.classList.contains('active') || sec.classList.contains('fm-cloud-mode') || document.querySelector('dialog[open], :popover-open')) return;
+    if((e.ctrlKey||e.metaKey)&&e.shiftKey&&e.key.toLowerCase()==='l'){e.preventDefault();editLocation();}
   });
   const saveLocation=()=>{if(!sec.classList.contains('active') || sec.classList.contains('fm-cloud-mode'))return;queueMicrotask(()=>{
     if(!window.AxonNavigation?.ready || window.AxonNavigation.applying) return;

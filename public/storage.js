@@ -2,8 +2,8 @@
 (() => {
   'use strict';
   const sec=document.createElement('section');sec.id='tab-storage';sec.className='tab-content maintenance';
-  sec.innerHTML=`<header class="section-header"><div><h2>Almacenamiento</h2><p>Revisá qué ocupa espacio y qué hace falta para limpiarlo con seguridad.</p></div><a href="/salud" class="btn-secondary">Salud del servidor</a></header>
-    <nav class="maint-tabs" aria-label="Vistas de almacenamiento">${[['usage','Uso del disco'],['cleanup','Limpieza'],['versions','Versiones y residuales'],['history','Historial']].map(([k,l])=>`<a href="/almacenamiento?view=${k}" data-view="${k}">${l}</a>`).join('')}</nav>
+  sec.innerHTML=`<header class="section-header"><div><h2>Almacenamiento</h2><p>Administrá discos y particiones, o revisá el espacio y la limpieza del servidor.</p></div><a href="/salud" class="btn-secondary">Salud del servidor</a></header>
+    <nav class="maint-tabs" aria-label="Vistas de almacenamiento">${[['disks','Discos y particiones'],['usage','Uso del disco'],['cleanup','Limpieza'],['versions','Versiones y residuales'],['history','Historial']].map(([k,l])=>`<a href="/almacenamiento?view=${k}" data-view="${k}">${l}</a>`).join('')}</nav>
     <p id="storage-status" role="status" aria-live="polite"></p><div id="storage-scan-controls" class="maint-toolbar"><label>Ubicación<select id="storage-root"></select></label><button id="storage-scan" class="btn-primary">Analizar</button><button id="storage-cancel" class="btn-secondary" hidden>Cancelar análisis</button></div>
     <div id="storage-selection" class="maint-toolbar" hidden><span id="storage-selected-count"></span><button id="storage-review" class="btn-primary">Ver cambios</button><button id="storage-clear" class="btn-secondary">Limpiar selección</button></div><div id="storage-plan"></div><div id="storage-content"></div>`;
   document.querySelector('main.content').append(sec);
@@ -21,10 +21,15 @@
   const state=s=>({planned:'Plan preparado',running:'En curso',verified:'Finalizado',interrupted:'Interrumpido · revisar',skipped:'Omitido',failed:'Falló','cancel-requested':'Cancelación solicitada',restored:'Restaurado'}[s]||s);
   const status=(message,error=false)=>{const el=sec.querySelector('#storage-status');el.textContent=message;el.classList.toggle('maint-error',error);};
   const content=()=>sec.querySelector('#storage-content');
-  function stop(){clearTimeout(timer);timer=null;generation++;}
+  function stop(){clearTimeout(timer);timer=null;generation++;window.AxonDisks.leave();}
   const params=()=>({view,...(scanId?{scan:scanId}:{}),...(query?{q:query}:{})});
   async function load(){
     const ticket=++generation;
+    sec.querySelectorAll('[data-view]').forEach(a=>{if(a.dataset.view===view)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});
+    for(const id of ['storage-scan-controls','storage-selection','storage-plan','storage-status'])sec.querySelector('#'+id).hidden=view==='disks';
+    sec.querySelector('.host-disks-panel')?.toggleAttribute('hidden',view==='disks');
+    if(view==='disks'){if(!content().querySelector('#disk-manager'))content().innerHTML='<div id="disk-manager"></div>';await window.AxonDisks.mount(content().firstElementChild);return;}
+    window.AxonDisks.leave();
     try{
       overview=await api('/api/storage/overview',{fresh:true});if(ticket!==generation)return;
       const select=sec.querySelector('#storage-root'),selectedRoot=select.value;
@@ -101,6 +106,6 @@
     if(id==='storage-prev'||id==='storage-next'){offset=Math.max(0,offset+(id==='storage-next'?50:-50));await load();}
     if(id==='storage-save-exclusions'){await api('/api/storage/exclusions',{method:'POST',body:{paths:sec.querySelector('#storage-exclusions').value.split('\n').map(s=>s.trim()).filter(Boolean)}});status('Exclusiones guardadas. Volvé a analizar antes de preparar cambios.');}
   }catch(err){status(err.message,true);}finally{if(id==='storage-scan')sec.querySelector('#storage-scan').disabled=false;if(button?.isConnected)button.disabled=false;}});
-  window.AxonPages||={};window.AxonPages.storage={restore:async p=>{stop();migrationPlan=null;plan=null;showPlan();view=['usage','cleanup','versions','history'].includes(p.view)?p.view:'usage';scanId=p.scan||'';query=p.q||'';offset=0;await load();},params,leave:stop};
+  window.AxonPages||={};window.AxonPages.storage={restore:async p=>{stop();migrationPlan=null;plan=null;showPlan();view=['disks','usage','cleanup','versions','history'].includes(p.view)?p.view:p.scan?'usage':'disks';scanId=p.scan||'';query=p.q||'';offset=0;await load();},params,leave:stop};
   document.querySelector('#tab-ops .section-header')?.insertAdjacentHTML('afterend','<p><a href="/almacenamiento">Revisar almacenamiento y limpieza del disco →</a></p>');
 })();

@@ -44,7 +44,7 @@
     shareBase: '',
     scannedAt: 0,
     view: (()=>{try{return JSON.parse(localStorage.getItem('lib-view')) || {type:'all'};}catch{return {type:'all'};}})(),
-    q: '',
+    q: '',catalogColor:'',catalogTag:'',catalogKind:'',
     sort: localStorage.getItem('lib-sort') || 'date-desc',
     group: localStorage.getItem('lib-group') || 'month',
     size: Number(localStorage.getItem('lib-size') || 170),
@@ -157,10 +157,12 @@
     sec.innerHTML = `
       <div class="lib-top">
         <div class="page-history"><button class="icon-btn" data-axon-back title="Atrás" aria-label="Atrás">${icon('arrow-left')}</button><button class="icon-btn" data-axon-forward title="Adelante" aria-label="Adelante">${icon('arrow-right')}</button><button class="icon-btn" id="lib-keys" title="Atajos de teclado" aria-label="Atajos de teclado">${icon('keyboard')}</button></div>
-        <button class="icon-btn lib-side-toggle" id="lib-side-toggle" title="Secciones">${icon('panel-left')}</button>
+        <button class="icon-btn lib-side-toggle" id="lib-side-toggle" title="Secciones" aria-label="Secciones de Biblioteca" aria-controls="lib-side" aria-expanded="false">${icon('panel-left')}</button>
         <div class="lib-title"><h2 id="lib-h">Biblioteca</h2><span class="lib-sub" id="lib-sub"></span></div>
         <div class="lib-search">${icon('search')}<input id="lib-q" placeholder="Buscar… ej: tipo:video >100mb vacaciones" autocomplete="off"><kbd>/</kbd></div>
         <div class="lib-tools">
+          <button type="button" class="btn-secondary" id="lib-add-folder">${icon('folder-plus')}<span>Agregar carpeta</span></button>
+          <button type="button" class="btn-secondary" data-host-disks-open aria-haspopup="dialog">${icon('hard-drive')}<span>Discos</span></button>
           <select id="lib-sort" class="lib-select" title="Ordenar">
             <option value="date-desc">Más recientes</option>
             <option value="date-asc">Más antiguos</option>
@@ -190,8 +192,14 @@
           <button class="icon-btn" id="lib-settings" title="Carpetas y ajustes">${icon('settings-2')}</button>
         </div>
       </div>
+      <div class="catalog-bar" id="lib-catalog-bar">
+        <label>Tipo<select id="lib-catalog-kind"><option value="">Carpetas y archivos</option><option value="dir">Carpetas</option><option value="file">Archivos</option></select></label>
+        <label>Color<select id="lib-catalog-color"><option value="">Todos los colores</option>${Object.entries(AxonFileCatalog.colors).map(([c,label])=>`<option value="${c}">${label}</option>`).join('')}</select></label>
+        <label>Etiqueta<select id="lib-catalog-tag"><option value="">Todas las etiquetas</option></select></label>
+        <button id="lib-organize-folder" class="btn-secondary" hidden>${icon('tags')}Organizar carpeta</button>
+      </div>
       <div class="lib-layout">
-        <aside class="lib-side" id="lib-side"></aside>
+        <button type="button" class="lib-side-backdrop" id="lib-side-dismiss" aria-label="Cerrar secciones" hidden></button><aside class="lib-side" id="lib-side"></aside>
         <div class="lib-main" id="lib-main">
           <div class="lib-crumbs" id="lib-crumbs"></div>
           <div class="lib-body" id="lib-body">${AxonUI.skeleton('Cargando biblioteca',6)}</div>
@@ -206,7 +214,10 @@
       <div class="modal hidden" id="lib-modal"><div class="modal-content lib-modal-content" id="lib-modal-c"></div></div>`;
     main.appendChild(sec);
 
-    $('#lib-q').addEventListener('input', debounce((e) => { L.q = e.target.value.trim(); render(); }, 160));
+    for(const [id,key] of [['lib-catalog-kind','catalogKind'],['lib-catalog-color','catalogColor'],['lib-catalog-tag','catalogTag']])$('#'+id).onchange=e=>{L[key]=e.target.value;render();window.AxonNavigation?.update('library',libraryParams());};
+    $('#lib-organize-folder').onclick=()=>AxonFileCatalog.edit([L.view.value]);
+    const renderSearchLater=debounce(()=>render(),160);
+    $('#lib-q').addEventListener('input',e=>{L.q=e.target.value.trim();renderSearchLater();});
     $('#lib-sort').value = L.sort;
     $('#lib-group').value = L.group;
     $('#lib-size').value = L.size;
@@ -240,7 +251,12 @@
     });
     setupLongPress(sec);
     $('#lib-settings').addEventListener('click', openSettings);
-    $('#lib-side-toggle').addEventListener('click', () => sec.classList.toggle('side-open'));
+    $('#lib-side-toggle').addEventListener('click', () => toggleSide(!sec.classList.contains('side-open')));
+    $('#lib-side-dismiss').addEventListener('click', () => { toggleSide(false); $('#lib-side-toggle').focus(); });
+    const mobileSide = matchMedia('(max-width:768px)');
+    mobileSide.addEventListener('change', () => toggleSide(false));
+    toggleSide(false);
+    $('#lib-add-folder').addEventListener('click', addFolder);
     $('#lib-modal').addEventListener('mousedown', (e) => { if (e.target.id === 'lib-modal') closeModal(); });
 
     // Drag & drop upload anywhere on the tab.
@@ -286,6 +302,8 @@
 
   // ---------- Data ----------
 
+  document.addEventListener('axon:catalog',()=>{if(!L.loaded)return;L.favs=new Set(L.items.filter(it=>AxonFileCatalog.get(it.p).favorite).map(it=>it.id));render({keep:true});if(!$('#lib-viewer')?.classList.contains('hidden'))viewerBar();});
+  document.addEventListener('contextmenu',e=>{const folder=e.target.closest('#tab-library .lib-folder');if(!folder)return;e.preventDefault();showCtxMenu([{icon:'folder-open',label:'Abrir carpeta',run:()=>setView({type:'folder',value:folder.dataset.path})},{icon:'tags',label:'Colores, etiquetas y marcas…',run:()=>AxonFileCatalog.edit([folder.dataset.path])}],e.clientX,e.clientY);});
   let loadFlight = null;
   function load() {
     if (!loadFlight) loadFlight = fetchLibrary().finally(() => { loadFlight = null; });
@@ -297,10 +315,11 @@
       // Read the current item AFTER the request: the user may have stepped meanwhile.
       const viewerId = !$('#lib-viewer')?.classList.contains('hidden') ? vItemId : null;
       const viewerVersion = viewerId ? vItemVersion : null;
+      await AxonFileCatalog.load(true).catch(()=>toast('No se pudo cargar la organización. Usá Actualizar para reintentar.','warn'));
       L.loaded = true;
       L.items = d.items;
       L.byId = new Map(d.items.map((it) => [it.id, it]));
-      L.favs = new Set(d.favorites);
+      L.favs = new Set(d.items.filter(it=>AxonFileCatalog.get(it.p).favorite).map(it=>it.id));
       L.cols = d.collections;
       L.roots = d.roots;
       L.directories = d.directories || [];
@@ -308,7 +327,7 @@
       L.uploadRoot = d.uploadRoot;
       L.shareBase = d.shareBase;
       L.scannedAt = d.scannedAt;
-      L.revision = d.revision;
+      L.revision = d.revision;L.metadataRevision=d.metadataRevision;
       L.sharesCount = d.shares;
       for (const id of [...L.sel]) if (!L.byId.has(id)) L.sel.delete(id);
       const nc = $('#nav-count-library');
@@ -346,6 +365,7 @@
         const status = await api('/api/library/status?live=1' + (vItemId ? `&item=${encodeURIComponent(vItemId)}` : ''));
         statusLine(status);
         if (status.revision !== L.revision) await load();
+        else if(status.metadataRevision!==L.metadataRevision){await AxonFileCatalog.load(true);L.metadataRevision=status.metadataRevision;}
         pollStatus(2000);
       } catch (e) { if (e.status !== 401) pollStatus(15_000); }
     }, delay);
@@ -373,7 +393,29 @@
 
   // ---------- Filtering / grouping ----------
 
+  function toggleSide(open) {
+    $('#tab-library')?.classList.toggle('side-open', open);
+    $('#lib-side-toggle')?.setAttribute('aria-expanded', String(open));
+    if ($('#lib-side')) $('#lib-side').inert = matchMedia('(max-width:768px)').matches && !open;
+    if ($('#lib-side-dismiss')) $('#lib-side-dismiss').hidden = !open;
+  }
+
+  async function addFolder() {
+    const button = $('#lib-add-folder');
+    button.disabled = true;
+    try {
+      const path = await window.AxonStorage.pick({title: 'Agregar carpeta a Biblioteca'});
+      if (!path) return;
+      await api('/api/library/settings', {method: 'PUT', body: {addRoot: path}});
+      toast('Carpeta agregada — escaneando…', 'ok', '', 3000);
+      await load();
+      setView({type: 'folder', value: path});
+    } catch (err) { errToast(err); }
+    finally { button.disabled = false; }
+  }
+
   function setView(v) {
+    toggleSide(false);
     if (window.AxonNavigation?.ready && !window.AxonNavigation.applying) {
       const params = { ...libraryParams(), type: v.type, value: v.value || null, item: null };
       const snapshot = libraryLocations[`${v.type}:${v.value || ''}:${L.q}`];
@@ -384,7 +426,7 @@
     localStorage.setItem('lib-view', JSON.stringify(v));
     L.sel.clear();
     L.selMode = false;
-    $('#tab-library')?.classList.remove('side-open');
+    toggleSide(false);
     $('#lib-main')?.scrollTo?.(0, 0);
     render();
   }
@@ -404,8 +446,12 @@
     } else if (v.type === 'folder') {
       list = L.q ? list.filter((it) => it.p.startsWith(v.value + '/')) : list.filter((it) => dirOf(it.p) === v.value);
     }
+    if(['liked','saved','pinned'].includes(v.type))list=list.filter(it=>AxonFileCatalog.get(it.p)[v.type]);
+    if(v.type==='tag')list=list.filter(it=>AxonFileCatalog.get(it.p).tags.includes(v.value));
+    list=list.filter(it=>AxonFileCatalog.matches(it.p,{color:L.catalogColor,tag:L.catalogTag,kind:L.catalogKind},'file'));
     if (L.q) {
       const terms = L.q.toLowerCase().split(/\s+/).filter(Boolean);
+      if(terms.includes('tipo:carpeta'))return [];
       const isOp = (t) => /^(tipo:|ext:)/.test(t) || /^[<>]\d/.test(t);
       const words = terms.filter((t) => !isOp(t));
       const kindAlias = { imagen: 'image', imagenes: 'image', foto: 'image', fotos: 'image', video: 'video', videos: 'video', audio: 'audio', vector: 'vector', vectores: 'vector', 'diseño': 'design', diseno: 'design', documento: 'doc', documentos: 'doc', texto: 'doc', otro: 'other', otros: 'other' };
@@ -425,7 +471,7 @@
         if (minSize >= 0 && it.s <= minSize) return false;
         if (maxSize >= 0 && it.s >= maxSize) return false;
         if (!words.length) return true;
-        const hay = `${it.p} ${KIND_ONE[it.k]} ${it.e}`.toLowerCase();
+        const hay = `${it.p} ${KIND_ONE[it.k]} ${it.e} ${AxonFileCatalog.get(it.p).tags.join(' ')}`.toLowerCase();
         return words.every((t) => hay.includes(t));
       });
     }
@@ -484,6 +530,9 @@
   function render(opts = {}) {
     if (!$('#tab-library')) return;
     renderSide();
+    $('#lib-catalog-tag').innerHTML='<option value="">Todas las etiquetas</option>'+AxonFileCatalog.tags().map(t=>`<option value="${esc(t)}">${esc(t)}</option>`).join('');$('#lib-catalog-tag').value=L.catalogTag;
+    $('#lib-catalog-color').value=L.catalogColor;$('#lib-catalog-kind').value=L.catalogKind;
+    $('#lib-organize-folder').hidden=L.view.type!=='folder';
     if (L.view.type === 'shares') return renderShares();
     if (L.view.type === 'dupes') return renderDupes();
     renderCrumbs();
@@ -498,20 +547,22 @@
     $$('#tab-library .lib-seg button').forEach((b) => b.classList.toggle('active', b.dataset.layout === L.layout));
     $('#lib-size').style.display = L.layout === 'grid' ? '' : 'none';
     let html = '';
-    if (L.view.type === 'folder' && !L.q) {
-      const subs = subfolders(L.view.value);
-      if (subs.length) {
-        html += `<div class="lib-folders">${subs.map((f) => `
-          <button class="lib-folder" data-path="${esc(f.path)}">
-            <span class="lib-folder-cover">${f.cover ? `<img loading="lazy" src="${thumbUrl(f.cover)}" alt="" data-k="${f.cover.k}" data-e="${esc(f.cover.e)}">` : icon('folder')}</span>
-            <span class="lib-folder-meta"><b>${esc(f.name)}</b><small>${f.count.toLocaleString('es-AR')} archivos · ${fmtSize(f.size)}</small></span>
-          </button>`).join('')}</div>`;
-      }
+    let folderHits=[];
+    if(L.view.type==='folder'&&!L.q&&!L.catalogTag&&!L.catalogColor)folderHits=subfolders(L.view.value);
+    else if(L.q||['fav','liked','saved','pinned','tag'].includes(L.view.type)||L.catalogTag||L.catalogColor||L.catalogKind==='dir'){
+      const mark=L.view.type==='fav'?'favorite':['liked','saved','pinned'].includes(L.view.type)?L.view.type:'';
+      const words=L.q.split(/\s+/).filter(t=>!(/^(tipo:|ext:|[<>]\d)/.test(t))).join(' ');
+      const roots=[...new Set([L.uploadRoot,...L.roots])].filter(Boolean);
+      folderHits=[...new Set([...L.directories,...roots])].filter(p=>roots.some(r=>p===r||p.startsWith(r+'/'))&&(L.view.type!=='folder'||p.startsWith(L.view.value+'/'))&&AxonFileCatalog.matches(p,{query:words,mark,color:L.catalogColor,tag:L.view.type==='tag'?L.view.value:L.catalogTag,kind:L.catalogKind},'dir')).map(p=>({name:baseOf(p),path:p}));
+      if(/(?:^|\s)(?:ext:|[<>]\d|tipo:(?!carpeta))/.test(L.q))folderHits=[];
     }
+    if(L.catalogKind==='file')folderHits=[];
+    folderHits=folderHits.filter(f=>AxonFileCatalog.matches(f.path,{color:L.catalogColor,tag:L.catalogTag,kind:L.catalogKind},'dir'));
+    if(folderHits.length){html+=`<div class="lib-folders">${folderHits.slice(0,120).map(f=>`<button class="lib-folder" data-path="${esc(f.path)}"${AxonFileCatalog.attr(f.path)}><span class="lib-folder-cover">${f.cover?`<img loading="lazy" src="${thumbUrl(f.cover)}" alt="" data-k="${f.cover.k}">`:icon('folder')}</span><span class="lib-folder-meta"><b>${esc(f.name)}</b><small>${f.count!==undefined?f.count+' archivos · '+fmtSize(f.size):esc(prettyPath(f.path))}</small>${AxonFileCatalog.badges(f.path)}</span></button>`).join('')}</div>`;if(folderHits.length>120)html+='<p class="listener-note">Se muestran 120 carpetas. Afiná la búsqueda para ver las demás.</p>';}
     const total = L.list.reduce((a, it) => a + it.s, 0);
-    $('#lib-sub').textContent = `${L.list.length.toLocaleString('es-AR')} archivos · ${fmtSize(total)}`;
+    $('#lib-sub').textContent = `${folderHits.length?folderHits.length+' carpetas · ':''}${L.list.length.toLocaleString('es-AR')} archivos · ${fmtSize(total)}`;
     if (!L.list.length) {
-      html += `<div class="lib-empty">${icon(L.q ? 'search-x' : 'image-off')}<p>${L.q ? 'Nada coincide con la búsqueda' : emptyMsg()}</p></div>`;
+      if(!folderHits.length)html += `<div class="lib-empty">${icon(L.q ? 'search-x' : 'image-off')}<p>${L.q ? 'Nada coincide con la búsqueda' : emptyMsg()}</p></div>`;
       body.innerHTML = html;
       body.querySelectorAll('.lib-folder').forEach((b) => b.addEventListener('click', () => setView({ type: 'folder', value: b.dataset.path })));
       updateBulk();
@@ -576,20 +627,20 @@
     const badge = it.k === 'video'
       ? `<span class="lib-badge">${icon('play')}${fmtDur(it.d)}</span>`
       : it.k !== 'image' ? `<span class="lib-badge">${esc(it.e.toUpperCase())}</span>` : '';
-    return `<div class="lib-tile${sel ? ' sel' : ''}" data-i="${i}" data-id="${it.id}" title="${esc(it.n)}">
+    return `<div class="lib-tile${sel ? ' sel' : ''}" data-i="${i}" data-id="${it.id}"${AxonFileCatalog.attr(it.p)} title="${esc(it.n)}">
       ${media}${badge}
       <button class="lib-check" data-act="sel" aria-label="Seleccionar ${esc(it.n)}">${icon('check')}</button>
       <button class="lib-fav${fav ? ' on' : ''}" data-act="fav" aria-label="Marcar favorito ${esc(it.n)}">${icon('star')}</button>
-      <span class="lib-cap">${esc(it.n)}</span>
+      <span class="lib-cap">${esc(it.n)}${AxonFileCatalog.badges(it.p)}</span>
     </div>`;
   }
 
   function rowHtml(it, i) {
     const sel = L.sel.has(it.id);
     const media = it.th === -1 ? `<span class="lib-ext k-${it.k}">${icon(KIND[it.k]?.ic || 'file')}</span>` : `<img loading="lazy" src="${thumbUrl(it)}" alt="" data-k="${it.k}" data-e="${esc(it.e)}">`;
-    return `<div class="lib-row${sel ? ' sel' : ''}" data-i="${i}" data-id="${it.id}">
+    return `<div class="lib-row${sel ? ' sel' : ''}" data-i="${i}" data-id="${it.id}"${AxonFileCatalog.attr(it.p)}>
       <span class="lib-row-th"><button class="lib-check" data-act="sel" aria-label="Seleccionar ${esc(it.n)}">${icon('check')}</button>${media}</span>
-      <span class="lib-row-n">${L.favs.has(it.id) ? `<span class="lib-star">${icon('star')}</span>` : ''}${esc(it.n)}</span>
+      <span class="lib-row-n">${L.favs.has(it.id) ? `<span class="lib-star">${icon('star')}</span>` : ''}${esc(it.n)}${AxonFileCatalog.badges(it.p)}</span>
       <span>${esc(KIND_ONE[it.k])}${it.d ? ' · ' + fmtDur(it.d) : ''}</span>
       <span>${fmtSize(it.s)}</span>
       <span>${fmtDate(when(it))}</span>
@@ -684,6 +735,7 @@
       ...(nTool ? [{ icon: 'wand-2', label: nTool > 1 ? `Optimizar / convertir ${nTool}…` : 'Optimizar / convertir…', run: () => openTools(ids) }] : []),
       ...(nTr ? [{ icon: 'captions', label: nTr > 1 ? `Transcribir ${nTr}…` : 'Transcribir…', run: () => openTranscribe(ids) }] : []),
       { icon: 'star', label: L.favs.has(it.id) ? 'Quitar de favoritos' : 'Favorito', run: () => toggleFav(ids, !L.favs.has(it.id)) },
+      {icon:'tags',label:'Colores, etiquetas y marcas…',run:()=>AxonFileCatalog.edit(ids.map(id=>L.byId.get(id)?.p).filter(Boolean))},
       { icon: 'folder-plus', label: 'Agregar a colección…', run: () => addToCollection(ids) },
       { icon: 'folder-input', label: 'Mover a…', run: () => openMove(ids) },
       ...(ids.length === 1 ? [{ icon: 'pencil', label: 'Renombrar', run: () => renameItem(it) }] : []),
@@ -748,6 +800,7 @@
       ${nTool ? `<button class="btn-secondary" data-b="tools">${icon('wand-2')}<span>Optimizar</span></button>` : ''}
       ${nTr ? `<button class="btn-secondary lib-bw" data-b="tr">${icon('captions')}<span>Transcribir</span></button>` : ''}
       <button class="btn-secondary lib-bw" data-b="fav"${dis}>${icon('star')}<span>Favorito</span></button>
+      <button class="btn-secondary" data-b="organize"${dis}>${icon('tags')}<span>Organizar</span></button>
       <button class="btn-secondary lib-bw" data-b="col"${dis}>${icon('folder-plus')}<span>Colección</span></button>
       ${inCol ? `<button class="btn-secondary lib-bw" data-b="uncol"${dis}>${icon('folder-minus')}<span>Quitar</span></button>` : ''}
       <button class="btn-secondary lib-bw" data-b="move"${dis}>${icon('folder-input')}<span>Mover</span></button>
@@ -764,6 +817,7 @@
       if (a === 'tools') openTools(ids);
       if (a === 'tr') openTranscribe(ids);
       if (a === 'fav') toggleFav(ids, !ids.every((id) => L.favs.has(id)));
+      if(a==='organize')AxonFileCatalog.edit(ids.map(id=>L.byId.get(id)?.p).filter(Boolean));
       if (a === 'col') addToCollection(ids);
       if (a === 'uncol') removeFromCollection(ids);
       if (a === 'move') openMove(ids);
@@ -797,7 +851,7 @@
     const nRecent = L.items.filter((it) => it.m >= recentCut).length;
     const act = (type, value) => (v.type === type && (value === undefined || v.value === value) ? ' active' : '');
     const item = (type, value, ic, label, n) =>
-      `<button class="lib-nav${act(type, value)}" data-type="${type}" data-value="${esc(value ?? '')}">${icon(ic)}<span>${esc(label)}</span>${n != null ? `<em>${Number(n).toLocaleString('es-AR')}</em>` : ''}</button>`;
+      `<button class="lib-nav${act(type, value)}" title="${esc(type === 'folder' ? value : label)}" data-type="${type}" data-value="${esc(value ?? '')}">${icon(ic)}<span>${esc(label)}</span>${n != null ? `<em>${Number(n).toLocaleString('es-AR')}</em>` : ''}</button>`;
     const rootCounts = new Map();
     for (const it of L.items) {
       const r = rootOf(it.p);
@@ -808,23 +862,27 @@
       <div class="lib-side-sec">
         ${item('all', undefined, 'library', 'Todo', L.items.length)}
         ${item('recent', undefined, 'clock', 'Recientes', nRecent)}
-        ${item('fav', undefined, 'star', 'Favoritos', L.favs.size)}
+        ${item('fav', undefined, 'star', 'Favoritos', L.favs.size+L.directories.filter(p=>AxonFileCatalog.get(p).favorite).length)}
+        ${item('liked',undefined,'heart','Me gusta')}${item('saved',undefined,'bookmark','Guardados')}${item('pinned',undefined,'pin','Acceso rápido')}
         ${item('shares', undefined, 'link', 'Links compartidos', L.sharesCount)}
         ${item('dupes', undefined, 'copy', 'Duplicados')}
       </div>
+      <div class="lib-side-sec"><div class="lib-side-h">Accesos a carpetas</div>${AxonFileCatalog.entries().filter(r=>r.available&&r.metadata.pinned&&r.kind==='dir'&&roots.some(root=>r.path===root||r.path.startsWith(root+'/'))).slice(0,12).map(r=>item('folder',r.path,'pin',baseOf(r.path))).join('')||'<p class="lib-side-empty">Fijá una carpeta desde Organizar</p>'}</div>
+      <div class="lib-side-sec"><div class="lib-side-h">Etiquetas</div>${AxonFileCatalog.tags().map(t=>item('tag',t,'tag',t)).join('')||'<p class="lib-side-empty">Creá etiquetas desde Organizar</p>'}</div>
       <div class="lib-side-sec"><div class="lib-side-h">Tipos</div>
         ${KINDS.filter((k) => counts[k.k]).map((k) => item('kind', k.k, k.ic, k.label, counts[k.k])).join('')}
       </div>
       <div class="lib-side-sec"><div class="lib-side-h">Colecciones <button class="lib-side-add" id="lib-col-new" title="Nueva colección">${icon('plus')}</button></div>
         ${L.cols.length ? L.cols.map((c) => `<div class="lib-nav-wrap">${item('col', c.id, 'album', c.name, c.ids.length)}<button class="lib-nav-more" data-col="${c.id}" title="Opciones">${icon('more-horizontal')}</button></div>`).join('') : '<p class="lib-side-empty">Agrupá archivos de distintas carpetas sin moverlos</p>'}
       </div>
-      <div class="lib-side-sec"><div class="lib-side-h">Carpetas</div>
+      <div class="lib-side-sec"><div class="lib-side-h">Carpetas <button class="lib-side-add" id="lib-side-add-folder" title="Agregar carpeta" aria-label="Agregar carpeta a Biblioteca">${icon('folder-plus')}</button></div>
         ${roots.map((r) => item('folder', r, r === L.uploadRoot ? 'inbox' : 'hard-drive', baseOf(r) + (r === L.uploadRoot ? ' (subidas)' : ''), rootCounts.get(r) || 0)).join('')}
       </div>`;
     side.querySelectorAll('.lib-nav').forEach((b) => b.addEventListener('click', () => {
       const type = b.dataset.type;
       setView(type === 'all' || type === 'recent' || type === 'fav' || type === 'shares' ? { type } : { type, value: b.dataset.value });
     }));
+    $('#lib-side-add-folder')?.addEventListener('click', addFolder);
     $('#lib-col-new')?.addEventListener('click', async () => {
       const name = await promptModal('Nueva colección', '', 'Ej: Portfolio, Cliente X, Viaje…');
       if (!name) return;
@@ -899,7 +957,7 @@
 
   async function toggleFav(ids, on) {
     ids.forEach((id) => (on ? L.favs.add(id) : L.favs.delete(id)));
-    try { await api('/api/library/favorite', { method: 'POST', body: { ids, on } }); } catch (err) { ids.forEach((id) => (on ? L.favs.delete(id) : L.favs.add(id))); errToast(err); }
+    try { await AxonFileCatalog.patch(ids.map(id=>L.byId.get(id)?.p).filter(Boolean),{favorite:on}); } catch (err) { ids.forEach((id) => (on ? L.favs.delete(id) : L.favs.add(id))); errToast(err); }
     $$('#lib-body .lib-tile').forEach((el) => el.querySelector('.lib-fav')?.classList.toggle('on', L.favs.has(el.dataset.id)));
     renderSide();
     if (L.view.type === 'fav') render();
@@ -1246,7 +1304,7 @@
     }
     if (it.k === 'audio') return `<div class="lv-audio"><audio controls autoplay preload="metadata" aria-label="${esc(it.n)}" src="${f}"></audio><small class="lv-audio-status" role="status"></small></div>`;
     if (window.AxonDocumentViewer?.supports(it.n)) return '<div class="lv-document"></div>';
-    if (['txt', 'md'].includes(it.e)) return `<iframe class="lv-frame" src="${f}"></iframe>`;
+    if (it.e === 'txt') return `<iframe class="lv-frame" src="${f}"></iframe>`;
     return `<div class="lv-file">${icon(KIND[it.k]?.ic || 'file')}<b>${esc(it.e.toUpperCase())}</b><span>${esc(it.n)}</span><span>Este tipo de archivo no tiene vista previa</span>
       <a class="btn-primary" href="${f}&dl=1">${icon('download')} Descargar</a></div>`;
   }
@@ -1321,7 +1379,7 @@
     st.innerHTML = mediaHtml(it);
     if (window.AxonDocumentViewer?.supports(it.n)) {
       documentViewer = window.AxonDocumentViewer.mount(st.querySelector('.lv-document'), {
-        name: it.n, sourceUrl: mediaUrl(it), documentUrl: '/api/library/document/' + encodeURIComponent(it.id),
+        name: it.n, path: it.p, sourceUrl: mediaUrl(it), documentUrl: '/api/library/document/' + encodeURIComponent(it.id),
         downloadUrl: '/api/library/file/' + encodeURIComponent(it.id) + '?dl=1',
       });
     }
@@ -1462,13 +1520,14 @@
   }
 
   function onKey(e) {
-    if (!tabActive()) return;
+    if (!tabActive() || document.querySelector('dialog[open], :popover-open')) return;
     const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || '');
     const modalOpen = !$('#lib-modal').classList.contains('hidden');
     if (modalOpen) {
       if (e.key === 'Escape') closeModal();
       return;
     }
+    if (e.key === 'Escape' && $('#tab-library').classList.contains('side-open')) { toggleSide(false); $('#lib-side-toggle').focus(); e.preventDefault(); return; }
     const viewer = !$('#lib-viewer').classList.contains('hidden');
     if (viewer) {
       if(e.key==='Tab' && !$('#lib-viewer').classList.contains('lv-compact')){
@@ -2617,7 +2676,7 @@
 
   const libraryLocations = (()=>{try{const d=JSON.parse(localStorage.getItem('axon:library-locations:v1') || '{}');return d && typeof d==='object' && !Array.isArray(d)?d:{};}catch{return {};}})();
   function libraryParams() {
-    return { type:L.view.type, value:L.view.value || null, q:L.q || null, view:L.layout, sort:L.sort, group:L.group,
+    return { color:L.catalogColor||null,tag:L.catalogTag||null,kind:L.catalogKind||null,type:L.view.type, value:L.view.value || null, q:L.q || null, view:L.layout, sort:L.sort, group:L.group,
       item:!$('#lib-viewer')?.classList.contains('hidden') ? vItemId : null };
   }
   function captureLibrary() {
@@ -2629,9 +2688,10 @@
   }
   async function restoreLibrary(params,snap) {
     ensureDom();
+    toggleSide(false);
     closeViewer(false);
-    L.view={type:['all','recent','fav','kind','col','folder','shares','dupes'].includes(params.type)?params.type:'all',value:params.value || ''};
-    L.q=params.q || '';
+    L.view={type:['all','recent','fav','liked','saved','pinned','tag','kind','col','folder','shares','dupes'].includes(params.type)?params.type:'all',value:params.value || ''};
+    L.q=params.q || '';L.catalogColor=params.color||'';L.catalogTag=params.tag||'';L.catalogKind=['file','dir'].includes(params.kind)?params.kind:'';
     if(['grid','list'].includes(params.view))L.layout=params.view;
     if(['date-desc','date-asc','name-asc','name-desc','size-desc','size-asc','kind'].includes(params.sort))L.sort=params.sort;
     if(['month','day','year','folder','kind','none'].includes(params.group))L.group=params.group;

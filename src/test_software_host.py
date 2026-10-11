@@ -65,6 +65,24 @@ class NativeContract(unittest.TestCase):
             host.local_executables(rows,{"uid":42,"user":"any","home":tmp}, {},sources,systemdir=None)
             self.assertEqual(rows[0]["packageName"],"not-in-any-catalog");self.assertEqual(rows[0]["updateState"],"unmanaged");self.assertFalse(marker.exists());self.assertFalse(rows[0]["canUpdate"])
 
+    def test_dangling_global_executable_is_visible_instead_of_silently_disappearing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory=pathlib.Path(tmp)/".local/bin";directory.mkdir(parents=True)
+            (directory/"wrangler").symlink_to("../lib/node_modules/wrangler/bin/wrangler.js")
+            rows,sources=[],[]
+            host.local_executables(rows,{"uid":42,"user":"any","home":tmp},{},sources,systemdir=None)
+            self.assertEqual(rows[0]["packageName"],"wrangler");self.assertIn("Acceso roto",rows[0]["reason"]);self.assertFalse(rows[0]["canUpdate"])
+
+    def test_selected_manager_scan_does_not_wait_for_other_repositories(self):
+        ctx={"uid":42,"user":"any","home":"/srv/home","env":{}}
+        def command(argv,*a,**k):
+            self.assertEqual(argv[0],"pacman")
+            return "tool 1.0\n" if argv[1]=="-Q" else "tool 1.0 -> 2.0\n"
+        with patch.object(host,"context",return_value=ctx),patch.object(host,"tool",side_effect=lambda name,*a:'/bin/'+name),patch.object(host,"command",side_effect=command):
+            result=host.scan({"user":"any","managers":["pacman"],"updates":True})
+        self.assertEqual(len(result["sources"]),1)
+        self.assertEqual(result["installations"][0]["targetVersion"],"2.0")
+
     def test_icons_use_inherited_themes_and_do_not_escape_allowed_roots(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=pathlib.Path(tmp);(root/"custom").mkdir();(root/"hicolor/scalable/apps").mkdir(parents=True)

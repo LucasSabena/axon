@@ -111,7 +111,7 @@ export class CloudAgents {
   }
   private publicUpload(u:Upload){const {sealed,inflight,last,connectionId,owner,credentialId,...result}=u;return {...result,chunkSize:UPLOAD_CHUNK};}
   retireCredentials(){
-    const active=new Set(this.store.tokens().filter(t=>!t.revoked&&t.expiresAt>Date.now()).map(t=>t.id));
+    const active=new Set(this.store.tokens().filter(t=>!t.revoked&&!t.paused&&t.expiresAt>Date.now()).map(t=>t.id));
     for(const u of this.store.list<Upload>(KIND))if(['starting','running'].includes(u.state)&&!active.has(u.credentialId)){u.state='cancelled';u.error='El token fue revocado o venció. No se publicó el archivo.';this.save(u);this.clearBlocks(u.id);this.store.append({actor:u.owner,credentialId:u.credentialId,action:'cloud.upload.credential-expired',resource:u.provider+':'+u.path,status:'interrupted',operationId:u.id});}
   }
   ownerUploads(owner:string,provider:string){this.retireCredentials();return this.store.list<Upload>(KIND).filter(u=>u.owner===owner&&u.provider===provider).slice(0,20).map(u=>this.publicUpload(u));}

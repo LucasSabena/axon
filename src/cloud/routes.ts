@@ -8,6 +8,7 @@ import { CloudDownloads } from './downloads';
 import { Drive } from './drive';
 import type { CloudProvider } from './provider';
 import type { CloudAgents } from './agents';
+import { CloudFileCatalog } from './file-catalog';
 
 const INLINE:Record<string,string>={png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',gif:'image/gif',webp:'image/webp',avif:'image/avif',bmp:'image/bmp',pdf:'application/pdf',mp4:'video/mp4',webm:'video/webm',m4v:'video/mp4',mp3:'audio/mpeg',m4a:'audio/mp4',ogg:'audio/ogg',oga:'audio/ogg',wav:'audio/wav',flac:'audio/flac',opus:'audio/ogg'};
 export function registerDropboxRoutes(app:Hono,store:PlatformStore,vaultDir:string,provider?:Dropbox) {
@@ -32,6 +33,7 @@ export function registerCloudRoutes(app:Hono,store:PlatformStore,vaultDir:string
 }
 function registerProviderRoutes(app:Hono,store:PlatformStore,id:ProviderId,dropbox:CloudProvider,downloads:CloudDownloads) {
   const PREFIX='/api/files/'+id;
+  const catalog=new CloudFileCatalog(store);
   protect(app,PREFIX);
   app.get(PREFIX+'/status',c=>c.json({ok:true,...dropbox.status(actor(c).actorId),visible:visible(store,actor(c).actorId,id),redirectUri:requestOrigin(c)+PREFIX+'/oauth/callback'}));
   app.post(PREFIX+'/configure',async c=>{const b=await body(c);only(b,id==='dropbox'?['clientId']:['clientId','clientSecret']);if(id==='dropbox')(dropbox as Dropbox).configure(actor(c).actorId,b.clientId);else(dropbox as Drive).configure(actor(c).actorId,b.clientId,b.clientSecret);return c.json({ok:true});});
@@ -58,9 +60,13 @@ function registerProviderRoutes(app:Hono,store:PlatformStore,id:ProviderId,dropb
   }
   app.get(PREFIX+'/list',async c=>{
     const owner=actor(c).actorId,source=c.req.query('location')||'account',p=c.req.query('path')||'';
-    const page=await dropbox.list(owner,source,p,c.req.query('cursor'));
-    return c.json({ok:true,path:p,...page,...(id!=='dropbox'&&!c.req.query('cursor')?{breadcrumbs:await (dropbox as Drive).breadcrumbs(owner,p)}:{})});
+    const connection=dropbox.connectionIdentity?.(owner)||'',page=await dropbox.list(owner,source,p,c.req.query('cursor'));
+    if(connection!==(dropbox.connectionIdentity?.(owner)||''))throw new MaintenanceError('La conexión cambió. Volvé a abrir la carpeta.',409);
+    const metadata=new Map(catalog.list(owner,id,connection,source).map(r=>[r.path,r.metadata]));
+    return c.json({ok:true,path:p,...page,entries:page.entries.map(e=>({...e,organization:metadata.get(e.path)})),...(id!=='dropbox'&&!c.req.query('cursor')?{breadcrumbs:await (dropbox as Drive).breadcrumbs(owner,p)}:{})});
   });
+  app.get(PREFIX+'/organization',c=>{const owner=actor(c).actorId,source=c.req.query('location')||'account';if(!dropbox.status(owner).connected||!dropbox.status(owner).sources.some(s=>s.id===source))throw new MaintenanceError('La ubicación no está disponible',409);return c.json({ok:true,entries:catalog.list(owner,id,dropbox.connectionIdentity?.(owner)||'',source)});});
+  app.patch(PREFIX+'/organization',async c=>{const value=await body(c);only(value,['location','paths','patch']);try{return c.json({ok:true,entries:await catalog.patch(actor(c).actorId,id,dropbox,value.location||'account',value.paths,value.patch)});}catch(e:any){if(e.status)return c.json({ok:false,error:e.message},e.status);throw e;}});
   app.get(PREFIX+'/stream',async c=>{
     const owner=actor(c).actorId,source=c.req.query('location')||'account',p=c.req.query('path')||'';
     const m=await dropbox.metadata(owner,source,p);if(m.type!=='file'||!m.downloadable)throw new MaintenanceError('Este contenido requiere abrirse o exportarse desde su plataforma',409);

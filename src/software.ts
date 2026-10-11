@@ -3,7 +3,7 @@ import path from 'node:path';
 import {constants} from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Hono } from 'hono';
-import { HOST_USER, hostExec, hostToContainer } from './host';
+import { HOST_USER, hostExec, hostSpawn, hostToContainer } from './host';
 import { runJob, runningJobs, type JobStep } from './jobs';
 import {softwareIcons,type IconInfo} from './software-icons';
 import {bodyLimit} from 'hono/body-limit';
@@ -20,10 +20,11 @@ export interface SoftwareInstallation {
   iconName?:string;iconInfo?:IconInfo;sourceName?:string;homepage?:string;projectName?:string;
   canUpdate:boolean; updateState:string; reason:string; ignored?:boolean; targetVersion?:string; targetCommit?:string; targetRevision?:string;
 }
-export interface SoftwareSnapshot {ok:true; installations:SoftwareInstallation[]; sources:SoftwareSource[]; checkedAt:number; user:string; home:string; canAdministerSystem:boolean; checking?:boolean; error?:string}
+export interface SoftwareSnapshot {ok:true; installations:SoftwareInstallation[]; sources:SoftwareSource[]; checkedAt:number; user:string; home:string; canAdministerSystem:boolean; checking?:boolean; loading?:boolean; revision?:number; error?:string}
 export interface SoftwareTransaction {manager:string;scope:string;user:string;root:string;items:SoftwareInstallation[];argv:string[];effects:string;simulation:{complete:boolean;changes:{packageName:string;targetVersion:string}[];removals:string[]}}
 export interface SoftwarePlan {ok:true;id?:string;createdAt:number;expiresAt?:number;transactions:SoftwareTransaction[]}
-type Runner = (req:Record<string,unknown>)=>Promise<any>;
+type Progress = (source:SoftwareSource, rows:SoftwareInstallation[])=>void;
+type Runner = (req:Record<string,unknown>, progress?:Progress)=>Promise<any>;
 const DATA = path.dirname(process.env.CONFIG_PATH || '/app/data/config.json');
 const shq=(s:string)=>`'${s.replace(/'/g,`'"'"'`)}'`;
 const digest=(s:string)=>createHash('sha256').update(s).digest('hex');
@@ -32,10 +33,24 @@ const validPackage=(s:string)=>/^(?:@[a-z0-9._-]+\/)?[a-z0-9][a-z0-9._-]*$/i.tes
 let script:Promise<string>|undefined;
 // A rejected read must not poison the cache — reset so the next call retries.
 const scriptText=()=>script ||= readFile(new URL('./software-host.py',import.meta.url),'utf8').catch(e=>{script=undefined;throw e;});
-export async function nativeSoftwareRunner(request:Record<string,unknown>) {
+export async function nativeSoftwareRunner(request:Record<string,unknown>, progress?:Progress) {
   if(Array.isArray(request.items))request={...request,items:request.items.map(p=>({id:p.id,version:p.version,targetVersion:p.targetVersion,targetRevision:p.targetRevision,targetCommit:p.targetCommit}))};
-  const encoded=Buffer.from(JSON.stringify(request)).toString('base64');
+  const encoded=Buffer.from(JSON.stringify({...request,...(progress?{stream:true}:{})})).toString('base64');
   if(encoded.length>70000)throw new Error('El plan es demasiado grande; seleccioná menos instalaciones');
+  if(progress){
+    const proc=hostSpawn(`python3 -c ${shq(await scriptText())} ${shq(encoded)}`,{user:'root',timeoutSec:180});
+    const stderr=new Response(proc.stderr as ReadableStream<Uint8Array>).text();
+    const reader=(proc.stdout as ReadableStream<Uint8Array>).getReader(),decoder=new TextDecoder();let buffer='',parsed:any;
+    try {
+      for(;;){const chunk=await reader.read();if(chunk.done)break;buffer+=decoder.decode(chunk.value,{stream:true});if(buffer.length>32*1024*1024)throw Error('Inventario demasiado grande');
+        let end;while((end=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,end);buffer=buffer.slice(end+1);if(!line.trim())continue;const value=JSON.parse(line);if(value.event==='source')progress(value.source,value.installations);else parsed=value;}
+      }
+      if(buffer.trim())parsed=JSON.parse(buffer);
+      const code=await proc.exited;await stderr;
+      if(code!==0||!parsed?.ok)throw Error(parsed?.error||'No se pudo completar la lectura del host');
+      return parsed;
+    }catch(e){proc.kill();await stderr;throw e;}
+  }
   const result=await hostExec(`python3 -c ${shq(await scriptText())} ${shq(encoded)}`,{user:'root',timeoutMs:180_000});
   let parsed:any;
   try {parsed=JSON.parse(result.stdout);} catch {throw new Error('La lectura del inventario del host no pudo completarse');}
@@ -121,24 +136,44 @@ export class SoftwareService {
   private updates?:Promise<void>;
   private generation=0;
   private checked=0;
+  private revision=0;
+  private lastError?:string;
   private plans=new Map<string,{plan:SoftwarePlan;config:SoftwareConfig}>();
   constructor(private run:Runner=nativeSoftwareRunner,private config=softwareConfig,private integrationLoader=integrations,private metadata=registryMetadata,private saveConfig:typeof writeSoftwareConfig=writeSoftwareConfig){}
-  invalidate(){this.generation++;this.flight=undefined;this.updates=undefined;this.checked=0;/* Retain the last snapshot on read failure. */}
+  invalidate(){this.generation++;this.flight=undefined;this.updates=undefined;this.checked=0;this.lastError=undefined;/* Retain the last snapshot on read failure. */}
   refreshIcons(){if(this.snapshot){softwareIcons.learnNative(this.snapshot.installations);for(const row of this.snapshot.installations){row.iconInfo=softwareIcons.describe(row);row.iconUrl='/api/software/icons/'+encodeURIComponent(row.id)+'?v='+row.iconInfo.version;}}}
+  // HTTP reads never wait for slow host/remote discovery. Internal callers
+  // (plans, execution, store) continue to await get()/settled().
+  status(fresh=false):SoftwareSnapshot {
+    if(fresh&&!this.flight&&!this.updates){this.invalidate();this.lastError=undefined;}
+    if(!this.lastError)void this.get().catch(error=>{this.lastError=error.message;this.revision++;});
+    return {...(this.snapshot||{ok:true,installations:[],sources:[],checkedAt:0,user:HOST_USER,home:'',canAdministerSystem:false}),...(this.lastError?{error:this.lastError}:{}),loading:!!this.flight,checking:!!this.flight||!!this.updates,revision:this.revision};
+  }
+  cachedRow(id:string){return this.snapshot?.installations.find(p=>p.id===id);}
   async get(fresh=false):Promise<SoftwareSnapshot>{
+    if(fresh&&this.flight)return this.flight;
     if(fresh)this.invalidate();
+    if(this.flight)return this.flight;
     if(!fresh&&this.snapshot&&Date.now()-this.snapshot.checkedAt<60000){this.check();return {...this.snapshot,checking:!!this.updates};}
     if(!this.flight){
       const generation=this.generation;
       const previous=this.snapshot;
-      const flight=this.read(false).then(snapshot=>{
+      const flight=this.read(false,(source,rows)=>{
+        if(generation!==this.generation)return;
+        const base=this.snapshot||{ok:true as const,installations:[],sources:[],checkedAt:0,user:HOST_USER,home:'',canAdministerSystem:false};
+        const old=new Map(base.installations.map(p=>[p.id,p]));
+        for(const row of rows){const prior=old.get(row.id);if(prior?.version===row.version&&prior.updateState!=='held'&&row.updateState!=='held'&&JSON.stringify(prior.policy)===JSON.stringify(row.policy)&&source.complete&&!source.error&&Date.now()-this.checked<300000)Object.assign(row,{canUpdate:prior.canUpdate,updateState:prior.updateState,reason:prior.reason,targetVersion:prior.targetVersion,targetCommit:prior.targetCommit,targetRevision:prior.targetRevision});}
+        const retained=base.installations.filter(p=>p.sourceId!==source.id||(!source.complete||source.error)&&!rows.some(r=>r.id===p.id)).map(p=>p.sourceId===source.id?{...p,canUpdate:false,updateState:'error',reason:source.error||'Se conserva la última lectura'}:p);
+        this.snapshot={...base,installations:[...retained,...rows],sources:[...base.sources.filter(s=>s.id!==source.id),source]};this.revision++;
+      }).then(snapshot=>{
         if(previous){
           const failed=new Set(snapshot.sources.filter(s=>s.available&&(!s.complete||s.error)).map(s=>s.id));
           for(const old of previous.installations)if(failed.has(old.sourceId)&&!snapshot.installations.some(p=>p.id===old.id))snapshot.installations.push({...old,canUpdate:false,updateState:'error',reason:'La fuente falló; se conserva la última lectura'});
         }
         if(previous && Date.now()-this.checked<300000){
+          const oldRows=new Map(previous.installations.map(p=>[p.id,p])),sources=new Map(snapshot.sources.map(s=>[s.id,s]));
           for(const row of snapshot.installations){
-            const old=previous.installations.find(p=>p.id===row.id),source=snapshot.sources.find(s=>s.id===row.sourceId);
+            const old=oldRows.get(row.id),source=sources.get(row.sourceId!);
             // Held rows (fresh cfg.ignored applied in read(), or carried from
             // a previous hold) keep their own state — copying over them would
             // briefly resurrect a stale "update available" marker.
@@ -147,48 +182,74 @@ export class SoftwareService {
             }
           }
         }
-        if(generation===this.generation){this.snapshot=snapshot;this.check();}
+        if(generation===this.generation){this.snapshot=snapshot;this.lastError=undefined;this.revision++;this.check();}
         return {...snapshot,checking:generation===this.generation&&!!this.updates};
-      }).catch(error=>{if(!this.snapshot)throw error;return {...this.snapshot,error:error.message,checking:false};}).finally(()=>{if(this.flight===flight)this.flight=undefined;});
+      }).catch(error=>{if(generation===this.generation){this.lastError=error.message;this.revision++;if(this.snapshot)this.snapshot={...this.snapshot,error:error.message};}if(!this.snapshot)throw error;return {...this.snapshot,error:error.message,checking:false};}).finally(()=>{if(this.flight===flight)this.flight=undefined;});
       this.flight=flight;
     }
     return this.flight;
   }
-  private async read(updates:boolean):Promise<SoftwareSnapshot>{
+  private async read(updates:boolean,progress?:Progress,managers?:string[]):Promise<SoftwareSnapshot>{
     const cfg=await this.config(), integration=await this.integrationLoader(), users=[...new Set([HOST_USER,...(cfg.users||[])])];
     let combined:SoftwareSnapshot;
     for(const user of users){
-      const value:SoftwareSnapshot=await this.run({action:'scan',user,settings:cfg.contexts?.[user]||{},integrations:integration,updates});
+      const value:SoftwareSnapshot=await this.run({action:'scan',user,settings:cfg.contexts?.[user]||{},integrations:integration,updates,...(managers?{managers}:{})},progress?(source,rows)=>{this.decorate(rows,cfg);progress(source,rows);}:undefined);
       if(!value?.ok||!Array.isArray(value.installations)||!Array.isArray(value.sources))throw new Error('Inventario inválido');
       if(!combined)combined=value;
       else {combined.installations=[...new Map([...combined.installations,...value.installations].map(p=>[p.id,p])).values()];combined.sources=[...new Map([...combined.sources,...value.sources].map(p=>[p.id,p])).values()];}
     }
-    softwareIcons.learnNative(combined!.installations);
-    for(const row of combined!.installations){
+    if(!updates)softwareIcons.learnNative(combined!.installations);
+    this.decorate(combined!.installations,cfg);
+    return combined!;
+  }
+  private decorate(rows:SoftwareInstallation[],cfg:SoftwareConfig){
+    for(const row of rows){
       row.iconInfo=softwareIcons.describe(row);
       row.iconUrl='/api/software/icons/'+encodeURIComponent(row.id)+'?v='+row.iconInfo.version;
       if(cfg.ignored?.includes(row.id)){row.canUpdate=false;row.updateState='held';row.ignored=true;row.reason='Retenido en la configuración local de AXON';}
     }
-    return combined!;
   }
   private check(){
     if(this.updates||!this.snapshot||Date.now()-this.checked<300000)return;
     const generation=this.generation,previous=this.snapshot;
-    const flight=this.read(true).then(async next=>{
-      const failed=new Set(next.sources.filter(s=>!s.complete||s.updateState==='error').map(s=>s.id));
-      for(const old of previous.installations)if(failed.has(old.sourceId)&&!next.installations.some(p=>p.id===old.id))next.installations.push({...old,canUpdate:false,updateState:'error',reason:'No se pudo comprobar esta fuente; se conserva la última lectura'});
-      for(const row of next.installations)if(failed.has(row.sourceId)){row.canUpdate=false;row.updateState='error';row.reason=next.sources.find(s=>s.id===row.sourceId)?.error||'No se pudo comprobar esta fuente';}
-      const globals=next.installations.filter(p=>['pnpm','bun'].includes(p.manager)&&!failed.has(p.sourceId)&&!['held','unmanaged'].includes(p.updateState));
-      let cursor=0;
-      await Promise.all(Array.from({length:Math.min(4,globals.length)},async()=>{
-        while(cursor<globals.length){const row=globals[cursor++];
+    const oldRows=new Map(previous.installations.map(p=>[p.id,p]));
+    const tasks=new Map<string,Promise<SoftwareInstallation>>();
+    let active=0;const waiters:(()=>void)[]=[];
+    const publish=(source:SoftwareSource,rows:SoftwareInstallation[])=>{
+      if(generation!==this.generation)return;
+      const base=this.snapshot!;
+      const ids=new Set(rows.map(p=>p.id));
+      const retained=base.installations.filter(p=>p.sourceId!==source.id||(!source.complete||source.error)&&!ids.has(p.id)).map(p=>p.sourceId===source.id?{...p,canUpdate:false,updateState:'error',reason:source.error||'Se conserva la última lectura'}:p);
+      this.snapshot={...base,installations:[...retained,...rows],sources:[...base.sources.filter(s=>s.id!==source.id),source]};this.revision++;
+    };
+    const prepare=(source:SoftwareSource,rows:SoftwareInstallation[])=>{
+      const failed=!source.complete||source.updateState==='error';
+      for(const row of rows){
+        const old=oldRows.get(row.id);
+        // Update-only scans do not repeat desktop/icon discovery.
+        if(old)for(const key of ['name','description','applicationId','desktopFile','iconFile','iconSource','iconName','iconInfo','iconUrl'] as const)if(old[key]!==undefined)(row as any)[key]=old[key];
+        if(failed){row.canUpdate=false;row.updateState='error';row.reason=source.error||'No se pudo comprobar esta fuente';}
+        if(!['pnpm','bun'].includes(row.manager)||failed||['held','unmanaged'].includes(row.updateState))continue;
+        if(!tasks.has(row.id))tasks.set(row.id,(async()=>{
+          if(active>=4)await new Promise<void>(resolve=>waiters.push(resolve));else active++;
           try {const data=await this.metadata(row.packageName),candidate=registryCandidate(data,row);row.targetVersion=candidate||undefined;row.canUpdate=!!candidate&&!!row.version&&compareVersions(candidate,row.version)>0;row.updateState=!row.version||!/^\d+\.\d+\.\d+/.test(row.version)?'unmanaged':row.canUpdate?'available':'current';row.reason=row.canUpdate?'':candidate?'Sin actualizaciones permitidas por la política del gestor':'No hay versiones que cumplan la política de publicación';}
           catch(error:any){row.canUpdate=false;row.updateState='error';row.reason=error.message;}
-        }
-      }));
+          finally{const next=waiters.shift();if(next)next();else active--;}
+          if(generation===this.generation){const current=this.snapshot!.installations.find(p=>p.id===row.id);if(current)Object.assign(current,row);this.revision++;}
+          return row;
+        })());
+      }
+    };
+    const flight=this.read(true,(source,rows)=>{prepare(source,rows);publish(source,rows);}).then(async next=>{
+      for(const source of next.sources)prepare(source,next.installations.filter(p=>p.sourceId===source.id));
+      const resolved=new Map((await Promise.all(tasks.values())).map(p=>[p.id,p]));
+      next.installations=next.installations.map(p=>resolved.get(p.id)||p);
+      const failed=new Set(next.sources.filter(s=>!s.complete||s.updateState==='error').map(s=>s.id));
+      const ids=new Set(next.installations.map(p=>p.id));
+      for(const old of previous.installations)if(failed.has(old.sourceId!)&&!ids.has(old.id))next.installations.push({...old,canUpdate:false,updateState:'error',reason:'No se pudo comprobar esta fuente; se conserva la última lectura'});
       for(const source of next.sources.filter(s=>['pnpm','bun'].includes(s.manager)&&!failed.has(s.id))){source.updateState=next.installations.some(p=>p.sourceId===source.id&&p.updateState==='error')?'error':'ok';if(source.updateState==='error')source.error='No se pudieron comprobar todas las versiones del registro';}
-      if(generation===this.generation){this.snapshot=next;this.checked=Date.now();}
-    }).catch(error=>{if(generation===this.generation){this.snapshot={...previous,error:error.message};this.checked=Date.now();}}).finally(()=>{if(this.updates===flight)this.updates=undefined;});
+      if(generation===this.generation){this.snapshot=next;this.checked=Date.now();this.revision++;}
+    }).catch(error=>{if(generation===this.generation){this.snapshot={...this.snapshot!,error:error.message};this.checked=Date.now();this.revision++;}}).finally(()=>{if(this.updates===flight)this.updates=undefined;});
     this.updates=flight;
   }
   async settled(){await this.get();await this.updates;return {...this.snapshot!,checking:!!this.updates};}
@@ -207,8 +268,21 @@ export class SoftwareService {
   }
   async plan(ids:string[]):Promise<SoftwarePlan>{
     if(!Array.isArray(ids)||!ids.length||ids.length>200||ids.some(id=>typeof id!=='string'))throw new Error('Seleccioná entre 1 y 200 instalaciones');
-    await this.get(true);await this.updates;
-    const snapshot=await this.get(),cfg=await this.config();
+    let known=await this.get();
+    if(ids.some(id=>known.installations.find(p=>p.id===id)?.updateState==='unchecked')){await this.updates;known=this.snapshot!;}
+    const requested=[...new Set(ids)].map(id=>known.installations.find(p=>p.id===id));
+    if(known.error||requested.some(p=>!p?.canUpdate))throw new Error('Alguna instalación no tiene una actualización gestionada disponible');
+    // Revalidate selected managers only. An unrelated repository cannot make
+    // reviewing one global tool wait for a full-host scan.
+    const snapshot=await this.read(true,undefined,[...new Set(requested.map(p=>p!.manager))]),cfg=await this.config();
+    const sources=new Map(snapshot.sources.map(s=>[s.id,s]));
+    for(const row of snapshot.installations.filter(p=>ids.includes(p.id))){
+      const source=sources.get(row.sourceId!);
+      if(!source?.complete||source.error){row.canUpdate=false;continue;}
+      if(['pnpm','bun'].includes(row.manager)&&!['held','unmanaged'].includes(row.updateState)){
+        const target=registryCandidate(await this.metadata(row.packageName),row);row.targetVersion=target||undefined;row.canUpdate=!!target&&!!row.version&&compareVersions(target,row.version)>0;
+      }
+    }
     if(snapshot.error)throw new Error('No se puede planificar con un inventario fallido');
     const items=[...new Set(ids)].map(id=>snapshot.installations.find(p=>p.id===id));
     if(items.some(p=>!p?.canUpdate))throw new Error('Alguna instalación no tiene una actualización gestionada disponible');
@@ -267,10 +341,10 @@ export function registerSoftwareRoutes(app:Hono, service=software) {
   }catch(e:any){return c.json({ok:false,error:'No se pudo guardar el icono: '+e.message},400);}});
   app.get('/api/software/icons-status',async c=>{c.header('Cache-Control','private, no-store');return c.json({ok:true,...softwareIcons.status((await service.get()).installations)});});
   app.post('/api/software/icons-sync',async c=>{try{await softwareIcons.refresh();const result=await softwareIcons.warm((await service.get()).installations);service.invalidate();return c.json({ok:true,...result,...softwareIcons.status()});}catch(e:any){return c.json({ok:false,error:'No se pudieron renovar los iconos: '+e.message},503);}});
-  app.get('/api/software',async c=>{softwareIcons.autoRefresh();try{return c.json(await service.get(c.req.query('fresh')==='1'));}catch(e:any){return c.json({ok:false,error:e.message},503);}});
+  app.get('/api/software',async c=>{c.header('Cache-Control','private, no-store');softwareIcons.autoRefresh();try{return c.json(service.status(c.req.query('fresh')==='1'));}catch(e:any){return c.json({ok:false,error:e.message},503);}});
   app.post('/api/software/plan',async c=>{try{const body=await c.req.json();return c.json({ok:true,plan:await service.plan(body.ids)});}catch(e:any){return c.json({ok:false,error:e.message},409);}});
   app.put('/api/software/:id/ignore',async c=>{try{const body=await c.req.json().catch(()=>null);if(typeof body?.ignored!=='boolean')throw new Error('Indicá ignored:true o ignored:false');const row=await service.setIgnored(c.req.param('id'),body.ignored);return c.json({ok:true,ignored:body.ignored,updateState:row?.updateState});}catch(e:any){return c.json({ok:false,error:e.message},409);}});
   app.post('/api/software/execute',async c=>{try{const body=await c.req.json();return c.json({ok:true,job:await service.execute(body.planId)});}catch(e:any){return c.json({ok:false,error:e.message},409);}});
   app.post('/api/software/refresh-indices',async c=>{try{const snapshot=await service.get();if(!snapshot.canAdministerSystem||!snapshot.sources.some(s=>s.manager==='apt'&&s.available))throw new Error('No hay índices APT gestionables en este host');const cmd=await softwareCommand({action:'refresh',user:HOST_USER});return c.json({ok:true,job:runSoftwareJob('Actualizar índices APT',[{label:'Consultar repositorios sin instalar paquetes',cmd,user:'root',group:'software:apt'}])});}catch(e:any){return c.json({ok:false,error:e.message},409);}});
-  app.get('/api/software/icons/:id',async c=>{const snapshot=await service.get(),row=snapshot.installations.find(p=>p.id===c.req.param('id'));return row?softwareIcon(row):c.json({ok:false,error:'Instalación desconocida'},404);});
+  app.get('/api/software/icons/:id',async c=>{const id=c.req.param('id'),row=service.cachedRow(id)||(await service.get()).installations.find(p=>p.id===id);return row?softwareIcon(row):c.json({ok:false,error:'Instalación desconocida'},404);});
 }

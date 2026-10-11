@@ -19,6 +19,9 @@ export interface IssuedSession {
   ua: string;
   created: number;   // epoch ms
   lastSeen: number;  // epoch ms
+  expiresAt?: number;
+  ip?: string;
+  name?: string;
 }
 
 const FILE = path.join(
@@ -56,6 +59,9 @@ function loadSync(): void {
           ua: String(s.ua || ''),
           created: s.created,
           lastSeen: Number.isFinite(s.lastSeen) ? s.lastSeen : s.created,
+          expiresAt: Number.isFinite(s.expiresAt) ? s.expiresAt : s.created + 7 * 86400000,
+          ip: String(s.ip || '').slice(0, 64),
+          name: String(s.name || '').slice(0, 80),
         });
       }
     }
@@ -139,7 +145,7 @@ function normalizeId(jtiOrToken: string | null | undefined): string | null {
 //   recordSession(sessionIdForToken(token), username, c.req.header('user-agent'))
 // Best long-term fix: add `jti: crypto.randomUUID()` to the payload in
 // auth.ts createSession() so revoking doesn't depend on token hashing.
-export async function recordSession(jtiOrToken: string, username: string, ua: string): Promise<void> {
+export async function recordSession(jtiOrToken: string, username: string, ua: string, ip = ''): Promise<void> {
   const jti = normalizeId(jtiOrToken);
   if (!jti) return;
   const now = Date.now();
@@ -150,6 +156,9 @@ export async function recordSession(jtiOrToken: string, username: string, ua: st
     ua: String(ua || '').slice(0, 300),
     created: existing?.created ?? now,
     lastSeen: now,
+    expiresAt: existing?.expiresAt ?? tokenExpiry(jtiOrToken) ?? now + 7 * 86400000,
+    ip: ip.slice(0, 64),
+    name: existing?.name || '',
   });
   // Recording activity must never undo an existing revocation.
   await flushSessions();
@@ -157,21 +166,48 @@ export async function recordSession(jtiOrToken: string, username: string, ua: st
 
 // Update lastSeen — call from the auth middleware on each request. The write
 // is debounced so per-request cost is just a map write.
-export function touchSession(jtiOrToken: string): void {
+function tokenExpiry(token: string): number | null {
+  try { const exp = JSON.parse(atob(token.split('.')[0])).exp; return Number.isFinite(exp) ? exp * 1000 : null; } catch { return null; }
+}
+
+// Details are supplied only after signature verification, including legacy
+// cookies minted before the registry existed. Never bootstrap unverified IDs.
+export function touchSession(jtiOrToken: string, details?: { username: string; expiresAt: number; ua: string; ip: string }): void {
   const jti = normalizeId(jtiOrToken);
   if (!jti) return;
-  const s = issued.get(jti);
-  if (!s) return; // don't resurrect unknown/expired sessions
+  let s = issued.get(jti);
+  if (revokedHas(jti)) return;
+  if (!s && details && details.expiresAt > Date.now()) {
+    s = { jti, username: details.username, ua: details.ua.slice(0, 300), ip: details.ip.slice(0, 64), expiresAt: details.expiresAt, created: Math.max(0, details.expiresAt - 7 * 86400000), lastSeen: Date.now() };
+    issued.set(jti, s); saveSoon();
+  }
+  if (!s) return;
   const now = Date.now();
-  if (now - s.lastSeen < 60_000) return; // cheap throttle: one bump per minute
+  const changed = details && (s.ip !== details.ip || s.expiresAt !== details.expiresAt);
+  if (now - s.lastSeen < 60_000 && !changed) return;
   s.lastSeen = now;
+  if (details) { s.ip = details.ip.slice(0, 64); s.expiresAt = details.expiresAt; }
   saveSoon();
 }
 
 // A deny entry only matters while its token could still verify: issued
 // entries carry the mint time, anything else gets the full max age.
 function revokedExpiry(jti: string): number {
-  return (issued.get(jti)?.created ?? Date.now()) + ISSUED_MAX_AGE_MS;
+  return issued.get(jti)?.expiresAt ?? (issued.get(jti)?.created ?? Date.now()) + ISSUED_MAX_AGE_MS;
+}
+
+const revokeListeners = new Set<(id: string) => void>();
+export function onSessionRevoked(listener: (id: string) => void): () => void {
+  revokeListeners.add(listener); return () => revokeListeners.delete(listener);
+}
+function denySession(jti: string): void {
+  revoked.set(jti, revokedExpiry(jti));
+  for (const listener of revokeListeners) { try { listener(jti); } catch { /* denial must survive a disconnected socket */ } }
+}
+export async function revokeOtherSessions(current: string): Promise<number> {
+  pruneIssued(); let count = 0;
+  for (const s of issued.values()) if (s.jti !== current && !revokedHas(s.jti) && (s.expiresAt ?? s.created + 7 * 86400000) > Date.now()) { denySession(s.jti); count++; }
+  await flushSessions(); return count;
 }
 
 // Drop deny entries whose token can't be valid anymore. A revocation for a
@@ -201,7 +237,7 @@ export async function revokeSession(jtiOrToken: string): Promise<void> {
     // grows past the cap; correctness beats the memory bound.
     pruneRevoked();
   }
-  revoked.set(jti, revokedExpiry(jti));
+  denySession(jti);
   await flushSessions();
 }
 
@@ -245,13 +281,17 @@ export function registerSessionRoutes(app: Hono): void {
     return c.json({
       ok: true,
       sessions: listSessions().issued.map((s) => ({
-        jti: s.jti.slice(0, 12), // short prefix only — never token material
+        jti: s.jti, // opaque registry ID; never the signed cookie
         username: s.username,
         ua: s.ua,
         created: s.created,
         lastSeen: s.lastSeen,
         revoked: revokedHas(s.jti),
         current: s.jti === current,
+        expiresAt: s.expiresAt ?? s.created + 7 * 86400000,
+        expired: (s.expiresAt ?? s.created + 7 * 86400000) <= Date.now(),
+        ip: s.ip || '',
+        name: s.name || '',
       })),
     });
   });
@@ -260,18 +300,18 @@ export function registerSessionRoutes(app: Hono): void {
   app.post('/api/sessions/revoke-others', async (c) => {
     const current = sessionIdFromRequest(c);
     if (!current) {
-      // Old-format token we can't tie to a registry entry — do nothing, don't fail.
-      return c.json({ ok: true, revoked: 0, note: 'No se pudo identificar la sesión actual' });
+      return fail(c, 400, 'No se pudo identificar la sesión actual');
     }
-    pruneIssued();
-    let n = 0;
-    for (const s of issued.values()) {
-      if (s.jti !== current && !revokedHas(s.jti)) {
-        await revokeSession(s.jti);
-        n++;
-      }
-    }
+    const n = await revokeOtherSessions(current);
     return c.json({ ok: true, revoked: n });
+  });
+
+  app.patch('/api/sessions/:jti', async (c) => {
+    const s = issued.get(c.req.param('jti'));
+    if (!s) return fail(c, 404, 'Sesión no encontrada');
+    const body = await c.req.json().catch(() => null);
+    if (!body || typeof body.name !== 'string' || body.name.trim().length > 80 || /[\u0000-\u001f\u007f]/.test(body.name)) return fail(c, 400, 'Usá un nombre de hasta 80 caracteres');
+    s.name = body.name.trim(); await flushSessions(); return c.json({ ok: true });
   });
 
   app.post('/api/sessions/:jti/revoke', async (c) => {
@@ -287,6 +327,7 @@ export function registerSessionRoutes(app: Hono): void {
       return fail(c, 404, 'Sesión no encontrada');
     }
     await revokeSession(target);
+    if (target === sessionIdFromRequest(c)) c.header('set-cookie', 'axon_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
     return c.json({ ok: true });
   });
 }

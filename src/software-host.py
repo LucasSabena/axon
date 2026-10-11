@@ -26,6 +26,9 @@ import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
+from threading import Lock
 
 LIMIT = 12 * 1024 * 1024
 PACKAGE = re.compile(r"^[A-Za-z0-9@][A-Za-z0-9@+._:/-]{0,240}$")
@@ -127,9 +130,14 @@ def scan(req):
     ctx = context(req["user"], req.get("settings"))
     rows, sources = [], []
     updates = req.get("updates", False)
+    pool = ThreadPoolExecutor(max_workers=4)
+    pending, output_lock = [], Lock()
     def read(manager, scope, userctx, root, enabled, reader):
+        if req.get("managers") and manager not in req["managers"]: return
         src = source(manager, scope, userctx, root, enabled); sources.append(src)
-        if not enabled: return
+        if enabled: pending.append(pool.submit(read_source, src, reader))
+    def read_source(src, reader):
+        started = time.monotonic(); found = []
         try:
             found = reader(src)
             for row in found:
@@ -138,6 +146,9 @@ def scan(req):
             if updates and src["updateState"] == "unchecked": src["updateState"] = "ok"
         except Exception as e:
             src["error"] = str(e); src["updateState"] = "error"
+        src["durationMs"] = round((time.monotonic() - started) * 1000)
+        if req.get("stream"):
+            with output_lock: print(json.dumps({"event": "source", "source": src, "installations": found}), flush=True)
 
     def apt(src):
         output = command(["dpkg-query", "-W", "-f=${binary:Package}\t${db:Status-Status}\t${Version}\t${Architecture}\t${binary:Summary}\t${source:Package}\t${Homepage}\n"])
@@ -304,6 +315,29 @@ def scan(req):
         return items
     read("bun", "user", ctx, ctx["home"], bool(tool("bun", ctx)), bun)
 
+    # Legacy Node prefixes are read as files. Never run another package manager
+    # or silently migrate an installation to pnpm during discovery.
+    for prefix in [ctx["home"] + "/.local", ctx["home"] + "/.npm-global", "/usr/local"]:
+        modules = pathlib.Path(prefix) / "lib/node_modules"
+        def node_global(src, modules=modules):
+            items = []
+            children = sorted(modules.iterdir())
+            packages = []
+            for child in children:
+                if child.name.startswith("@"): packages.extend(sorted(child.iterdir()))
+                elif not child.name.startswith("."): packages.append(child)
+            if len(packages) > 2000: raise ValueError("Prefijo Node demasiado grande; lectura incompleta")
+            for package in packages:
+                manifest = package / "package.json"
+                if not manifest.is_file(): continue
+                info = json.loads(manifest.read_text())
+                name = info.get("name", "")
+                if not PACKAGE.fullmatch(name): continue
+                items.append(record("node-global", "system" if src["root"] == "/usr/local" else "user", None if src["root"] == "/usr/local" else ctx, src["root"], name, info.get("version"), executables=package_bins({"path":str(package)}), kind="tool", updateState="unsupported", reason="Prefijo Node global detectado. Actualizá con el gestor de origen; AXON no migra instalaciones automáticamente."))
+            src["updateState"] = "unsupported"
+            return items
+        read("node-global", "system" if prefix == "/usr/local" else "user", None if prefix == "/usr/local" else ctx, prefix, modules.is_dir(), node_global)
+
     def pipx(src):
         data = json.loads(command([tool("pipx", ctx), "list", "--json"], ctx)); items = []
         for key, info in data.get("venvs", {}).items():
@@ -363,19 +397,22 @@ def scan(req):
                 items.append(record("nix", "user", ctx, ctx["home"] + "/.nix-profile", name, None, origin=info.get("originalUrl", ""), kind="tool", updateState="unsupported", reason="Perfil Nix registrado; conservar flake, atributos y generación"))
         src["updateState"] = "unsupported"; return items
     read("nix", "user", ctx, ctx["home"], bool(tool("nix", ctx)), nix)
-    if tool("asdf", ctx):
+    if (not req.get("managers") or "asdf" in req["managers"]) and tool("asdf", ctx):
         src = source("asdf", "user", ctx, ctx["home"], True)
         src.update(updateState="unsupported", note="Gestor detectado; adaptador de inventario no habilitado")
         sources.append(src)
-    enrich(rows, ctx, req.get("settings", {}), sources)
-    local_executables(rows, ctx, req.get("settings", {}), sources)
+    for task in pending: task.result()
+    pool.shutdown()
+    # Version checks reuse known desktop metadata, rather than rescanning icons.
+    if not updates: enrich(rows, ctx, req.get("settings", {}), sources)
+    if not req.get("managers"): local_executables(rows, ctx, req.get("settings", {}), sources)
     # Optional integration metadata enriches records; it never limits enumeration.
     for item in req.get("integrations", []):
         binary = item.get("binary", "")
         if not re.fullmatch(r"[A-Za-z0-9_.+-]+", binary): continue
         executable = tool(binary, ctx)
         matches = [p for p in rows if item.get("package") == p["packageName"] or binary in p["executables"]]
-        if not matches and executable:
+        if not matches and executable and not req.get("managers"):
             for manager, args in [("apt", ["dpkg-query", "-S", executable]), ("dnf", ["rpm", "-qf", "--qf", "%{NAME}", executable]), ("pacman", ["pacman", "-Qqo", executable])]:
                 if not tool(args[0]): continue
                 try:
@@ -383,7 +420,7 @@ def scan(req):
                     matches = [p for p in rows if p["manager"] == manager and p["packageName"].split(":")[0] == owner]
                 except RuntimeError: continue
                 if matches: break
-        if not matches and executable:
+        if not matches and executable and not req.get("managers"):
             row = record("manual", "user", ctx, str(pathlib.Path(executable).resolve()), binary, None, kind="tool", updateState="unmanaged", reason="Ejecutable detectado; gestor de instalación no comprobado", executablePath=str(pathlib.Path(executable).resolve()))
             rows.append(row); matches = [row]
         for row in matches:
@@ -418,7 +455,10 @@ def local_executables(rows, ctx, settings, sources, systemdir="/usr/local/bin"):
                 known_paths.add(str(resolved))
                 row = record("manual", "system" if directory == systemdir else "user", None if directory == systemdir else ctx, str(resolved), file.name, None, kind="tool", executablePath=str(resolved), executables=[file.name], updateState="unmanaged", reason="Ejecutable local sin registro de paquete; versión y actualización no comprobadas", sourceId=unmanaged["id"])
                 rows.append(row)
-            except FileNotFoundError: dangling += 1
+            except FileNotFoundError:
+                dangling += 1
+                if file.is_symlink() and PACKAGE.fullmatch(file.name):
+                    rows.append(record("manual", "system" if directory == systemdir else "user", None if directory == systemdir else ctx, str(file), file.name, None, kind="tool", executablePath=str(file), executables=[file.name], updateState="unmanaged", reason="Acceso roto: el ejecutable de destino ya no existe. Reinstalá la herramienta con su gestor.", sourceId=unmanaged["id"]))
             except OSError: warnings.append("No se pudo inspeccionar " + file.name)
     unmanaged.update(complete=not warnings, updateState="unsupported" if not warnings else "error", note="; ".join(warnings) or "Los ejecutables locales se enumeran sin ejecutarlos; no se adivinan versiones ni comandos", checkedAt=int(time.time() * 1000))
     if dangling: unmanaged["note"] += "; " + str(dangling) + " accesos locales apuntan a archivos ausentes"
@@ -426,14 +466,28 @@ def local_executables(rows, ctx, settings, sources, systemdir="/usr/local/bin"):
     sources.append(unmanaged)
 
 
+@lru_cache(maxsize=256)
+def icon_theme(directory):
+    cfg = configparser.ConfigParser(interpolation=None, strict=False)
+    try: cfg.read(pathlib.Path(directory) / "index.theme")
+    except configparser.Error: pass
+    return cfg
+
+
+@lru_cache(maxsize=128)
+def icon_root(directory):
+    return pathlib.Path(directory).resolve()
+
+
 def resolve_icon(name, roots, theme="hicolor"):
     if not name or "\x00" in name or ".." in pathlib.PurePath(name).parts: return None
     roots = [pathlib.Path(p) for p in roots]
     def valid(file):
         try:
+            if not file.is_file(): return None
             real = file.resolve()
-            if real.suffix.lower() not in [".svg", ".png", ".webp", ".jpg", ".jpeg"] or not real.is_file() or real.stat().st_size > 1024 * 1024: return None
-            if any(real.is_relative_to(root.resolve()) for root in roots): return str(real)
+            if real.suffix.lower() not in [".svg", ".png", ".webp", ".jpg", ".jpeg"] or real.stat().st_size > 1024 * 1024: return None
+            if any(real.is_relative_to(icon_root(str(root))) for root in roots): return str(real)
         except OSError: pass
         return None
     if name.startswith("/"): return valid(pathlib.Path(name))
@@ -443,9 +497,7 @@ def resolve_icon(name, roots, theme="hicolor"):
         visited.add(current)
         for root in roots:
             directory = root / current
-            cfg = configparser.ConfigParser(interpolation=None, strict=False)
-            try: cfg.read(directory / "index.theme")
-            except configparser.Error: continue
+            cfg = icon_theme(str(directory))
             dirs = cfg.get("Icon Theme", "Directories", fallback="").split(",")
             dirs = sorted(set(dirs + ["scalable/apps", "128x128/apps", "64x64/apps", "48x48/apps", "256x256/apps"]))
             for child in dirs:
@@ -641,7 +693,8 @@ def local_hook(req, row):
 
 
 def plan(req):
-    snapshot = scan({**req, "updates": True})
+    managers = {p.get("manager") for p in req.get("items", []) if p.get("manager")}
+    snapshot = scan({**req, "updates": True, **({"managers": list(managers)} if managers else {})})
     found = {p["id"]: p for p in snapshot["installations"]}
     selected = req.get("items", [])
     if not selected or len(selected) > 200: raise ValueError("Seleccioná entre 1 y 200 instalaciones")

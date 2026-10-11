@@ -16,6 +16,11 @@ for (const folder of ['cmaps', 'standard_fonts', 'wasm', 'iccs']) {
 }
 await cp('node_modules/pdfjs-dist/LICENSE', 'public/vendor/pdf/LICENSE');
 
+// A shared standards-based Markdown parser, loaded only for Markdown readers.
+const markdown = await Bun.build({entrypoints:['public/markdown.source.js'],outdir:'public/vendor',naming:'markdown.js',target:'browser',minify:true});
+if(!markdown.success){for(const log of markdown.logs)console.error(log);process.exit(1);}
+await writeFile('public/vendor/markdown.LICENSE.txt', (await Promise.all(['markdown-it', 'markdown-it-task-lists'].map(async name => name + '\n' + await readFile('node_modules/' + name + '/LICENSE', 'utf8')))).join('\n\n'));
+
 // Browser/CDN caches can keep assets for hours — even past a deploy. Every
 // ?v= reference to a shipped file gets a content-derived URL on each build;
 // manual bumps proved lossy and a stale asset under a recycled version

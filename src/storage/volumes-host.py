@@ -7,7 +7,7 @@ FILESYSTEM_CONTAINERS = {'LVM2_member', 'crypto_LUKS', 'linux_raid_member', 'swa
 
 def inventory():
     result = subprocess.run(['lsblk', '--json', '--bytes', '--paths', '--output',
-        'NAME,TYPE,SIZE,FSTYPE,LABEL,UUID,MAJ:MIN,RM,HOTPLUG,TRAN,MODEL,RO'],
+        'NAME,TYPE,SIZE,FSTYPE,LABEL,UUID,PARTUUID,PARTTYPE,SERIAL,WWN,MAJ:MIN,RM,HOTPLUG,TRAN,MODEL,RO'],
         capture_output=True, text=True, timeout=8, check=True)
     devices, blocks = [], {}
     def walk(node, disk=None):
@@ -16,7 +16,7 @@ def inventory():
             disk = {'id': node['name'], 'name': (node.get('model') or os.path.basename(node['name'])).strip(),
                 'device': node['name'], 'size': int(node.get('size') or 0),
                 'external': bool(node.get('rm') or node.get('hotplug') or node.get('tran') == 'usb'),
-                'transport': node.get('tran')}
+                'transport': node.get('tran'), 'serial': node.get('serial'), 'wwn': node.get('wwn')}
             devices.append(disk)
         if disk and node.get('fstype') and node['fstype'] not in FILESYSTEM_CONTAINERS:
             blocks.setdefault(node['maj:min'], {**node, 'disk': disk})
@@ -57,6 +57,7 @@ def inventory():
                 'diskId': node['disk']['id'], 'device': node['name'], 'majorMinor': major,
                 'name': node.get('label') or ('Disco del sistema' if target == '/' else os.path.basename(target or node['name'])),
                 'filesystem': node['fstype'], 'uuid': node.get('uuid'), 'size': int(node.get('size') or 0),
+                'partuuid': node.get('partuuid'), 'parttype': node.get('parttype'), 'serial': node['disk'].get('serial'),
                 'external': node['disk']['external'], 'path': target,
                 'mountId': mount['mountId'] if mount else None,
                 'readOnly': bool(node.get('ro') or mount and mount['readOnly']),

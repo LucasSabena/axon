@@ -1,0 +1,23 @@
+[Unit]
+Description=AXON Acer PT315-53 fan control and thermal watchdog
+After=systemd-modules-load.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/lib/axon/fans-host.py serve
+ExecStopPost=/usr/bin/python3 /usr/local/lib/axon/fans-host.py restore
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=8
+RuntimeDirectory=axon-fans
+RuntimeDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

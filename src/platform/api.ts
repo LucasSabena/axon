@@ -1,3 +1,4 @@
+import packageInfo from '../../package.json';
 import { Hono } from 'hono';
 import { requestOriginAllowed } from '../browser-security';
 import { PlatformError, SCOPES, CLOUD_SCOPES, type PlatformStore, type ApiIdentity, type Scope } from './store';
@@ -6,6 +7,8 @@ import type { Diagnostics } from './diagnostics';
 import type { CloudAgents } from '../cloud/agents';
 import { registerCloudMachineRoutes, callCloudTool, cloudError } from '../cloud/agent-api';
 import { MaintenanceError } from '../storage/types';
+import { apiPolicy } from './api-policy';
+import { usageRoute } from './api-usage';
 import { ApiLimiter, ApiThrottle, apiLane, leasedResponse } from './api-limits';
 import { AGENT_INSTRUCTIONS, agentTools, agentCapabilities, permittedProjectTools, permittedCloudTools } from './api-discovery';
 
@@ -66,13 +69,23 @@ export function machineApi(deps: PlatformApiDependencies) {
     let rpc:any;
     if(c.req.method==='POST'&&route==='/mcp'){
       // Charge the read budget even when the JSON-RPC body cannot be parsed.
-      try{rpc=await input(c);}catch(e){limiter.acquire(identity.id,'read')();throw e;}
+      try{rpc=await input(c);}catch(e){const at=Date.now(),policy=apiPolicy(identity.policy);let status=e instanceof PlatformError?e.status:400;try{const release=limiter.acquire(identity.id,'read',policy.limits);try{store.usage.reserve(identity.id,policy.dailyRequests);}finally{release();}}catch(limit){status=limit instanceof PlatformError?limit.status:503;throw limit;}finally{store.usage.record({tokenId:identity.id,at,route:'MCP request',lane:'read',status,durationMs:0,bytesIn:0,bytesOut:0});}throw e;}
       c.set('rpcRequest',rpc);
     }
-    const lane=apiLane(c.req.method,route,rpc),release=limiter.acquire(identity.id,lane);
-    c.header('X-Axon-Limit-Lane',lane);c.header('X-Axon-Limit-Per-Minute',String(limiter.limits[lane].perMinute));
+    const lane=apiLane(c.req.method,route,rpc),policy=apiPolicy(identity.policy),started=performance.now(),at=Date.now();
+    const report=(status:number,bytesOut=0,failed=false)=>store.usage.record({tokenId:identity.id,at,route:usageRoute(c.req.method,route,rpc),lane,status,durationMs:Math.round(performance.now()-started),bytesIn:Math.max(0,Number(c.req.header('content-length'))||0),bytesOut,failed});
+    let release:()=>void;
+    try {release=limiter.acquire(identity.id,lane,policy.limits);try{store.usage.reserve(identity.id,policy.dailyRequests);}catch(e){release();throw e;}}
+    catch(e){report(e instanceof PlatformError?e.status:503);if(e instanceof PlatformError&&!(e instanceof ApiThrottle)&&e.status===429)c.header('Retry-After',String(Math.ceil((Math.floor(Date.now()/86400000)*86400000+86400000-Date.now())/1000)));throw e;}
     let leased=false;
-    try{await next();c.header('X-Axon-Limit-Lane',lane);c.header('X-Axon-Limit-Per-Minute',String(limiter.limits[lane].perMinute));if(lane==='transfer'&&c.req.method==='GET'&&c.res.ok){c.res=leasedResponse(c.res,release,c.req.raw.signal);leased=true;}}finally{if(!leased)release();}
+    try{
+      await next();
+      c.header('X-Axon-Limit-Lane',lane);c.header('X-Axon-Limit-Per-Minute',String(policy.limits[lane].perMinute));
+      if(policy.dailyRequests){c.header('X-Axon-Daily-Limit',String(policy.dailyRequests));c.header('X-Axon-Daily-Remaining',String(Math.max(0,policy.dailyRequests-store.usage.daily(identity.id))));}
+      const status=c.res.status;
+      if(lane==='transfer'&&c.req.method==='GET'&&c.res.ok){let bytes=0,finished=false;c.res=leasedResponse(c.res,()=>{release();if(!finished){finished=true;report(status,bytes);}},c.req.raw.signal,n=>bytes+=n);leased=true;}
+      else {const body=await c.res.clone().arrayBuffer();let failed=false;if(route==='/mcp'){try{const rpc=JSON.parse(new TextDecoder().decode(body));failed=!!rpc.error||rpc.result?.isError===true;}catch{}}report(status,body.byteLength,failed);}
+    }finally{if(!leased)release();}
   });
   const check = (c:any,projectId:string,scope:Scope) => { const identity = c.get('identity') as ApiIdentity;store.require(identity,projectId,scope);hub.project(projectId);return identity; };
   app.get('/projects',c => {
@@ -117,7 +130,7 @@ export function machineApi(deps: PlatformApiDependencies) {
     const success = (result:any) => c.json({jsonrpc:'2.0',id:request.id,result});
     const rpcError = (code:number,message:string) => c.json({jsonrpc:'2.0',id:request.id ?? null,error:{code,message}});
     if (request.id === undefined) return request.method.startsWith('notifications/') ? c.body(null,202) : rpcError(-32600,'La solicitud necesita id');
-    if (request.method === 'initialize') return success({protocolVersion:['2025-03-26','2025-06-18','2025-11-25'].includes(request.params?.protocolVersion) ? request.params.protocolVersion : '2025-11-25',capabilities:{tools:{listChanged:false}},serverInfo:{name:'axon',version:process.env.AXON_VERSION||'1.2.0'},instructions:AGENT_INSTRUCTIONS});
+    if (request.method === 'initialize') return success({protocolVersion:['2025-03-26','2025-06-18','2025-11-25'].includes(request.params?.protocolVersion) ? request.params.protocolVersion : '2025-11-25',capabilities:{tools:{listChanged:false}},serverInfo:{name:'axon',version:process.env.AXON_VERSION||packageInfo.version},instructions:AGENT_INSTRUCTIONS});
     if (request.method === 'ping') return success({});
     if (request.method === 'tools/list') return success({tools:agentTools(identity,deps.cloud,!!deps.backups)});
     if (request.method !== 'tools/call') return rpcError(-32601,'Método no soportado');
@@ -195,12 +208,20 @@ export function registerPlatformRoutes(app:Hono,deps:PlatformApiDependencies) {
     c.header('Content-Disposition',`attachment; filename="axon-historial-${day}.json"`);
     return c.json({version:1,exportedAt:new Date().toISOString(),entries});
   }));
-  app.get('/api/access/tokens',c => c.json({ok:true,tokens:store.tokens().filter(t=>t.owner===c.get('user')),scopes:SCOPES,cloudScopes:CLOUD_SCOPES,cloudConnections:deps.cloud?.available(c.get('user'))||[],cloudLocalUrl:deps.cloudLocalUrl,projects:hub.sources.projects().map(({id,name}) => ({id,name}))}));
+  app.get('/api/access/tokens',c => c.json({ok:true,tokens:store.tokens().filter(t=>t.owner===c.get('user')).map(t=>({...t,policy:apiPolicy(t.policy),usage:store.usage.report([t.id],7),dailyUsed:store.usage.daily(t.id)})),defaults:apiPolicy(),scopes:SCOPES,cloudScopes:CLOUD_SCOPES,cloudConnections:deps.cloud?.available(c.get('user'))||[],cloudLocalUrl:deps.cloudLocalUrl,projects:hub.sources.projects().map(({id,name}) => ({id,name}))}));
   app.post('/api/access/tokens',handle(async c => {
-    const value = await input(c);if (Object.keys(value).some(k => !['name','days','grants','cloudGrants'].includes(k))) throw new PlatformError('Campo no permitido');
+    const value = await input(c);if (Object.keys(value).some(k => !['name','days','grants','cloudGrants','description','policy'].includes(k))) throw new PlatformError('Campo no permitido');
     const cloudGrants=value.cloudGrants===undefined?[]:await deps.cloud?.grants(c.get('user'),value.cloudGrants);
     if(!cloudGrants)throw new PlatformError('Conexiones no disponibles',503);
     return c.json({ok:true,...store.createToken({...value,grants:value.grants||[],cloudGrants},c.get('user'),hub.sources.projects().map(p => p.id))},201);
   }));
+  app.get('/api/access/usage',handle(c=>{const id=c.req.query('token'),days=Number(c.req.query('days')||7);if(![1,7,30,90].includes(days))throw new PlatformError('Período inválido');const ids=id?[store.ownedToken(id,c.get('user')).id]:store.tokens().filter(t=>t.owner===c.get('user')).map(t=>t.id);return c.json({ok:true,...store.usage.report(ids,days)});}));
+  app.patch('/api/access/tokens/:id',handle(async c=>{
+    const value=await input(c);if(Object.keys(value).some(k=>!['name','description','expiresAt','paused','policy','grants','cloudGrants','revision'].includes(k)))throw new PlatformError('Campo no permitido');
+    store.ownedToken(c.req.param('id'),c.get('user'));
+    if(value.cloudGrants!==undefined){const grants=await deps.cloud?.grants(c.get('user'),value.cloudGrants);if(!grants)throw new PlatformError('Conexiones no disponibles',503);value.cloudGrants=grants;}
+    const identity=store.updateToken(c.req.param('id'),value,c.get('user'),hub.sources.projects().map(p=>p.id));deps.cloud?.retireCredentials();return c.json({ok:true,identity});
+  }));
+  app.post('/api/access/tokens/:id/rotate',handle(async c=>{const value=await input(c);if(Object.keys(value).some(k=>k!=='revision'))throw new PlatformError('Campo no permitido');const result=store.rotateToken(c.req.param('id'),value.revision,c.get('user'));deps.cloud?.retireCredentials();return c.json({ok:true,...result});}));
   app.delete('/api/access/tokens/:id',handle(c => { store.revoke(c.req.param('id'),c.get('user'));deps.cloud?.retireCredentials();return c.json({ok:true}); }));
 }

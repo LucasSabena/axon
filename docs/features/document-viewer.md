@@ -1,11 +1,14 @@
 # Visor de documentos en Archivos y Biblioteca
 
-Los dos módulos usan el mismo visor de lectura. En Archivos, abrir el archivo
-(o elegir **Vista previa** en su menú) muestra el panel lateral. En Biblioteca,
-abrir el elemento muestra el visor. El original siempre se puede descargar.
+Los dos módulos usan el mismo visor de lectura. En Archivos, los documentos
+paginados y las planillas se abren en el panel lateral; Markdown se abre en un
+área de lectura con acceso al editor. **Vista previa** en el menú del archivo
+también permite usar el panel lateral. En Biblioteca, abrir el elemento muestra
+el visor. El original siempre se puede descargar.
 
 | Formatos | Vista |
 | --- | --- |
+| MD, Markdown | Lectura con el tema de AXON, títulos, listas, tareas, tablas, enlaces y bloques de código |
 | PDF, DOC/DOCX, ODT, RTF | Páginas, texto seleccionable, ancho/página, zoom y pantalla completa |
 | PPT/PPTX, PPS/PPSX, ODP | Diapositivas, navegación por páginas, zoom y pantalla completa |
 | XLS/XLSX, ODS | Tabla de valores, selector de hojas y búsqueda; independiente del área de impresión |
@@ -17,6 +20,20 @@ planillas muestra valores de lectura; no es un editor de fórmulas, gráficos o
 formatos. Las presentaciones son estáticas. La conversión puede sustituir fuentes
 que no estén instaladas. Archivos dañados, vacíos, con contraseña o que excedan
 los límites muestran un error, reintento y descarga del original.
+
+En Archivos, los `.md` y `.markdown` se abren en **Visualizador**. Los botones
+**Visualizador / Editor**, o `Ctrl/Cmd+E`, cambian la vista del mismo documento
+sin recargarlo ni perder el texto, el cursor o los cambios pendientes. La lectura
+muestra también el borrador sin guardar; Guardar mantiene la revisión/diff y las
+protecciones existentes. `Ctrl/Cmd+S` funciona en ambas vistas. Salir con cambios
+pendientes sigue pidiendo confirmación. `edit=1` abre directamente el editor.
+Biblioteca usa el mismo lector, sin iframe y con contraste acorde al tema.
+
+Markdown usa un parser CommonMark local, cargado bajo demanda. El HTML escrito
+en el documento se muestra como texto y no se ejecuta. Las imágenes relativas
+pasan por la API de vista previa autenticada; los enlaces a archivos abren
+Archivos. La lectura se limita a 512 KB y avisa si está truncada. Un documento
+binario o con UTF-8 inválido no se interpreta como Markdown.
 
 ## Procesamiento y protección
 
@@ -68,3 +85,5 @@ para comprobar el contenido PDF, además del motor de conversión.
 contenido y controles reales, hojas, tablas, carga diferida, teclado, pantalla
 completa, respuestas tardías, errores, permisos, temas, 320–1440 px y WCAG A/AA.
 Las operaciones se realizan exclusivamente en el servidor de fixtures propio.
+`markdown-viewer-browser-qa.cjs` cubre además lectura, alternancia, borradores,
+guardado, revisión, seguridad, cancelación, temas y tamaños de pantalla.

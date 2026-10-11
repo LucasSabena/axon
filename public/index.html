@@ -13,8 +13,9 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>AXON</title>
   <link rel="stylesheet" href="/app.css?v=0e578d145290">
-  <link rel="axon-feature" data-axon-style="/document-viewer.css?v=7d3d7340a6a5">
-  <link rel="axon-feature" data-axon-style="/feat-files.css?v=d1911056aaba">
+  <link rel="axon-feature" data-axon-style="/document-viewer.css?v=edeb44e4d558">
+  <link rel="axon-feature" data-axon-style="/file-catalog.css?v=96f0317dffb4">
+  <link rel="axon-feature" data-axon-style="/feat-files.css?v=40095eca6e1f">
   <link rel="axon-feature" data-axon-style="/feat-dropbox.css?v=fda01f602aac">
   <link rel="axon-feature" data-axon-style="/feat-scripts.css?v=2da1ea482319">
   <link rel="axon-feature" data-axon-style="/feat-metrics.css?v=d7e6f14552bc">
@@ -24,13 +25,15 @@
   <link rel="axon-feature" data-axon-style="/feat-compose.css?v=34a752b90e13">
   <link rel="axon-feature" data-axon-style="/feat-agents.css?v=83bcf81535cb">
   <link rel="axon-feature" data-axon-style="/agent-context.css?v=41d2320e73be">
-  <link rel="axon-feature" data-axon-style="/feat-library.css?v=e0d1a509dbbf">
+  <link rel="axon-feature" data-axon-style="/feat-library.css?v=0029b6abb82f">
   <link rel="axon-feature" data-axon-style="/navigation.css?v=5f9ea34490fd">
   <link rel="axon-feature" data-axon-style="/dashboard.css?v=9c0cbcfa963d">
   <link rel="axon-feature" data-axon-style="/polish.css?v=3886aca50e96">
   <link rel="axon-feature" data-axon-style="/maintenance.css?v=c01ec4727f7f">
   <link rel="axon-feature" data-axon-style="/backups.css?v=ffaabb464767">
-  <link rel="axon-feature" data-axon-style="/platform.css?v=7a3968af3a44">
+  <link rel="axon-feature" data-axon-style="/usb.css?v=24a53f3bffc9">
+  <link rel="axon-feature" data-axon-style="/session-fans.css?v=213426f6b820">
+  <link rel="axon-feature" data-axon-style="/platform.css?v=d7c92039d4c1">
   <link rel="axon-feature" data-axon-style="/vendor/webawesome/styles/themes/default.css?v=e19fff39b8c9">
   <link rel="stylesheet" href="/design-system.css?v=2f3d13b40e07">
   <link rel="stylesheet" href="/login.css?v=3eab62086046">
@@ -402,7 +405,7 @@
             </section>
             <section id="tab-backups" class="tab-content"><div class="section-header"><div><h2>Backups</h2><p class="section-sub">Copias de tus archivos, listas para cuando las necesites.</p></div></div><div id="backup-content" class="backups-view"></div></section>
             <section id="tab-audit" class="tab-content"><div class="section-header"><h2>Historial de operaciones</h2></div><div id="audit-content" class="platform-view"></div></section>
-            <section id="tab-access" class="tab-content"><div class="section-header"><h2>Integraciones</h2></div><div id="access-content" class="platform-view"></div></section>
+            <section id="tab-access" class="tab-content"><div class="section-header"><h2>API keys e integraciones</h2></div><div id="access-content" class="platform-view"></div></section>
             <section id="tab-desktop" class="tab-content"><div class="section-header"><h2>Escritorio del servidor</h2></div><div id="desktop-content" class="platform-view"></div></section>
           </main>
         </div>
@@ -698,17 +701,18 @@
   <link rel="axon-feature" data-axon-style="/agent-usage.css?v=d305c519568b">
   <link rel="axon-feature" data-axon-style="/agent-consumption.css?v=cceddd29f7b0">
   <script type="text/axon-feature" data-src="/terminal-tools.js?v=dfff049a9a58"></script>
-  <link rel="stylesheet" href="/software.css?v=0f09c8cfae5b">
-  <script defer src="/app.js?v=455e45de2523"></script>
-  <script defer src="/software.js?v=573e80fe6c09"></script>
+  <link rel="stylesheet" href="/software.css?v=35d54144dc91">
+  <script defer src="/app.js?v=982d9151215b"></script>
+  <script defer src="/software.js?v=7138565057c4"></script>
   <script defer src="/onboarding.js?v=8e8516b302ef"></script>
-  <link rel="stylesheet" href="/host-storage.css?v=f6a41912b754">
-  <script defer src="/host-storage.js?v=a5c65d59389f"></script>
+  <link rel="stylesheet" href="/host-storage.css?v=64594bea1d0d">
+  <script defer src="/host-storage.js?v=4fe91fa38e2b"></script>
   <link rel="stylesheet" href="/transfer-review.css?v=98bc9c35eadc">
   <script defer src="/transfer-review.js?v=205ff33f3b6d"></script>
-  <script type="text/axon-feature" data-src="/document-viewer.js?v=ea6f391fe244"></script>
-  <script type="text/axon-feature" data-src="/feat-files.js?v=c6b58155a784"></script>
-  <script type="text/axon-feature" data-src="/feat-dropbox.js?v=c2aa192f3992"></script>
+  <script type="text/axon-feature" data-src="/document-viewer.js?v=27ae6ed4b04b"></script>
+  <script type="text/axon-feature" data-src="/file-catalog.js?v=33a73fda00fa"></script>
+  <script type="text/axon-feature" data-src="/feat-files.js?v=8e2b2dbd2a4d"></script>
+  <script type="text/axon-feature" data-src="/feat-dropbox.js?v=e0b27b546b34"></script>
   <script type="text/axon-feature" data-src="/feat-scripts.js?v=735267350c01"></script>
   <script type="text/axon-feature" data-src="/feat-logs.js?v=8b7a506006d5"></script>
   <script type="text/axon-feature" data-src="/feat-metrics.js?v=09f85736d7be"></script>
@@ -717,23 +721,28 @@
   <link rel="axon-feature" data-axon-style="/optimizer.css?v=128ae12f8225">
   <script type="text/axon-feature" data-src="/optimizer.js?v=03da34a0ff62"></script>
   <script type="text/axon-feature" data-src="/feat-notify.js?v=1884276bc2fc"></script>
-  <script type="text/axon-feature" data-src="/feat-compose.js?v=623fd75deaff"></script>
+  <script type="text/axon-feature" data-src="/feat-compose.js?v=772403dc7a82"></script>
   <script type="text/axon-feature" data-src="/agent-context.js?v=19c37556f869"></script>
   <script type="text/axon-feature" data-src="/agent-usage.js?v=5df6a8396a83"></script>
   <script type="text/axon-feature" data-src="/agent-consumption.js?v=cb3c980ce728"></script>
   <script type="text/axon-feature" data-src="/agent-accounts.js?v=006cd3dc8d1c"></script>
   <script type="text/axon-feature" data-src="/feat-agents.js?v=af16597b71c6"></script>
-  <script type="text/axon-feature" data-src="/feat-library.js?v=bfe25bb08e01"></script>
+  <script type="text/axon-feature" data-src="/feat-library.js?v=6421b14e1e17"></script>
   <script type="text/axon-feature" data-src="/dashboard.js?v=c108c07176a7"></script>
-  <script type="text/axon-feature" data-src="/storage.js?v=cd5b0a9a6d1c"></script>
+  <link rel="axon-feature" data-axon-style="/disks.css?v=5a7126099567">
+  <script type="text/axon-feature" data-src="/disks.js?v=1705581c28b6"></script>
+  <script type="text/axon-feature" data-src="/storage.js?v=1792aa381f94"></script>
   <script type="text/axon-feature" data-src="/home-links.js?v=d896a9cb6858"></script>
   <script type="text/axon-feature" data-src="/app-migrations.js?v=a94407ad7cb4"></script>
   <script type="text/axon-feature" data-src="/app-store.js?v=24f0a43fd220"></script>
   <script type="text/axon-feature" data-src="/connections.js?v=e19949c25db8"></script>
-  <script type="text/axon-feature" data-src="/settings.js?v=39555417b84c"></script>
+  <script type="text/axon-feature" data-src="/usb.js?v=2b9d0489b635"></script>
+  <script type="text/axon-feature" data-src="/session-fans.js?v=ecba07e0b829"></script>
+  <script type="text/axon-feature" data-src="/settings.js?v=2e9cfb0d3fb9"></script>
   <script type="text/axon-feature" data-src="/view-controls.js?v=32eb2a959359"></script>
-  <script type="text/axon-feature" data-src="/platform.js?v=6c5119728b22"></script>
+  <script type="text/axon-feature" data-src="/platform.js?v=f0bc7e0fbbcc"></script>
   <script type="text/axon-feature" data-src="/backups.js?v=ff03c4b00250"></script>
+  <script type="text/axon-feature" data-src="/access.js?v=676e6f36c2f3"></script>
   <script type="text/axon-feature" data-src="/platform-operations.js?v=0a8f4260ad19"></script>
   <script type="text/axon-feature" data-src="/shell.js?v=e3e27f204aee"></script>
   <script type="text/axon-feature" data-module="true" data-src="/navigation.js?v=13511c81dded"></script>

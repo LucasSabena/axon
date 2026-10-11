@@ -10,33 +10,34 @@
   const name=()=>names[S.provider];
   const tabs=document.createElement('nav');tabs.className='cloud-source-tabs';tabs.setAttribute('aria-label','Ubicación de archivos');
   tabs.innerHTML=`<button type="button" class="btn-secondary" data-source="server" aria-pressed="true">${icon('hard-drive')} Servidor</button><button type="button" class="btn-secondary" data-connections aria-pressed="false">${icon('plug')} Conexiones</button>`;
-  sec.prepend(tabs);
+  sec.querySelector('.fm-top .section-header').insertBefore(tabs,sec.querySelector('.fm-top .section-actions'));
   const panel=document.createElement('div');panel.className='cloud-panel';panel.hidden=true;
   panel.innerHTML=`<div class="section-header cloud-header"><div><div class="cloud-title"><h2>Dropbox</h2><span class="cloud-access" title="Podés abrir y copiar archivos. Subir, editar y borrar en la nube no está habilitado.">${icon('lock-keyhole')} Sólo lectura</span></div><p class="listener-note">Abrí archivos a demanda o guardá una copia en tu disco.</p></div><button type="button" id="cloud-refresh" class="btn-secondary" aria-label="Actualizar Dropbox">${icon('refresh-cw')}<span>Actualizar</span></button></div>
     <p id="cloud-message" class="cloud-message" role="status" aria-live="polite"></p>
     <div id="cloud-connection"></div>
     <div id="cloud-browser" hidden>
       <nav id="cloud-breadcrumb" class="fm-breadcrumb" aria-label="Carpeta de Dropbox"></nav><button type="button" id="cloud-copy-path" class="btn-secondary">Copiar ruta para agentes</button>
-      <div class="cloud-toolbar"><label>Ubicación<select id="cloud-location" aria-label="Ubicación de Dropbox"></select></label><label class="cloud-filter">Filtrar esta carpeta<input id="cloud-filter" type="search" placeholder="Nombre de archivo…"></label><div class="cloud-sort-controls"><label>Ordenar por<select id="cloud-sort"><option value="name">Nombre</option><option value="type">Tipo</option><option value="size">Tamaño</option><option value="modified">Modificado</option></select></label><button type="button" id="cloud-order" class="btn-secondary" aria-label="Orden descendente" title="Cambiar orden">${icon('arrow-up')}</button></div><div class="cloud-view-switch" role="group" aria-label="Vista de archivos">${[['list','list','Lista'],['details','table-2','Detalles'],['grid','layout-grid','Cuadrícula']].map(([view,glyph,label])=>`<button type="button" data-cloud-view="${view}" aria-label="Vista de ${label.toLowerCase()}" title="${label}" aria-pressed="false">${icon(glyph)}<span>${label}</span></button>`).join('')}</div><button type="button" id="cloud-remove-link" class="btn-secondary" hidden>Quitar enlace</button></div>
+      <div class="cloud-toolbar"><label>Ubicación<select id="cloud-location" aria-label="Ubicación de Dropbox"></select></label><label class="cloud-filter">Buscar nombres o etiquetas<input id="cloud-filter" type="search" placeholder="Carpetas, archivos o etiquetas…"></label><div class="cloud-sort-controls"><label>Ordenar por<select id="cloud-sort"><option value="name">Nombre</option><option value="type">Tipo</option><option value="size">Tamaño</option><option value="modified">Modificado</option></select></label><button type="button" id="cloud-order" class="btn-secondary" aria-label="Orden descendente" title="Cambiar orden">${icon('arrow-up')}</button></div><div class="cloud-view-switch" role="group" aria-label="Vista de archivos">${[['list','list','Lista'],['details','table-2','Detalles'],['grid','layout-grid','Cuadrícula']].map(([view,glyph,label])=>`<button type="button" data-cloud-view="${view}" aria-label="Vista de ${label.toLowerCase()}" title="${label}" aria-pressed="false">${icon(glyph)}<span>${label}</span></button>`).join('')}</div><button type="button" id="cloud-remove-link" class="btn-secondary" hidden>Quitar enlace</button></div>
+      <div class="catalog-bar"><label>Marca<select id="cloud-mark"><option value="">Todas</option>${Object.entries(AxonFileCatalog.marks).map(([k,[,label]])=>`<option value="${k}">${label}</option>`).join('')}</select></label><label>Color<select id="cloud-color"><option value="">Todos</option>${Object.entries(AxonFileCatalog.colors).map(([c,label])=>`<option value="${c}">${label}</option>`).join('')}</select></label><label>Tipo<select id="cloud-kind"><option value="">Todo</option><option value="dir">Carpetas</option><option value="file">Archivos</option></select></label><button id="cloud-organize-selection" class="btn-secondary">${icon('tags')}Organizar selección</button></div><div class="catalog-quick" id="cloud-quick"></div>
       <details class="cloud-shared"><summary>Agregar un enlace compartido</summary><form id="cloud-shared-form"><label>Enlace de Dropbox<input type="url" name="url" required placeholder="https://www.dropbox.com/…" maxlength="4096"></label><button type="submit" class="btn-secondary">${icon('link')} Agregar</button></form><p class="listener-note">El contenido sigue en Dropbox. Se respetan los permisos del enlace.</p></details>
       <div class="cloud-actions"><label><input id="cloud-select-all" type="checkbox"> Seleccionar visibles</label><span id="cloud-count"></span><button type="button" id="cloud-save" class="btn-primary" disabled>${icon('download')} Guardar en un disco</button></div>
       <div id="cloud-list" class="cloud-list" aria-busy="false"></div><button type="button" id="cloud-more" class="btn-secondary" hidden>Cargar más</button>
       <div id="cloud-preview" class="cloud-preview" hidden></div>
     </div>
     <div id="cloud-jobs" class="cloud-jobs" role="region" aria-label="Copias desde Dropbox"></div>`;
-  tabs.after(panel);refreshIcons();
+  sec.append(panel);refreshIcons();
   const el=id=>panel.querySelector('#'+id);
   let preferences={};try{preferences=JSON.parse(localStorage.getItem('axon:cloud-view:v1'))||{};}catch{}
   const views=['list','details','grid'],sorts=['name','type','size','modified'];
-  const S={provider:'dropbox',providers:[],sourcesNav:0,crumbs:null,status:null,location:'account',path:'',entries:[],cursor:null,filter:'',view:views.includes(preferences?.view)?preferences.view:'details',sort:sorts.includes(preferences?.sort)?preferences.sort:'name',order:preferences?.order==='desc'?'desc':'asc',sel:new Set(),item:null,nav:0,poll:0,jobs:[],uploads:[],busy:false,local:null,rates:new Map(),jobsKey:'',expanding:0};
+  const S={organization:[],mark:'',color:'',kind:'',provider:'dropbox',providers:[],sourcesNav:0,crumbs:null,status:null,location:'account',path:'',entries:[],cursor:null,filter:'',view:views.includes(preferences?.view)?preferences.view:'details',sort:sorts.includes(preferences?.sort)?preferences.sort:'name',order:preferences?.order==='desc'?'desc':'asc',sel:new Set(),item:null,nav:0,poll:0,jobs:[],uploads:[],busy:false,local:null,rates:new Map(),jobsKey:'',expanding:0};
   // Shared transport: no-store, JSON normalization, 401 → session-expired.
   const request=(url,body)=>api(url,body===undefined?{}:{method:'POST',body});
   const message=(text,error=false)=>{el('cloud-message').textContent=text;el('cloud-message').classList.toggle('cloud-error',error);el('cloud-message').setAttribute('role',error?'alert':'status');};
-  function params(){return {source:S.provider,location:S.location,cloudPath:S.path,q:S.filter||null,item:S.item||null,view:S.view,sort:S.sort,order:S.order};}
+  function params(){return {source:S.provider,location:S.location,cloudPath:S.path,q:S.filter||null,item:S.item||null,view:S.view,sort:S.sort,order:S.order,mark:S.mark||null,color:S.color||null,kind:S.kind||null};}
   function saveView(){try{localStorage.setItem('axon:cloud-view:v1',JSON.stringify({view:S.view,sort:S.sort,order:S.order}));}catch{}window.AxonNavigation.update('files',params());}
   function go(p={}){return window.AxonNavigation.go(window.AxonNavigation.url('files',{...params(),...p}));}
   function query(p,extra={}){return new URLSearchParams({location:S.location,path:p,...extra});}
-  function hide(){S.nav++;panel.hidden=true;sec.classList.remove('fm-cloud-mode');clearTimeout(S.poll);closePreview();void refreshSources();tabs.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.source==='server')));}
+  function hide(){S.nav++;panel.hidden=true;sec.classList.remove('fm-cloud-mode');sec.querySelector('.fm-top .section-header').insertBefore(tabs,sec.querySelector('.fm-top .section-actions'));clearTimeout(S.poll);closePreview();void refreshSources();tabs.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.source==='server')));}
   function closePreview(){const box=el('cloud-preview');box.querySelectorAll('video,audio').forEach(m=>{m.pause();m.removeAttribute('src');m.load();});box.replaceChildren();box.hidden=true;}
   function renderSources(){
     tabs.innerHTML=`<button type="button" class="btn-secondary" data-source="server" aria-pressed="${panel.hidden}">${icon('hard-drive')} Servidor</button>`+S.providers.filter(p=>p.connected&&p.visible).map(p=>`<button type="button" class="btn-secondary" data-source="${p.id}" aria-pressed="${!panel.hidden&&S.provider===p.id}">${window.AxonConnections.logo(p.id)} ${esc(p.name)}</button>`).join('')+`<button type="button" class="btn-secondary cloud-manage" data-connections>${icon('plug')} Conexiones</button>`;refreshIcons();
@@ -63,7 +64,7 @@
   const fileType=e=>e.type==='dir'?'Carpeta':!e.downloadable?'Documento en la nube':e.name.includes('.')?e.name.split('.').pop().toUpperCase():'Archivo';
   function fileIcon(e){if(e.type==='dir')return 'folder';const ext=e.name.split('.').pop().toLowerCase();if(['png','jpg','jpeg','gif','webp','avif','bmp','svg'].includes(ext))return 'image';if(['mp4','m4v','webm','mov'].includes(ext))return 'film';if(['mp3','m4a','ogg','wav','flac','opus'].includes(ext))return 'music';if(['zip','rar','7z','tar','gz'].includes(ext))return 'archive';return 'file-text';}
   function modified(value){const date=value?new Date(value):null;return date&&Number.isFinite(date.getTime())?date.toLocaleDateString('es-AR',{day:'2-digit',month:'short',year:'numeric'}):'—';}
-  function visible(){return S.entries.filter(e=>e.name.toLocaleLowerCase().includes(S.filter.toLocaleLowerCase())).sort((a,b)=>{
+  function visible(){return S.entries.filter(e=>(e.name+' '+(e.organization?.tags||[]).join(' ')).toLocaleLowerCase().includes(S.filter.toLocaleLowerCase())&&(!S.mark||e.organization?.[S.mark])&&(!S.color||e.organization?.color===S.color)&&(!S.kind||e.type===S.kind)).sort((a,b)=>{
     const dirs=(a.type==='dir'?0:1)-(b.type==='dir'?0:1);if(dirs)return dirs;
     let comparison=0;
     if(S.sort==='size')comparison=a.size-b.size;
@@ -72,10 +73,11 @@
     return (S.order==='desc'?-1:1)*(comparison||a.name.localeCompare(b.name,'es',{numeric:true,sensitivity:'base'}));
   });}
   function updateSelection(){
-    const entries=visible().filter(e=>e.downloadable),checked=entries.filter(e=>S.sel.has(e.path)).length;
+    const entries=visible(),checked=entries.filter(e=>S.sel.has(e.path)).length;
     el('cloud-select-all').checked=!!entries.length&&checked===entries.length;el('cloud-select-all').indeterminate=checked>0&&checked<entries.length;
     const count=visible().length;el('cloud-count').textContent=(S.sel.size?S.sel.size+' seleccionado'+(S.sel.size===1?'':'s')+' · ':'')+(S.filter?count+' de '+S.entries.length:S.entries.length)+' elemento'+(S.entries.length===1?'':'s')+(S.cursor?(S.filter?' · buscando en toda la carpeta…':' · hay más por cargar'):'');
-    el('cloud-save').disabled=!S.sel.size||S.busy||S.jobs.some(j=>['planning','running'].includes(j.state));
+    el('cloud-organize-selection').disabled=!S.sel.size||S.busy;
+    el('cloud-save').disabled=!S.sel.size||[...S.sel].some(p=>!S.entries.find(e=>e.path===p)?.downloadable)||S.busy||S.jobs.some(j=>['planning','running'].includes(j.state));
   }
   function renderList(){
     const list=el('cloud-list'),entries=visible();
@@ -83,11 +85,19 @@
     panel.querySelectorAll('[data-cloud-view]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.cloudView===S.view)));
     const descending=S.order==='desc';el('cloud-order').innerHTML=icon(descending?'arrow-down':'arrow-up');el('cloud-order').setAttribute('aria-label',descending?'Cambiar a orden ascendente':'Cambiar a orden descendente');el('cloud-order').title=descending?'Descendente · cambiar a ascendente':'Ascendente · cambiar a descendente';
     const headings=S.view==='details'&&entries.length?'<div class="cloud-list-head" aria-hidden="true"><span></span><span>Nombre</span><span>Tipo</span><span>Tamaño</span><span>Modificado</span></div>':'';
-    list.innerHTML=entries.length?headings+entries.map(e=>`<div class="cloud-row${S.sel.has(e.path)?' is-selected':''}" data-kind="${e.type==='dir'?'folder':'file'}"><label class="cloud-check"><input type="checkbox" data-select="${esc(e.path)}" aria-label="Seleccionar ${esc(e.name)}" ${S.sel.has(e.path)?'checked':''} ${!e.downloadable?'disabled':''}></label><button type="button" class="cloud-open" data-path="${esc(e.path)}" title="${esc(e.name)}">${icon(fileIcon(e))}<span>${esc(e.name)}</span></button><span class="cloud-row-type" data-label="Tipo">${esc(fileType(e))}</span><span class="cloud-row-meta" data-label="Tamaño">${e.type==='dir'?'—':e.downloadable?size(e.size):'En la nube'}</span><span class="cloud-row-date" data-label="Modificado">${esc(modified(e.modified))}</span></div>`).join(''):`<div class="empty-state">${S.filter?'No hay coincidencias en esta carpeta.':'Esta carpeta está vacía.'}</div>`;
+    list.innerHTML=entries.length?headings+entries.map(e=>`<div class="cloud-row${S.sel.has(e.path)?' is-selected':''}" data-kind="${e.type==='dir'?'folder':'file'}" data-file-color="${esc(e.organization?.color||'')}"><label class="cloud-check"><input type="checkbox" data-select="${esc(e.path)}" aria-label="Seleccionar ${esc(e.name)}" ${S.sel.has(e.path)?'checked':''}></label><button type="button" class="cloud-open" data-path="${esc(e.path)}" title="${esc(e.name)}">${icon(fileIcon(e))}<span>${esc(e.name)}${cloudBadges(e.organization)}</span></button><span class="cloud-row-type" data-label="Tipo">${esc(fileType(e))}</span><span class="cloud-row-meta" data-label="Tamaño">${e.type==='dir'?'—':e.downloadable?size(e.size):'En la nube'}</span><span class="cloud-row-date" data-label="Modificado">${esc(modified(e.modified))}</span><button type="button" class="icon-btn cloud-organize" data-organize="${esc(e.path)}" aria-label="Organizar ${esc(e.name)}">${icon('tags')}</button></div>`).join(''):`<div class="empty-state">${S.filter?'No hay coincidencias en esta carpeta.':'Esta carpeta está vacía.'}</div>`;
     list.querySelectorAll('[data-select]').forEach(input=>input.onchange=()=>{if(input.checked)S.sel.add(input.dataset.select);else S.sel.delete(input.dataset.select);input.closest('.cloud-row').classList.toggle('is-selected',input.checked);updateSelection();});
     list.querySelectorAll('[data-path]').forEach(btn=>btn.onclick=()=>{const e=S.entries.find(e=>e.path===btn.dataset.path);void go(e.type==='dir'?{cloudPath:e.path,item:null,q:null}:{item:e.path});});
+    list.querySelectorAll('[data-organize]').forEach(b=>b.onclick=()=>organize([b.dataset.organize]));
     el('cloud-more').hidden=!S.cursor;updateSelection();refreshIcons();
   }
+  function cloudBadges(m){return m?`<span class="file-badges">${Object.entries(AxonFileCatalog.marks).filter(([k])=>m[k]).map(([, [ic,label]])=>`<span title="${label}">${icon(ic)}</span>`).join('')}${m.tags.map(t=>`<span class="file-tag">${esc(t)}</span>`).join('')}</span>`:'';}
+  async function loadOrganization(){const endpoint=base,location=S.location,nav=S.nav;const d=await api(endpoint+'/organization?'+new URLSearchParams({location}));if(nav!==S.nav)return;S.organization=d.entries;
+    el('cloud-quick').innerHTML=d.entries.filter(r=>r.metadata.pinned).slice(0,12).map(r=>`<a href="/archivos?${new URLSearchParams({source:S.provider,location,cloudPath:r.kind==='dir'?r.path:r.path.slice(0,r.path.lastIndexOf('/')), ...(r.kind==='file'?{item:r.path}:{})})}">${icon('pin')}${esc(r.name||name())}</a>`).join('');refreshIcons();
+  }
+  function organize(paths){const endpoint=base,location=S.location,nav=S.nav,metadata=new Map(S.organization.map(r=>[r.path,r.metadata]));AxonFileCatalog.edit(paths,{get:p=>metadata.get(p)||{color:'',tags:[],favorite:false,liked:false,saved:false,pinned:false,revision:0},patch:async(paths,patch)=>{await api(endpoint+'/organization',{method:'PATCH',body:{location,paths,patch}});if(nav!==S.nav)return;await loadOrganization();const m=new Map(S.organization.map(r=>[r.path,r.metadata]));S.entries.forEach(e=>e.organization=m.get(e.path));renderList();}});}
+  for(const [id,key] of [['cloud-mark','mark'],['cloud-color','color'],['cloud-kind','kind']])el(id).onchange=e=>{S[key]=e.target.value;renderList();saveView();void expandForFilter();};
+  el('cloud-organize-selection').onclick=()=>organize([...S.sel]);
   function breadcrumbs(){
     const pieces=S.path.split('/').filter(Boolean);let p='';const links=[{name:S.status.sources.find(s=>s.id===S.location)?.name||name(),path:''}];
     if(S.crumbs)links.push(...S.crumbs);else for(const part of pieces){p+='/'+part;links.push({name:part,path:p});}
@@ -107,14 +117,15 @@
     }else body.textContent='Este formato no tiene vista previa en el navegador. Podés guardar una copia para abrirlo con una aplicación.';
   }
   async function restore(p,snapshot){
-    const nav=++S.nav;S.provider=Object.hasOwn(names,p.source)?p.source:'dropbox';base='/api/files/'+S.provider;S.crumbs=null;S.jobs=[];S.uploads=[];S.jobsKey='';el('cloud-jobs').replaceChildren();clearTimeout(S.poll);closePreview();S.local ||= window.AxonFilesLocal.params();sec.classList.add('fm-cloud-mode');panel.hidden=false;
+    const nav=++S.nav;S.provider=Object.hasOwn(names,p.source)?p.source:'dropbox';base='/api/files/'+S.provider;S.crumbs=null;S.jobs=[];S.uploads=[];S.jobsKey='';el('cloud-jobs').replaceChildren();clearTimeout(S.poll);closePreview();S.local ||= window.AxonFilesLocal.params();sec.prepend(tabs);sec.classList.add('fm-cloud-mode');panel.hidden=false;
     tabs.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.source===S.provider)));
+    S.mark=p.mark||'';S.color=p.color||'';S.kind=p.kind||'';el('cloud-mark').value=S.mark;el('cloud-color').value=S.color;el('cloud-kind').value=S.kind;
     S.location=p.location||'account';S.path=p.cloudPath||'';S.filter=p.q||'';S.item=p.item||null;S.view=views.includes(p.view)?p.view:S.view;S.sort=sorts.includes(p.sort)?p.sort:S.sort;S.order=['asc','desc'].includes(p.order)?p.order:S.order;S.sel=new Set();S.entries=[];S.cursor=null;S.busy=true;el('cloud-browser').hidden=true;el('cloud-filter').value=S.filter;message('Consultando '+name()+'…');panel.querySelector('h2').textContent=name();await refreshSources();
     try{
       const d=await request(base+'/status');if(nav!==S.nav)return;S.status=d;
       if(d.connected&&!d.sources.some(s=>s.id===S.location)){S.location='account';S.path='';S.item=null;}
       renderConnection();
-      if(d.connected&&d.visible!==false){el('cloud-list').textContent='Cargando carpeta…';el('cloud-list').setAttribute('aria-busy','true');const page=await request(base+'/list?'+query(S.path));if(nav!==S.nav)return;if(S.provider==='dropbox'&&!d.appFolder){const status=await request(base+'/status');if(nav!==S.nav)return;S.status=status;renderConnection();}S.entries=page.entries;S.cursor=page.cursor;S.crumbs=page.breadcrumbs||null;S.sel=new Set((snapshot?.sel||[]).filter(path=>S.entries.some(e=>e.path===path)));breadcrumbs();S.busy=false;renderList();await preview(S.entries.find(e=>e.path===S.item||e.name===S.item));}
+      if(d.connected&&d.visible!==false){el('cloud-list').textContent='Cargando carpeta…';el('cloud-list').setAttribute('aria-busy','true');const page=await request(base+'/list?'+query(S.path));if(nav!==S.nav)return;if(S.provider==='dropbox'&&!d.appFolder){const status=await request(base+'/status');if(nav!==S.nav)return;S.status=status;renderConnection();}S.entries=page.entries;await loadOrganization();if(nav!==S.nav)return;S.cursor=page.cursor;S.crumbs=page.breadcrumbs||null;S.sel=new Set((snapshot?.sel||[]).filter(path=>S.entries.some(e=>e.path===path)));breadcrumbs();S.busy=false;renderList();await preview(S.entries.find(e=>e.path===S.item||e.name===S.item));}
       if(nav!==S.nav)return;
       const reason={expirada:'La autorización expiró. Volvé a conectar.',conflicto:'La conexión cambió o fue cancelada. Volvé a intentar.',limite:'La plataforma limitó los intentos. Esperá un momento y reintentá.',plataforma:'La plataforma no respondió. Revisá su estado y reintentá.'}[p.reason];
       message(p.connection==='failed'?(reason||'No se pudo conectar la cuenta. Revisá la configuración y volvé a intentar.'):p.connection==='cancelled'?'Conexión cancelada.':'',p.connection==='failed');
@@ -173,7 +184,7 @@
   // is active so remote folders don't produce false negatives.
   async function expandForFilter(){
     if(!S.filter||!S.cursor)return;const nav=S.nav,ticket=++S.expanding;
-    while(S.cursor&&S.filter&&nav===S.nav&&ticket===S.expanding){
+    while(S.cursor&&(S.filter||S.mark||S.color||S.kind)&&nav===S.nav&&ticket===S.expanding){
       try{const page=await request(base+'/list?'+query(S.path,{cursor:S.cursor}));if(nav!==S.nav||ticket!==S.expanding)return;const paths=new Set(S.entries.map(e=>e.path));S.entries.push(...page.entries.filter(e=>!paths.has(e.path)));S.cursor=page.cursor;renderList();}
       catch(e){if(nav===S.nav&&ticket===S.expanding)message(e.message,true);return;}
       if(S.entries.length>50000)return;
@@ -182,7 +193,7 @@
   panel.querySelectorAll('[data-cloud-view]').forEach(b=>b.onclick=()=>{S.view=b.dataset.cloudView;renderList();saveView();});
   el('cloud-sort').onchange=()=>{S.sort=el('cloud-sort').value;renderList();saveView();};
   el('cloud-order').onclick=()=>{S.order=S.order==='asc'?'desc':'asc';renderList();saveView();};
-  el('cloud-select-all').onchange=()=>{for(const e of visible())if(e.downloadable){if(el('cloud-select-all').checked)S.sel.add(e.path);else S.sel.delete(e.path);}renderList();};
+  el('cloud-select-all').onchange=()=>{for(const e of visible()){if(el('cloud-select-all').checked)S.sel.add(e.path);else S.sel.delete(e.path);}renderList();};
   el('cloud-more').onclick=e=>action(e.currentTarget,async()=>{const nav=S.nav,page=await request(base+'/list?'+query(S.path,{cursor:S.cursor}));if(nav!==S.nav)return;const paths=new Set(S.entries.map(e=>e.path));S.entries.push(...page.entries.filter(e=>!paths.has(e.path)));S.cursor=page.cursor;renderList();});
   el('cloud-shared-form').onsubmit=e=>{e.preventDefault();const form=e.currentTarget;action(form.querySelector('button'),async()=>{const d=await request(base+'/shared',{url:new FormData(form).get('url')});form.reset();await go({location:d.id,cloudPath:'',q:null,item:null});});};
   el('cloud-remove-link').onclick=e=>action(e.currentTarget,async()=>{if(!await confirmDialog('Quitar enlace','Se quita este acceso de AXON. El contenido de Dropbox se conserva.','Quitar'))return;await request(base+'/shared/'+S.location+'/remove',{});await go({location:'account',cloudPath:'',item:null,q:null});});

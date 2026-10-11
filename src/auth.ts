@@ -160,8 +160,8 @@ export function clearSessionCookie(c: Context): void {
 // Optional revocation hook — wired by the sessions module at boot so auth.ts
 // stays dependency-free.
 let revokedCheck: ((sessionId: string) => boolean) | null = null;
-let touchHook: ((sessionId: string) => void) | null = null;
-export function setSessionHooks(hooks: { isRevoked?: (id: string) => boolean; touch?: (id: string) => void }): void {
+let touchHook: ((sessionId: string, context: Context, payload: SessionPayload) => void) | null = null;
+export function setSessionHooks(hooks: { isRevoked?: (id: string) => boolean; touch?: (id: string, context: Context, payload: SessionPayload) => void }): void {
   revokedCheck = hooks.isRevoked || null;
   touchHook = hooks.touch || null;
 }
@@ -193,7 +193,7 @@ export const requireAuth: MiddlewareHandler = async (c, next) => {
   const sid = legacySessionId(cookie, session);
   if (sid) {
     if (revokedCheck?.(sid)) return c.json({ error: 'Sesión revocada' }, 401);
-    touchHook?.(sid);
+    touchHook?.(sid, c, session);
   }
   c.set('user', session.username);
   await next();

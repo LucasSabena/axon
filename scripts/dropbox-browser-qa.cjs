@@ -56,7 +56,7 @@ async page => {
     await page.locator('[data-select="/Nota.txt"]').uncheck();
   }
   checks.push('Desktop/tablet/mobile at 1440/768/390/320px and keyboard-dismissable destination dialog');
-  await page.locator('[data-source="server"]').click();await page.locator('#fm-location').waitFor({state:'visible'});assert(await page.locator('#cloud-browser').isHidden(),'Cloud view stayed visible');
+  await page.locator('[data-source="server"]').click();await page.locator('#fm-breadcrumb').waitFor({state:'visible'});assert(await page.locator('#cloud-browser').isHidden(),'Cloud view stayed visible');
   await page.goBack();await page.locator('#cloud-browser').waitFor({state:'visible'});checks.push('Local source restored and Back returns to Dropbox');
   assert(!errors.length,'Browser errors: '+errors.join('; '));
   return {ok:true,checks,errors,realAccount:false,dropboxResponses:'mocked',copies,streams};

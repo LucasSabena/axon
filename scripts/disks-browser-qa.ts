@@ -1,0 +1,58 @@
+import {chromium} from 'playwright';
+import AxeBuilder from '@axe-core/playwright';
+const origin=process.env.AXON_QA_ORIGIN||'http://127.0.0.1:3469';
+const browser=await chromium.launch({headless:true,...(process.env.AXON_QA_BROWSER_CHANNEL?{channel:process.env.AXON_QA_BROWSER_CHANNEL}:{})});
+const errors:string[]=[];
+try{
+ const context=await browser.newContext({viewport:{width:1440,height:1000}});const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));
+ await page.goto(origin+'/almacenamiento?view=disks');await page.locator('#username').fill('qa');await page.locator('#password').fill('axon-local-qa');await page.locator('#login-form button[type=submit]').click();
+ await page.locator('#disk-manager [data-disk="fixture-new"][data-disk-operation="layout"]').waitFor();
+ await page.waitForFunction(()=>(window as any).AxonNavigation?.ready);
+ const assert=(v:unknown,message:string)=>{if(!v)throw new Error(message);};
+ const go=async(url:string)=>{await page.evaluate(url=>(window as any).AxonNavigation.go(url),url);};
+ assert(!(await page.locator('[data-partition="fixture-efi"]').count()),'EFI appears by default');
+ assert(await page.locator('[data-disk="fixture-system"][data-disk-operation="layout"]').isDisabled(),'System format enabled');
+ await page.locator('[data-show-hidden]').check();await page.locator('[data-partition="fixture-efi"]').first().waitFor();
+ assert(await page.locator('[data-partition="fixture-efi"][data-disk-operation="format"]').isDisabled(),'EFI format enabled');
+ const efiShow=page.locator('.disk-partition').filter({has:page.locator('[data-partition="fixture-efi"]')}).locator('[data-visibility]');
+ await efiShow.click();await page.waitForFunction(()=>!(document.querySelector('.disk-partition:has([data-partition="fixture-efi"])')?.classList.contains('disk-is-hidden')));
+ await page.reload();await page.locator('[data-partition="fixture-efi"][data-disk-operation="format"]').waitFor();
+ assert(await page.locator('[data-partition="fixture-efi"][data-disk-operation="format"]').isDisabled(),'Showing EFI removed its protection');
+ await page.locator('.disk-partition').filter({has:page.locator('[data-partition="fixture-efi"]')}).locator('[data-visibility]').click();
+ await page.locator('[data-partition="fixture-efi"]').first().waitFor({state:'detached'});
+ const hide=page.locator('.disk-device').filter({has:page.locator('[data-disk="fixture-new"]')}).locator('header [data-visibility]');
+ await hide.click();await page.locator('[data-disk="fixture-new"]').first().waitFor({state:'detached'});
+ await go('/archivos');await page.locator('#fm-disks-open').click();await page.locator('#fm-volumes-refresh:not([disabled])').click();await page.waitForTimeout(300);
+ assert(!(await page.locator('#fm-volumes').getByText('Disco nuevo (prueba)').count()),'Hidden disk remains in Files');
+ assert(!(await page.locator('#fm-volumes').getByText('EFI',{exact:true}).count()),'EFI remains in Files');
+ await go('/almacenamiento?view=disks');await page.locator('[data-show-hidden]').check();
+ await page.locator('.disk-device').filter({has:page.locator('[data-disk="fixture-new"]')}).locator('header [data-visibility]').click();
+ await page.locator('[data-show-hidden]').uncheck();
+ await page.locator('[data-disk="fixture-new"][data-disk-operation="layout"]').click();
+ await page.locator('[data-add-part]').click();assert(await page.locator('[data-part-row]').count()===2,'Cannot create two partitions');
+ await page.locator('[data-part-row="1"] [name=filesystem]').selectOption('exfat');
+ assert((await page.locator('[data-part-row="1"] [data-format-description]').textContent())!.includes('Windows'),'No format explanation');
+ const axe=await new AxeBuilder({page}).include('.disk-dialog').analyze();assert(!axe.violations.length,'Dialog accessibility: '+axe.violations.map(v=>v.id).join(','));
+ assert(await page.locator('[data-part-row="1"] [name=filesystem]').inputValue()==='exfat','Chosen filesystem lost before review');
+ const response=page.waitForResponse(r=>r.url().endsWith('/api/storage/disks/plans')&&r.request().method()==='POST');await page.locator('[data-review]').click();const reviewed=await (await response).json();assert(reviewed.plan.spec.partitions[1].filesystem==='exfat','Reviewed format differs from the selected format');await page.locator('[data-disk-confirm]').waitFor();
+ assert(await page.locator('[data-execute]').isDisabled(),'Execution lacks confirmation');
+ await page.locator('[data-disk-confirm]').fill('BORRAR otro-disco');assert(await page.locator('[data-execute]').isDisabled(),'Wrong identity accepted');
+ for(const width of [1440,390,320]){
+  await page.setViewportSize({width,height:1000});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Page overflow at '+width);
+  assert(await page.locator('.disk-dialog').evaluate(el=>el.scrollWidth<=el.clientWidth+1),'Dialog overflow at '+width);
+  await page.screenshot({path:`/tmp/axon-disk-review-${width}.png`,fullPage:true});
+ }
+ await page.locator('[data-disk-confirm]').fill('BORRAR QA-NEW-001');await page.locator('[data-execute]').click();await page.getByRole('heading',{name:'Verificado',exact:true}).waitFor();
+ assert((await page.locator('.disk-dialog').textContent())!.includes('ningún disco real'),'QA is not identified as simulation');
+ await page.locator('[data-disk-close]').click();await page.reload();await page.locator('[data-disk-result]').first().waitFor();
+ await page.locator('[data-disk-result]').first().click();await page.getByRole('heading',{name:'Verificado',exact:true}).waitFor();await page.locator('[data-disk-close]').click();
+ await page.setViewportSize({width:1440,height:1000});
+ const managementAxe=await new AxeBuilder({page}).include('#disk-manager').analyze();assert(!managementAxe.violations.length,'Management accessibility: '+JSON.stringify(managementAxe.violations.map(v=>({id:v.id,nodes:v.nodes.map(n=>({target:n.target,summary:n.failureSummary}))}))));
+ await page.evaluate(()=>window.scrollTo(0,0));await page.screenshot({path:'/tmp/axon-disk-manager-desktop.png',fullPage:true});
+ await go('/almacenamiento?view=usage');await page.locator('#storage-scan').waitFor();assert(await page.locator('#storage-scan').isVisible(),'Usage controls lost after disk management');await go('/almacenamiento?view=disks');await page.locator('[data-disk-refresh]').waitFor();
+ await page.route('**/api/storage/disks',route=>route.fulfill({status:503,json:{ok:false,error:'Inventario no disponible (prueba)'}}));
+ await page.locator('[data-disk-refresh]').click();await page.getByText('Inventario no disponible (prueba)',{exact:true}).waitFor();assert(await page.locator('[data-disk="fixture-new"]').count()>0,'Failure discarded last known inventory');await page.unroute('**/api/storage/disks');await page.locator('[data-disk-refresh]').click();
+ await page.locator('[data-disk="fixture-new"][data-disk-operation="layout"]').click();
+ await page.route('**/api/storage/disks/plans',route=>route.fulfill({status:409,json:{ok:false,error:'Disco cambiado (prueba)'}}));await page.locator('[data-review]').click();await page.getByText('Disco cambiado (prueba)',{exact:true}).waitFor();assert(await page.locator('[data-review]').isEnabled(),'Rejected plan disables retries');await page.unroute('**/api/storage/disks/plans');await page.locator('[data-disk-close]').click();
+ assert(!errors.length,'Runtime errors: '+errors.join('; '));console.log(JSON.stringify({ok:true,checks:['EFI hidden by default','visibility persists after reload and propagates to Files','system protection survives visibility changes','two partitions and explained formats','explicit correct serial confirmation','desktop 390 and 320 responsive layouts','durable simulated receipt and reload','axe dialog and management','inventory failure retains previous state','changed disk review rejection allows retry'],errors}));
+}finally{await browser.close();}

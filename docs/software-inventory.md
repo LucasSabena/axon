@@ -13,6 +13,7 @@ No requiere cuentas de servicios de logos ni scripts específicos del servidor o
 | Flatpak | Aplicaciones y runtimes, sistema, usuario e instalaciones nombradas; ref y origen | Commit exacto, respetando masks y ámbito. Las dependencias y extensiones se actualizan como registros separados |
 | pnpm global | Dependencias directas, prefijo real, versiones y ejecutables | Misma instalación y usuario; candidato sujeto a `minimumReleaseAge` y exclusiones |
 | Bun global | Manifest y paquetes del ámbito global | Versiones exactas del registro público; configuraciones de registro, publicación o scanner que no se pueden resolver quedan sin actualización automática |
+| Prefijos Node globales heredados | Manifests en `.local`, `.npm-global` y `/usr/local`, sin ejecutar otro gestor | Sólo lectura; se conserva el gestor de origen, sin migración automática |
 | DNF/RPM, Pacman | Base de paquetes y candidatos nativos | Sólo lectura; DNF necesita simulación propia y Arch requiere una transacción completa del sistema |
 | pipx, uv, Cargo, rustup | Herramientas permanentes, crates y toolchains registrados | Sólo lectura; no se cambian proyectos, pins, fuentes git ni perfiles por aproximación |
 | Homebrew, Nix, mise | Registros nativos cuando el formato es compatible | Sólo lectura; errores y formatos incompatibles aparecen en Fuentes |
@@ -21,6 +22,12 @@ No requiere cuentas de servicios de logos ni scripts específicos del servidor o
 | Docker / Compose | Inventario existente de contenedores e imágenes | Mantiene su recorrido de despliegue separado |
 
 Los registros JavaScript instalados por fuentes locales, git o aliases conservan su origen y no se reemplazan por un paquete del registro. Los registros pnpm privados o por scope se muestran, pero no se consulta un registro público como sustituto. Tampoco se migran instalaciones del host a pnpm durante la detección.
+
+Los accesos locales que apuntan a un ejecutable ausente también aparecen. Su detalle explica **Acceso roto**, sin inventar una versión instalada o presentar una reinstalación como actualización.
+
+La API devuelve inmediatamente el último inventario o un estado de carga inicial. El helper publica resultados por fuente, con hasta cuatro lecturas simultáneas. Las versiones remotas se comprueban en segundo plano y una fuente lenta no retiene los resultados de las demás. El navegador consulta el progreso mientras Programas está visible y vuelve a pintar sólo cuando cambian los resultados. Los iconos ya renderizados se reutilizan; consultar un icono no dispara otro inventario.
+
+**Actualizaciones** incluye también candidatos detectados por adaptadores de sólo lectura, con su versión objetivo y la limitación de ejecución visible. Los botones de revisión se habilitan únicamente para instalaciones gestionables. La revisión vuelve a leer los gestores seleccionados y mantiene la simulación, los locks y la verificación de objetivos exactos.
 
 El helper usa Python 3 y bibliotecas estándar del host. Python 3.11 permite interpretar configuraciones Bun TOML; en una versión anterior esa configuración se declara incompleta. Un gestor ausente no bloquea los demás. Un error no equivale a cero instalaciones: se conserva la última lectura y se deshabilitan cambios sobre esa fuente.
 

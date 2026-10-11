@@ -12,7 +12,7 @@ import {FileTransfers,publicTransferPlan,legacyTransferProgress} from './file-tr
 import {actor,body as maintenanceBody,only,protect,requestOrigin} from './storage/http';
 import {MaintenanceError} from './storage/types';
 import { volumeForPath } from './file-volumes';
-import { hostVolumes, initHostStorage, resolveHostPath } from './host-storage';
+import { hostVolumes, diskVisibility, initHostStorage, resolveHostPath } from './host-storage';
 import { fileTreeSize } from './file-sizes';
 import { documentResponse } from './document-preview';
 
@@ -301,7 +301,7 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
   app.get('/api/files/volumes',async c=>{
     c.header('Cache-Control','private, no-store');
     actor(c);
-    return c.json(await hostVolumes.snapshot(true));
+    return c.json(await diskVisibility.apply(await hostVolumes.snapshot(true)));
   });
   protect(app,'/api/files/volumes');
   app.post('/api/files/volumes/:id/mount',async c=>{

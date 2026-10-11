@@ -1,6 +1,7 @@
 import { documentResponse } from './document-preview';
 import { resolveHostPath, hostVolumes } from './host-storage';
 import type {FileTransfers} from './file-transfers';
+import type { FileCatalog } from './file-catalog';
 import {reviewLibraryMove,movedReference,type TransferReview} from './library-transfer-review';
 import {actor as maintenanceActor} from './storage/http';
 import {MaintenanceError} from './storage/types';
@@ -115,7 +116,7 @@ addKind('audio', 'mp3 wav flac ogg oga m4a aac opus aiff aif wma');
 addKind('pdf', 'pdf');
 addKind('vector', 'svg svgz eps ai');
 addKind('design', 'psd psb indd idml aep prproj fig sketch xd afdesign afphoto afpub cdr blend');
-addKind('doc', 'doc docx xls xlsx ppt pptx odt ods odp rtf txt md csv tsv docm dot dotx ott pptm pps ppsx pot potx otp xlsm xlt xltx ots key pages numbers');
+addKind('doc', 'doc docx xls xlsx ppt pptx odt ods odp rtf txt md markdown csv tsv docm dot dotx ott pptm pps ppsx pot potx otp xlsm xlt xltx ots key pages numbers');
 
 const KIND_FOLDER: Record<Kind, string> = {
   image: 'Imágenes', raw: 'RAW', video: 'Videos', audio: 'Audio', pdf: 'PDF',
@@ -137,7 +138,7 @@ const MIME: Record<string, string> = {
   avi: 'video/x-msvideo', ogv: 'video/ogg', wmv: 'video/x-ms-wmv', mpg: 'video/mpeg', mpeg: 'video/mpeg',
   mp3: 'audio/mpeg', wav: 'audio/wav', flac: 'audio/flac', ogg: 'audio/ogg', oga: 'audio/ogg',
   m4a: 'audio/mp4', aac: 'audio/aac', opus: 'audio/opus',
-  pdf: 'application/pdf', txt: 'text/plain; charset=utf-8', md: 'text/plain; charset=utf-8',
+  pdf: 'application/pdf', txt: 'text/plain; charset=utf-8', md: 'text/plain; charset=utf-8', markdown: 'text/plain; charset=utf-8',
   csv: 'text/plain; charset=utf-8', zip: 'application/zip',
 };
 
@@ -1780,7 +1781,7 @@ async function duplicates(): Promise<NonNullable<typeof dupesCache>> {
 // Register AFTER app.use('/api/*', requireAuth): /api/library/* inherits
 // cookie auth; /s/* is intentionally public (the token is the capability).
 
-export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers): void {
+export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers,catalog?:FileCatalog): void {
   ensureReady().then(() => {
     scan().catch(() => {});
   });
@@ -1829,11 +1830,13 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers): void 
   // If-None-Match and get a 304 unless something actually changed.
   app.get('/api/library', async (c) => {
     await ensureReady();
-    const etag = `W/"lib-${rev}"`;
+    if(catalog)await catalog.migrateFavorites(c.get('user') as string,state.favorites);
+    const metadataRevision=catalog?.revision(c.get('user') as string)||0;
+    const etag = `W/"lib-${rev}-${metadataRevision}-${createHash('sha256').update((c.get('user') as string)||'legacy').digest('hex').slice(0,12)}"`;
     if (c.req.header('if-none-match') === etag) return new Response(null, { status: 304, headers: { ETag: etag, 'Cache-Control': 'private, no-cache' } });
     c.header('ETag', etag);
     c.header('Cache-Control', 'private, no-cache');
-    const favs = new Set(state.favorites);
+    const favs = catalog?new Set(catalog.entries(c.get('user') as string,(await hostVolumes.snapshot()).volumes).filter(r=>r.available&&r.metadata.favorite).map(r=>r.path)):new Set(state.favorites);
     const list = [...items.values()];
     return c.json({
       ok: true,
@@ -1843,7 +1846,7 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers): void 
       uploadRoot: state.uploadRoot,
       shareBase: state.shareBase,
       scannedAt,
-      revision: rev,
+      revision: rev,metadataRevision,
       scanning,
       metaPending,
       thumbsPending: hiQ.length + loQ.length + active,
@@ -1882,7 +1885,7 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers): void 
     if (currentId) await freshItem(currentId);
     if (c.req.query('live') === '1' && Date.now() - scannedAt > ACTIVE_RESCAN_MS && !scanning) scan().catch(() => {});
     c.header('Cache-Control', 'private, no-store');
-    return c.json({ ok: true, revision: rev, scanning, scannedAt, metaPending, thumbsPending: hiQ.length + loQ.length + active, count: items.size });
+    return c.json({ ok: true, revision: rev,metadataRevision:catalog?.revision(c.get('user') as string)||0, scanning, scannedAt, metaPending, thumbsPending: hiQ.length + loQ.length + active, count: items.size });
   });
 
   app.post('/api/library/rescan', async (c) => {
@@ -1895,12 +1898,17 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers): void 
 
   app.put('/api/library/settings', async (c) => {
     await ensureReady();
-    const body = await c.req.json<{ roots?: string[]; uploadRoot?: string; shareBase?: string }>().catch(() => ({} as never));
+    const body = await c.req.json<{ roots?: string[]; addRoot?: string; uploadRoot?: string; shareBase?: string }>().catch(() => ({} as never));
     const next={...state};
     if(Array.isArray(body.roots)){
       const clean:string[]=[];
       for(const r of body.roots){if(!String(r||'').trim())continue;const p=await resolveHostPath(String(r),{directory:true});if(p==='/home')return fail(c,400,'Elegí una carpeta dentro de /home');if(!clean.includes(p))clean.push(p);}
       next.roots=clean;
+    }
+    if(typeof body.addRoot==='string' && body.addRoot.trim()){
+      const p=await resolveHostPath(body.addRoot,{directory:true});
+      if(p==='/home')return fail(c,400,'Elegí una carpeta dentro de /home');
+      next.roots=[...new Set([...state.roots,p])];
     }
     if(typeof body.uploadRoot==='string'&&body.uploadRoot.trim()){
       const p=await resolveHostPath(body.uploadRoot);if(p==='/home')return fail(c,400,'Elegí una carpeta de subidas');
@@ -1974,7 +1982,9 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers): void 
   // ---- Organize ----
   app.post('/api/library/favorite', async (c) => {
     const { ids, on } = await c.req.json<{ ids: string[]; on: boolean }>().catch(() => ({ ids: [], on: true }));
+    if(!Array.isArray(ids)||!ids.length||ids.length>200||typeof on!=='boolean')return fail(c,400,'Favoritos inválidos');
     const paths = (ids || []).map((id) => items.get(id)?.p).filter(Boolean) as string[];
+    if(catalog){const base=process.env.AXON_PUBLIC_ORIGIN?publicOrigin():new URL(c.req.url).origin;const res=await app.request(new URL('/api/file-catalog',base).href,{method:'PATCH',headers:{cookie:c.req.header('cookie')||'',origin:base,'content-type':'application/json'},body:JSON.stringify({paths,patch:{favorite:on}})});return res;}
     const set = new Set(state.favorites);
     for (const p of paths) on ? set.add(p) : set.delete(p);
     state.favorites = [...set];

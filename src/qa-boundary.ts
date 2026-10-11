@@ -22,6 +22,8 @@ export function registerQaBoundary(app:Hono,root:string|null){
    const fixtureFile=/^\/api\/files\/(create|write|mkdir|rename|copy|trash|restore|upload(?:\/init|\/[^/]+(?:\/finish)?)?)$/.test(p);
    const fixtureTransfer=/^\/api\/(files\/(transfers(?:\/plans|\/[^/]+\/(?:execute|recover))?|copyjob(?:\/[^/]+)?)|storage\/plans\/[^/]+\/(execute|cancel|recover))$/.test(p);
    const fixtureTrash=/^\/api\/storage\/trash\/(restore|migration-plans(?:\/[^/]+\/(?:execute|recover))?)$/.test(p);
+   const fixtureCatalog=p==='/api/file-catalog'||p==='/api/fans'||p==='/api/usb';
+   const fixtureSessions=/^\/api\/sessions\/(revoke-others|[^/]+(?:\/revoke)?)$/.test(p);
    const fixtureLibrary=/^\/api\/library\/(favorite|shares|collections|rescan|settings)$/.test(p);
    // Conversion only stages root-validated fixture bytes in a private cache.
    const fixtureDocuments=/^\/api\/(files\/document|library\/document\/[^/]+)$/.test(p);
@@ -32,10 +34,11 @@ export function registerQaBoundary(app:Hono,root:string|null){
    // Account metadata and launcher writes use the QA-owned home. Logins remain
    // blocked: they would run real agent binaries and contact external accounts.
    const fixtureAccounts=/^\/api\/agent-accounts\/(codex|claude)(?:\/(activate|rename|install|delete))?$/.test(p);
-   const fixturePlatform=/^\/api\/(access\/tokens(?:\/[^/]+)?|project-hub\/[^/]+\/(diagnose|bindings)|backups\/(recovery-kit|policies(?:\/[^/]+(?:\/run)?)?|jobs\/[^/]+\/(restore|verify)))$/.test(p);
+   const fixturePlatform=/^\/api\/(access\/tokens(?:\/[^/]+(?:\/rotate)?)?|project-hub\/[^/]+\/(diagnose|bindings)|backups\/(recovery-kit|policies(?:\/[^/]+(?:\/run)?)?|jobs\/[^/]+\/(restore|verify)))$/.test(p);
    // Onboarding and credential routes only write files inside the QA data dir.
+   const fixtureDisks=/^\/api\/storage\/disks\/(visibility|plans(?:\/[^/]+\/execute)?)$/.test(p);
    const fixtureOnboarding=/^\/api\/(onboarding\/(setup|complete|dismiss|check|reset)|auth\/(password|totp\/(setup|enable|disable)))$/.test(p);
-   if(!safe&&!fixtureTrash&&!fixtureTransfer&&!fixtureFile&&!fixtureLibrary&&!fixtureDocuments&&!fixtureAccounts&&!fixturePlatform&&!fixtureProject&&!fixtureAgentDoc&&!fixtureSoftwareIcons&&!fixtureOnboarding)return c.json({ok:false,error:'QA: mutación de host bloqueada por el servidor; usá pruebas con fixtures inyectadas'},403);
+   if(!safe&&!fixtureSessions&&!fixtureCatalog&&!fixtureTrash&&!fixtureTransfer&&!fixtureFile&&!fixtureLibrary&&!fixtureDocuments&&!fixtureAccounts&&!fixturePlatform&&!fixtureProject&&!fixtureAgentDoc&&!fixtureSoftwareIcons&&!fixtureOnboarding&&!fixtureDisks)return c.json({ok:false,error:'QA: mutación de host bloqueada por el servidor; usá pruebas con fixtures inyectadas'},403);
   }
   await next();
  });

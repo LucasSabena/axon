@@ -4,11 +4,11 @@
   const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   document.head.append(Object.assign(document.createElement('style'),{textContent:'.host-crumbs{display:flex;flex-wrap:wrap;gap:0;align-items:center;font-size:12px;margin:0 0 8px}.host-crumbs button{border:0;background:none;color:var(--text-dim);cursor:pointer;padding:2px 4px;border-radius:4px;font:inherit;font-size:inherit}.host-crumbs button:hover{color:var(--text);background:var(--bg-hover)}.host-crumbs button:last-child{color:var(--text);font-weight:600}.host-crumbs span{color:var(--text-faint)}'}));
   const size=n=>n==null?'No disponible':new Intl.NumberFormat('es-AR',{maximumFractionDigits:1}).format(n/2**30)+' GB';
-  let data=null,flight=null,error='',dialog=null,request=null,folder='',chosen=null,generation=0,signedIn=false;
+  let data=null,flight=null,error='',dialog=null,disksDialog=null,request=null,folder='',chosen=null,generation=0,signedIn=false;
   document.addEventListener('axon:authenticated',()=>{signedIn=true;refresh().catch(()=>{});});
   document.addEventListener('axon:session-expired',()=>{signedIn=false;});
   const uniqueVolumes=volumes=>{
-    const seen=new Set();return [...volumes].sort((a,b)=>Number(b.path==='/')-Number(a.path==='/')||Number(!!b.path)-Number(!!a.path)||Number(!!a.path?.startsWith('/mnt/axon-disks/'))-Number(!!b.path?.startsWith('/mnt/axon-disks/'))).filter(v=>{
+    const seen=new Set();return [...volumes].filter(v=>!v.hidden).sort((a,b)=>Number(b.path==='/')-Number(a.path==='/')||Number(!!b.path)-Number(!!a.path)||Number(!!a.path?.startsWith('/mnt/axon-disks/'))-Number(!!b.path?.startsWith('/mnt/axon-disks/'))).filter(v=>{
       const k=(v.uuid||v.device)+':'+v.majorMinor;if(seen.has(k))return false;seen.add(k);return true;
     });
   };
@@ -16,11 +16,11 @@
   function cards(){
     if(!data)return '<p>Buscando discos…</p>';
     const disks=uniqueVolumes(data.volumes);
-    return disks.map(v=>`<button type="button" class="host-disk" data-host-volume="${esc(v.id)}" ${v.path&&!v.readable||!v.path&&!v.canMount?'disabled':''} title="${esc(v.path||v.device)}"><strong>${esc(v.name)}</strong><span>${size(v.size)} · ${esc(state(v))}${!v.path&&v.canMount?' · Montar':''}</span><small>${esc(v.path||v.device)}</small>${v.used!=null&&v.size?`<meter min="0" max="${v.size}" value="${v.used}" aria-label="Espacio ocupado"></meter>`:''}</button>`).join('')+data.devices.filter(d=>!disks.some(v=>v.diskId===d.id)).map(d=>`<span class="host-disk"><strong>${esc(d.name)}</strong><span>${size(d.size)} · Sin volumen navegable</span></span>`).join('')||'<p>No hay discos disponibles.</p>';
+    return disks.map(v=>`<button type="button" class="host-disk" data-host-volume="${esc(v.id)}" ${v.path&&!v.readable||!v.path&&!v.canMount?'disabled':''} title="${esc(v.path||v.device)}"><strong>${esc(v.name)}</strong><span>${size(v.size)} · ${esc(state(v))}${!v.path&&v.canMount?' · Montar':''}</span><small>${esc(v.path||v.device)}</small>${v.used!=null&&v.size?`<meter min="0" max="${v.size}" value="${v.used}" aria-label="Espacio ocupado"></meter>`:''}</button>`).join('')+data.devices.filter(d=>!d.hidden&&!data.volumes.some(v=>v.diskId===d.id)).map(d=>`<span class="host-disk"><strong>${esc(d.name)}</strong><span>${size(d.size)} · Sin volumen navegable</span></span>`).join('')||'<p>No hay discos disponibles.</p>';
   }
   function render(){
     for(const el of document.querySelectorAll('[data-host-disks]')){
-      const markup=`<div class="host-disks-heading"><strong>Discos del servidor</strong><button type="button" class="btn-secondary" data-host-refresh ${flight?'disabled':''}>Actualizar discos</button></div><div class="host-disks-grid">${cards()}</div><p class="host-disks-error" role="status">${esc(error)}</p>`;
+      const markup=`<div class="host-disks-heading"><strong>Discos del servidor</strong><a class="btn-secondary" href="/almacenamiento?view=disks">Administrar discos</a><button type="button" class="btn-secondary" data-host-refresh ${flight?'disabled':''}>Actualizar discos</button></div><div class="host-disks-grid">${cards()}</div><p class="host-disks-error" role="status">${esc(error)}</p>`;
       if(el.dataset.content!==markup){el.innerHTML=markup;el.dataset.content=markup;}
     }
   }
@@ -33,7 +33,15 @@
     let v=data?.volumes.find(v=>v.id===id);if(!v)return;
     if(!v.path){const result=await api('/api/files/volumes/'+encodeURIComponent(id)+'/mount',{method:'POST',body:{}});await refresh();v=data.volumes.find(v=>v.path===result.path)||data.volumes.find(v=>v.id===id);if(!v?.path&&result.path)v={...v,path:result.path};}
     if(!v?.path)return;
-    if(dialog?.open)await browse(v.path);else window.AxonNavigation.go('/archivos?path='+encodeURIComponent(v.path));
+    if(dialog?.open)await browse(v.path);else {disksDialog?.close();window.AxonNavigation.go('/archivos?path='+encodeURIComponent(v.path));}
+  }
+  function showDisks(){
+    if(!disksDialog){
+      disksDialog=document.createElement('dialog');disksDialog.className='host-path-picker host-disks-dialog';disksDialog.setAttribute('aria-labelledby','host-disks-title');
+      disksDialog.innerHTML='<div class="host-picker-header"><h2 id="host-disks-title">Discos del servidor</h2><button type="button" class="icon-btn" data-host-disks-close aria-label="Cerrar discos">×</button></div><p class="listener-note">Consultá el espacio disponible o elegí un disco para explorar sus archivos.</p><section data-host-disks aria-label="Discos disponibles"></section>';
+      document.body.append(disksDialog);disksDialog.querySelector('[data-host-disks-close]').onclick=()=>disksDialog.close();disksDialog.querySelector('[data-host-disks]').addEventListener('click',e=>{if(e.target.closest('a'))disksDialog.close();});
+    }
+    render();disksDialog.showModal();refresh().catch(()=>{});
   }
   function ensureDialog(){
     if(dialog)return;
@@ -90,22 +98,25 @@
       const button=document.createElement('button');button.type='button';button.className='btn-secondary host-picker-trigger';button.textContent=opts.append?'Agregar carpeta de un disco':'Explorar discos';button.setAttribute('aria-label',opts.title);
       button.onclick=async()=>{const selected=await pick({...opts,start:opts.append?'~':input.value||'~'});if(!selected)return;const value=opts.suffix?selected.replace(/\/$/,'')+opts.suffix:selected;input.value=opts.append?[...new Set([...input.value.split('\n').map(s=>s.trim()).filter(Boolean),selected])].join('\n'):value;input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));};input.insertAdjacentElement('afterend',button);
     }
-    for(const id of ['dashboard','ops','metrics','storage','agents','projects','library','compose','drop']){
+    for(const id of ['dashboard','ops','metrics','storage','projects','compose']){
       const sec=document.getElementById('tab-'+id);if(!sec||sec.querySelector('.host-disks-panel'))continue;
       const panel=document.createElement('section');panel.className='host-disks-panel';panel.dataset.hostDisks='';panel.setAttribute('aria-label','Discos del servidor');const head=sec.querySelector('.section-header');if(head)head.insertAdjacentElement('afterend',panel);else sec.prepend(panel);
     }
     render();
   }
   document.addEventListener('click',async e=>{
+    if(e.target.closest('[data-host-disks-open]')){showDisks();return;}
     const volume=e.target.closest('[data-host-volume]'),retry=e.target.closest('[data-host-refresh]');if(!volume&&!retry)return;
     const b=volume||retry;b.disabled=true;
-    try{if(volume)await openVolume(volume.dataset.hostVolume);else await refresh();}catch(err){if(dialog?.open)pickerStatus(err.message);else if(typeof errToast==='function')errToast(err);}finally{b.disabled=false;}
+    try{if(volume)await openVolume(volume.dataset.hostVolume);else await refresh();}catch(err){if(dialog?.open)pickerStatus(err.message);else if(disksDialog?.open){error=err.message;render();}else if(typeof errToast==='function')errToast(err);}finally{b.disabled=false;}
   });
   document.getElementById('host-disks-open')?.addEventListener('click',async()=>{const p=await pick({title:'Explorar discos del servidor'});if(p)window.AxonNavigation.go('/archivos?path='+encodeURIComponent(p));});
   let queued=false;new MutationObserver(()=>{if(queued)return;queued=true;queueMicrotask(()=>{queued=false;bind();});}).observe(document.body,{childList:true,subtree:true});
   window.AxonStorage={pick,refresh,uniqueVolumes,get snapshot(){return data;}};
+  document.addEventListener('axon:route',()=>disksDialog?.close());
   window.addEventListener('axon:navigate',()=>{bind();if(signedIn)refresh().catch(()=>{});});
   window.addEventListener('focus',()=>{if(signedIn)refresh().catch(()=>{});});
+  window.addEventListener('axon:disk-visibility',()=>refresh().catch(()=>{}));
   setInterval(()=>{if(signedIn&&!document.hidden)refresh().catch(()=>{});},12_000);
   bind();if(signedIn)refresh().catch(()=>{});
 })();

@@ -48,7 +48,7 @@ async (page) => {
   await page.reload({waitUntil:'domcontentloaded'});await page.locator('#cloud-list[data-view=list] .cloud-row').first().waitFor();assert(new URL(page.url()).searchParams.get('sort')==='name','Sort not restored');
   await page.locator('.cloud-open[data-path="/Clientes"]').click();await page.locator('.cloud-open[data-path="/Clientes/nota.txt"]').waitFor();assert(await page.locator('#cloud-list').getAttribute('data-view')==='list','View lost on folder navigation');
   await page.goBack();await page.locator('.cloud-open[data-path="/Clientes"]').waitFor();
-  await page.locator('[data-source=server]').click();await page.locator('#fm-location').waitFor({state:'visible'});await page.locator('[data-source=dropbox]').click();await page.locator('#cloud-list[data-view=list] .cloud-row').first().waitFor();
+  await page.locator('[data-source=server]').click();await page.locator('#fm-breadcrumb').waitFor({state:'visible'});await page.locator('[data-source=dropbox]').click();await page.locator('#cloud-list[data-view=list] .cloud-row').first().waitFor();
   await page.locator('.cloud-open[data-path="/nota.txt"]').click();await page.locator('.cloud-preview pre').waitFor();assert(streams===1,'Content not fetched only on open');assert(await page.locator('.cloud-preview pre').textContent()==='Texto de prueba','Preview failed');
   await page.locator('[aria-label="Cerrar vista previa"]').click();await page.locator('#cloud-preview').waitFor({state:'hidden'});
   await page.addScriptTag({path:require.resolve('axe-core/axe.min.js')});

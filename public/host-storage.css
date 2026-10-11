@@ -7,3 +7,11 @@ button.host-disk{cursor:pointer}button.host-disk:hover{border-color:var(--accent
 .host-path-picker::backdrop{background:#0009}.host-picker-header h2{margin:0;font-size:18px}.host-path-picker [data-host-disks]{margin:12px 0}.host-picker-location input{min-width:0;flex:1}.host-picker-entries{display:grid;gap:2px;max-height:38vh;overflow:auto;border:1px solid var(--border);border-radius:8px;min-height:60px}
 .host-picker-entries button{display:flex;gap:10px;align-items:center;border:0;background:transparent;color:var(--text);padding:10px 12px;text-align:left;overflow-wrap:anywhere}.host-picker-entries button:hover{background:var(--bg-hover)}.host-picker-footer{justify-content:flex-end;padding-top:14px}.host-path-picker :focus-visible,.host-disk:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 @media(max-width:480px){.host-path-picker{padding:12px}.host-disks-heading{font-size:13px}.host-disks-heading button{font-size:12px}.host-disk{min-width:170px}.host-picker-entries{max-height:32vh}}
+.host-disks-dialog .host-disks-heading>strong{display:none}
+.host-disks-dialog .host-disks-heading{justify-content:flex-end;flex-wrap:wrap}
+.host-disks-dialog .host-disks-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr));overflow:visible}
+.host-disks-dialog .host-disk{min-width:0;max-width:none;width:100%}
+
+.host-path-picker .host-disks-heading { flex-wrap: wrap; }
+.host-path-picker .host-picker-entries button { min-height: 44px; }
+.host-path-picker .host-picker-header .icon-btn { min-width: 44px; min-height: 44px; }

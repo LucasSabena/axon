@@ -12,9 +12,11 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 // ---------- Lucide icons (vendored, optional) ----------
 
 const icon = (name, cls = '') => `<i data-lucide="${esc(name)}" class="lucide-icon${cls ? ' ' + cls : ''}"></i>`;
-const refreshIcons = () => {
-  try { window.lucide?.createIcons(); } catch { /* icons are decorative */ }
-  for (const button of document.querySelectorAll('button[title]:not([aria-label])')) if (!button.textContent.trim()) button.setAttribute('aria-label', button.title);
+const refreshIcons = (root = document) => {
+  // Lucide retains data-lucide on rendered SVGs. Only convert placeholders;
+  // polling one panel must not reconstruct every icon in the application.
+  try { window.lucide?.createIcons({root:{querySelectorAll:selector=>Array.from(root.querySelectorAll(selector)).filter(el=>el.localName!=='svg')}}); } catch { /* icons are decorative */ }
+  for (const button of root.querySelectorAll('button[title]:not([aria-label])')) if (!button.textContent.trim()) button.setAttribute('aria-label', button.title);
 };
 const isLucideName = (s) => /^[a-z0-9]+(-[a-z0-9]+)*$/.test(s || '');
 const CATEGORY_ICON = { project: 'folder-git-2', service: 'server', docker: 'container', system: 'cpu', unknown: 'help-circle' };

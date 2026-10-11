@@ -108,7 +108,7 @@ La página **Backups** guía en cuatro pasos: qué proteger, en qué discos guar
 
 El host necesita **Restic** y Python; el panel indica si falta Restic. [Preparar el servidor](docs/installation.md#dependencias-para-backups). Copiar los archivos de un disco no crea una imagen arrancable del sistema. [Guía y alcance de Backups](docs/backups-2026-10-06/README.md).
 
-La [publicación 1.3.1](https://github.com/LucasSabena/axon/releases/tag/v1.3.1) corrige autenticación y doble verificación, copias incompletas, ubicación y progreso de backups, tamaños de carpetas, uploads interrumpidos y tooltips de consumo. Incluye pruebas de regresión y QA de las 24 secciones. [Notas y actualización](docs/releases/v1.3.1.md).
+La [publicación 1.4.0](https://github.com/LucasSabena/axon/releases/tag/v1.4.0) incorpora organización de archivos y carpetas, gestión de discos y sesiones, inventario progresivo de programas, lectura Markdown y navegación móvil con flechas en los visores. Biblioteca permite agregar carpetas de otros discos desde su cabecera. [Notas y actualización](docs/releases/v1.4.0.md).
 
 ## Si ya tenías AXON instalado con Compose
 

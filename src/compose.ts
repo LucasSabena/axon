@@ -2,6 +2,7 @@ import { resolveHostPath, projectSearchRoots } from './host-storage';
 import { Hono } from 'hono';
 import { hostExec, hostToContainer, containerToHost, HOST_USER } from './host';
 import { runJob, cancelJob } from './jobs';
+import { isOwnContainer } from './docker';
 import { ComposeDrafts, composeSyntax } from './compose-drafts';
 import {ComposeReleases} from './compose-releases';
 import {MaintenanceError} from './storage/types';
@@ -207,6 +208,8 @@ interface ComposeService {
 
 interface ComposeProject {
   project: string;
+  supabaseProject?: string;
+  supabaseWorkdir?: string;
   workingDir: string;
   configFile: string;
   services: ComposeService[];
@@ -370,7 +373,10 @@ export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
         try {
           const row = JSON.parse(line) as { ID?: string; Names?: string; State?: string; Status?: string; Labels?: string };
           const labels = row.Labels || '';
-          const project = labelVal(labels, 'com.docker.compose.project');
+          const composeProject = labelVal(labels, 'com.docker.compose.project');
+          const supabaseProject = labelVal(labels, 'com.supabase.cli.project');
+          const supabaseWorkdir = labelVal(labels, 'com.supabase.cli.workdir');
+          const project = composeProject || supabaseProject;
           if (!project) continue;
           const service = labelVal(labels, 'com.docker.compose.service');
           const workingDir = labelVal(labels, 'com.docker.compose.project.working_dir');
@@ -379,8 +385,10 @@ export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
           // first. Never split on ':' — it corrupts paths containing one.
           const configFile = configRaw.split(',').map((f) => f.trim()).filter(Boolean)[0] || '';
 
-          const g = projects.get(project) || {
+          const projectKey = composeProject ? `compose:${composeProject}` : `supabase:${supabaseProject}`;
+          const g = projects.get(projectKey) || {
             project,
+            ...(supabaseProject && supabaseWorkdir ? { supabaseProject, supabaseWorkdir } : {}),
             workingDir: '',
             configFile: '',
             services: [],
@@ -397,7 +405,13 @@ export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
             status: row.State || '',
             statusText: row.Status || '',
           });
-          projects.set(project, g);
+          if (supabaseProject && supabaseWorkdir && !g.supabaseWorkdir) {
+            g.supabaseProject = supabaseProject;
+            g.supabaseWorkdir = supabaseWorkdir;
+            g.workingDir = supabaseWorkdir;
+            g.path = supabaseWorkdir;
+          }
+          projects.set(projectKey, g);
         } catch { /* malformed line */ }
       }
     }
@@ -865,6 +879,100 @@ export function registerComposeRoutes(app: Hono, deps: ComposeDeps = {}): void {
   app.post('/api/compose/up', (c) => composeJob(c, 'up', 'up -d', 30 * 60_000));
   app.post('/api/compose/down', (c) => composeJob(c, 'down', 'down', 10 * 60_000));
   app.post('/api/compose/pull', (c) => composeJob(c, 'pull', 'pull', 45 * 60_000));
+
+  // Supabase local stacks are managed by `supabase stop`, not by a Compose
+  // file exposed in Docker's Compose labels. Resolve the workdir from Docker
+  // labels on the server; never accept an arbitrary path from the browser.
+  app.post('/api/compose/supabase/stop', async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const project = String(body?.project || '');
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$/.test(project)) return fail(c, 400, 'Proyecto Supabase inválido');
+    if (body?.confirm !== true) return fail(c, 400, 'Se requiere confirmación (confirm: true)');
+
+    const releaseHold = await deps.busyGuard?.();
+    if (releaseHold) return fail(c, 409, releaseHold);
+
+    const listed = await dockerCmd(`ps -a --format '{{json .}}'`);
+    if (!listed.ok) return fail(c, 503, 'No se pudo consultar Docker', { detail: (listed.stderr || listed.stdout).slice(0, 1000) });
+    const workdirs = new Set<string>();
+    for (const line of listed.stdout.split('\n').filter(Boolean)) {
+      try {
+        const row = JSON.parse(line) as { Labels?: string };
+        const labels = row.Labels || '';
+        if (labelVal(labels, 'com.supabase.cli.project') === project) {
+          const workdir = labelVal(labels, 'com.supabase.cli.workdir');
+          if (workdir) workdirs.add(workdir);
+        }
+      } catch { /* ignore malformed docker output */ }
+    }
+    if (workdirs.size !== 1) return fail(c, workdirs.size ? 409 : 404, workdirs.size ? 'El proyecto tiene directorios Supabase inconsistentes' : 'No se encontraron contenedores de ese proyecto Supabase');
+
+    let workdir: string;
+    try {
+      workdir = await resolveHostPath([...workdirs][0], { directory: true });
+      const config = await stat(hostToContainer(path.posix.join(workdir, 'supabase/config.toml')));
+      if (!config.isFile()) throw new Error('config.toml inválido');
+    } catch (error) {
+      return fail(c, 403, 'No se pudo verificar la carpeta de este proyecto Supabase', { detail: error instanceof Error ? error.message : String(error) });
+    }
+
+    const active = lifecycleLocks.get(workdir);
+    if (active && active.status === 'running') return fail(c, 409, 'Ya hay una operación en curso para esta ruta');
+    const cmd = `supabase --workdir ${shq(workdir)} stop --project-id ${shq(project)}`;
+    const job = runJob(`supabase stop: ${project}`, [{
+      label: 'supabase stop (conserva los volúmenes)',
+      cmd,
+      user: 'user',
+      timeoutMs: 10 * 60_000,
+      fallback: { cmd, user: 'root' },
+    }]);
+    lifecycleLocks.set(workdir, job);
+    composeJobIds.add(job.id);
+    pruneLifecycle();
+    return c.json({ ok: true, job });
+  });
+
+  // A few tools create Compose-labelled containers without exposing a usable
+  // Compose YAML (or even Compose config labels). Keep those manageable by
+  // stopping only the running containers that currently carry this exact
+  // project label. This preserves containers, networks, and volumes.
+  app.post('/api/compose/stop-project', async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const project = String(body?.project || '');
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$/.test(project)) return fail(c, 400, 'Proyecto Compose inválido');
+    if (body?.confirm !== true) return fail(c, 400, 'Se requiere confirmación (confirm: true)');
+    const releaseHold = await deps.busyGuard?.();
+    if (releaseHold) return fail(c, 409, releaseHold);
+
+    const listed = await dockerCmd(`ps --filter ${shq(`label=com.docker.compose.project=${project}`)} --format '{{json .}}'`);
+    if (!listed.ok) return fail(c, 503, 'No se pudo consultar Docker', { detail: (listed.stderr || listed.stdout).slice(0, 1000) });
+    const ids = listed.stdout.split('\n').filter(Boolean).flatMap((line) => {
+      try {
+        const row = JSON.parse(line) as { ID?: string; Labels?: string };
+        return row.ID && /^[a-f0-9]{12,64}$/i.test(row.ID)
+          && labelVal(row.Labels || '', 'com.docker.compose.project') === project ? [row.ID] : [];
+      } catch { return []; }
+    });
+    if (!ids.length) return fail(c, 404, 'No hay contenedores activos para este proyecto Compose');
+    for (const id of ids) {
+      if (await isOwnContainer(id)) return fail(c, 403, 'Operación rechazada: el proyecto incluye la propia instancia de Axon');
+    }
+    const lockKey = `docker-compose:${project}`;
+    const active = lifecycleLocks.get(lockKey);
+    if (active && active.status === 'running') return fail(c, 409, 'Ya hay una operación en curso para este proyecto');
+    const cmd = `docker stop ${ids.join(' ')}`;
+    const job = runJob(`docker compose stop: ${project}`, [{
+      label: 'detener todos los contenedores activos del proyecto (conserva recursos)',
+      cmd,
+      user: 'user',
+      timeoutMs: 10 * 60_000,
+      fallback: { cmd, user: 'root' },
+    }]);
+    lifecycleLocks.set(lockKey, job);
+    composeJobIds.add(job.id);
+    pruneLifecycle();
+    return c.json({ ok: true, job });
+  });
 
   // ---------- Per-service actions (start / stop / restart) ----------
   app.post('/api/compose/service', async (c) => {

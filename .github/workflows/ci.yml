@@ -40,10 +40,14 @@ jobs:
         run: pnpm run check
       - name: Application regressions
         run: pnpm run test
+      - name: Disk management safety contracts
+        run: pnpm run test:disks
       - name: Native agent contracts
         run: pnpm run test:agents
       - name: Native software discovery and transaction contracts
         run: pnpm run test:software
+      - name: Optional host adapter contracts
+        run: pnpm run test:hardware
       - name: Installer and recovery contracts
         run: pnpm run test:installer
       - name: Build application

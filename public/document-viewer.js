@@ -2,6 +2,7 @@
 (() => {
   const office = new Set('doc docx docm dot dotx odt ott rtf ppt pptx pptm pps ppsx pot potx odp otp xls xlsx xlsm xlt xltx ods ots'.split(' '));
   const ext = name => String(name).split('.').pop().toLowerCase();
+  const isMarkdown = name => ['md', 'markdown'].includes(ext(name));
   let pdfFlight;
   function pdfLibrary() {
     return pdfFlight ||= import('/vendor/pdf.js?v=57456c8e0c81').then(pdf => {
@@ -13,7 +14,8 @@
     const el = document.createElement(tag); if (cls) el.className = cls; if (text != null) el.textContent = text; return el;
   };
   window.AxonDocumentViewer = {
-    supports: name => office.has(ext(name)) || ['pdf', 'csv', 'tsv'].includes(ext(name)),
+    isMarkdown,
+    supports: name => isMarkdown(name) || office.has(ext(name)) || ['pdf', 'csv', 'tsv'].includes(ext(name)),
     mount(container, options) {
       const root = element('div', 'axon-doc');
       root.setAttribute('aria-label', 'Visor de ' + options.name);
@@ -189,13 +191,50 @@
         }
         draw(); root.removeAttribute('aria-busy');
       }
+      async function showMarkdown() {
+        let data = { content: options.content, truncated: options.truncated, binary: options.binary };
+        if (options.content == null) {
+          if (options.textUrl) data = await request(options.textUrl);
+          else {
+            const response = await fetch(options.sourceUrl, { signal: abort.signal, credentials: 'same-origin', cache: 'no-store' });
+            if (!response.ok) throw new Error('No se pudo leer el archivo.');
+            const reader = response.body.getReader(), chunks = []; let size = 0;
+            const limit = 512 * 1024;
+            while (size <= limit) {
+              const { done, value } = await reader.read(); if (done) break;
+              const take = value.subarray(0, limit + 1 - size); chunks.push(take); size += take.length;
+            }
+            await reader.cancel();
+            data.truncated = size > limit;
+            const bytes = new Uint8Array(Math.min(size, limit)); let offset = 0;
+            for (const chunk of chunks) { const take = chunk.subarray(0, bytes.length - offset); bytes.set(take, offset); offset += take.length; }
+            // Streaming decode ignores an incomplete final character in a limited view.
+            data.content = new TextDecoder('utf-8', { fatal: true }).decode(bytes, { stream: data.truncated });
+          }
+        }
+        if (data.binary || String(data.content || '').includes('\u0000')) throw new Error('Archivo binario o codificación distinta de UTF-8 — sin vista Markdown.');
+        const lib = await import('/vendor/markdown.js?v=f75ea506309f');
+        if (!active()) return;
+        stage.classList.add('axon-doc-markdown-stage');
+        const article = element('article', 'axon-markdown'); article.setAttribute('aria-label', options.name);
+        lib.renderMarkdown(article, data.content || '', { path: options.path, signal: abort.signal });
+        if (!String(data.content || '').trim()) article.append(element('p', 'axon-markdown-empty', 'Este archivo está vacío.'));
+        stage.replaceChildren(article);
+        note.textContent = data.truncated ? 'Vista limitada a los primeros 512 KB' : options.note || 'Vista de lectura';
+        button('Pantalla completa', '⛶', () => {
+          if (document.fullscreenElement === root) document.exitFullscreen().catch(() => {});
+          else root.requestFullscreen?.().catch(() => { note.textContent = 'Este navegador no permite pantalla completa.'; });
+        });
+        status.hidden = true; root.removeAttribute('aria-busy'); root.dataset.rendered = 'true';
+      }
       function stop() {
         if (disposed) return;
         disposed = true; abort.abort(); resize?.disconnect(); renderVersion++;
         renderTask?.cancel(); textLayer?.cancel();
         if (loading) loading.destroy().catch(() => {});
+        root.remove();
       }
-      const start = ['csv', 'tsv'].includes(ext(options.name)) ? showTable() : showPdf();
+      const start = isMarkdown(options.name) ? showMarkdown() : ['csv', 'tsv'].includes(ext(options.name)) ? showTable() : showPdf();
       void start.catch(e => { if (active() && e.name !== 'AbortError') fail(e.message || 'No se pudo abrir el documento.'); });
       return { destroy: stop };
     },

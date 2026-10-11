@@ -9,8 +9,9 @@ export interface FileVolume {
   id: string; diskId: string; device: string; majorMinor: string; name: string; filesystem: string;
   uuid: string | null; size: number; available: number | null; external: boolean; path: string | null;
   mountId: string | null; readOnly: boolean; readable: boolean; canMount: boolean; used?: number | null;
+  serial?:string|null; partuuid?:string|null; parttype?:string|null; visibilityKey?:string; hidden?:boolean; technical?:boolean;
 }
-export interface VolumeSnapshot { ok: true; devices: {id:string;name:string;device:string;size:number;external:boolean;transport:string|null}[]; volumes: FileVolume[]; path?: string }
+export interface VolumeSnapshot { ok: true; devices: {id:string;name:string;device:string;size:number;external:boolean;transport:string|null;serial?:string|null;wwn?:string|null;visibilityKey?:string;hidden?:boolean}[]; volumes: FileVolume[]; path?: string }
 type Runner = (request: Record<string, unknown>) => Promise<VolumeSnapshot | {ok:false;error:string}>;
 export const volumeContains = (p: string, root: string) => root === '/' ? p.startsWith('/') : p === root || p.startsWith(root + '/');
 export function volumeForPath(volumes: FileVolume[], p: string) {
@@ -96,8 +97,9 @@ export class FileVolumes {
 }
 
 export function fixtureVolumes(home:string):FileVolumes {
-  return new FileVolumes(async()=>({ok:true,devices:[],volumes:[
-    {id:'fixture-internal',diskId:'fixture',device:'fixture',majorMinor:'0:0',name:'Disco interno (prueba)',filesystem:'fixture',uuid:null,size:0,available:null,external:false,path:home,mountId:'fixture',readOnly:false,readable:true,canMount:false},
+  return new FileVolumes(async()=>({ok:true,devices:[{id:'fixture-system',name:'Disco del sistema (prueba)',device:'/dev/fixture-system',serial:'QA-SYSTEM',wwn:null,size:256*2**30,external:false,transport:null},{id:'fixture-new',name:'Disco nuevo (prueba)',device:'/dev/fixture-new',serial:'QA-NEW-001',wwn:null,size:100*2**30,external:true,transport:'usb'}],volumes:[
+    {id:'fixture-efi',diskId:'fixture-system',device:'/dev/fixture-efi',majorMinor:'0:3',name:'EFI',filesystem:'vfat',uuid:'qa-efi',partuuid:'qa-efi-part',parttype:'c12a7328-f81f-11d2-ba4b-00a0c93ec93b',size:512*2**20,available:500*2**20,external:false,path:null,mountId:null,readOnly:false,readable:false,canMount:false},
+    {id:'fixture-internal',diskId:'fixture-system',device:'fixture',majorMinor:'0:0',name:'Disco interno (prueba)',filesystem:'fixture',uuid:null,size:0,available:null,external:false,path:home,mountId:'fixture',readOnly:false,readable:true,canMount:false},
     {id:'fixture-external',diskId:'fixture-external',device:'fixture-external',majorMinor:'0:1',name:'Disco externo (prueba)',filesystem:'fixture',uuid:null,size:0,available:null,external:true,path:home+'/external-drive',mountId:'fixture-external',readOnly:false,readable:true,canMount:false},
   ]}));
 }

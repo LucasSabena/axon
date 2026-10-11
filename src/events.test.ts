@@ -20,3 +20,19 @@ test('live events send the current unread count and a change without polling', a
   recordEvent('job','Done');expect(decoder.decode((await reader.read()).value)).toContain('"unread":1');
   await reader.cancel();clearEvents();
 });
+
+test('remote revocation closes a live event stream without waiting for a heartbeat', async () => {
+  const { recordSession, revokeSession } = await import('./sessions');
+  const sid = crypto.randomUUID();
+  await recordSession(sid, 'fixture', 'fixture');
+  // The route is ordinarily protected by requireAuth. This fixture supplies
+  // the already validated identity without a production signing secret.
+  const token = Buffer.from(JSON.stringify({jti:sid})).toString('base64') + '.fixture';
+  const app = new Hono(); registerEventRoutes(app);
+  const response = await app.request('/api/events/stream', {headers:{cookie:'axon_session='+token}});
+  const reader = response.body!.getReader(); await reader.read();
+  await revokeSession(sid);
+  const result = await Promise.race([reader.read(), Bun.sleep(500).then(()=>({done:false}))]);
+  expect(result.done).toBe(true);
+  await reader.cancel();
+});

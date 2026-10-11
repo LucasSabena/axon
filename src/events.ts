@@ -2,6 +2,7 @@ import { readFile, writeFile, mkdir } from 'fs/promises';
 import * as path from 'path';
 import type { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
+import { sessionIdFromRequest, onSessionRevoked, isRevoked } from './sessions';
 
 // Persisted event feed — "what happened while I was away".
 // Ring buffer of the last 500 events, saved next to config.json,
@@ -120,10 +121,15 @@ export function registerEventRoutes(app: Hono): void {
       const changed = () => wake?.();
       subscribers.add(changed);
       stream.onAbort(changed);
+      const sid = sessionIdFromRequest(c);
+      let denied = !!sid && isRevoked(sid);
+      const unsubscribe = onSessionRevoked(id => {
+        if (id === sid) { denied = true; changed(); void stream.close(); }
+      });
       let last = -1;
       const deadline = Date.now() + MAX_STREAM_MS;
       try {
-        while (!stream.aborted && !stream.closed && Date.now() < deadline) {
+        while (!denied && !stream.aborted && !stream.closed && Date.now() < deadline) {
           if (last !== revision) {
             last = revision;
             await stream.writeSSE({ event:'change', id:String(revision), data:JSON.stringify({unread:unreadCount()}) });
@@ -132,10 +138,10 @@ export function registerEventRoutes(app: Hono): void {
             const timer = setTimeout(done, 20_000);
             function done() { clearTimeout(timer); wake=null; resolve(); }
             wake=done;
-            if (stream.aborted || revision !== last) done();
+            if (denied || stream.aborted || revision !== last) done();
           });
         }
-      } finally { subscribers.delete(changed); }
+      } finally { unsubscribe(); subscribers.delete(changed); }
     });
   });
   app.get('/api/events', (c) => {

@@ -1,0 +1,25 @@
+[Unit]
+Description=AXON reversible USB port control
+After=systemd-udevd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/lib/axon/usb-host.py serve
+ExecStopPost=/usr/bin/python3 /usr/local/lib/axon/usb-host.py restore
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=60
+RuntimeDirectory=axon-usb
+RuntimeDirectoryMode=0700
+StateDirectory=axon-usb
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

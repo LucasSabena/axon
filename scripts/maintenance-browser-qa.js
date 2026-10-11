@@ -2,7 +2,7 @@ async page => {
   if(new URL(page.url()).host!=='127.0.0.1:3459')throw new Error('Use isolated QA server');
   const assert=(value,message)=>{if(!value)throw new Error(message);};
   const errors=[];const capture=e=>errors.push(e.message);page.on('pageerror',capture);const checks=[];
-  await page.goto('http://127.0.0.1:3459/almacenamiento');
+  await page.goto('http://127.0.0.1:3459/almacenamiento?view=usage');
   if(await page.getByRole('button',{name:'Ingresar',exact:true}).isVisible()){
     await page.getByRole('textbox',{name:'Usuario',exact:true}).fill('qa');await page.getByRole('textbox',{name:'Contraseña',exact:true}).fill('axon-local-qa');await page.getByRole('button',{name:'Ingresar',exact:true}).click();
   }

@@ -9,6 +9,9 @@
     ['connections', 'Conexiones', 'plug', 'Tus cuentas en la nube', 'Conectá tus plataformas para explorar archivos a demanda. En Archivos sólo aparecen las cuentas conectadas que elijas mostrar.'],
     ['notifications', 'Notificaciones', 'bell', 'Avisos y actividad', 'El centro de notificaciones conserva los eventos hasta que los marques como leídos.'],
     ['security', 'Seguridad', 'shield-check', 'Protección y acceso', 'Protegé procesos esenciales y configurá la verificación de tu cuenta.'],
+    ['sessions', 'Sesiones', 'monitor-smartphone', 'Dispositivos y sesiones', 'Revisá dónde iniciaste sesión y cerrá el acceso de cualquier navegador.'],
+    ['usb', 'USB', 'usb', 'Puertos USB del servidor', 'Revisá dispositivos y reconectá cada puerto externo.'],
+    ['fans', 'Ventiladores', 'fan', 'Ventilación del servidor', 'Controlá los ventiladores de CPU y GPU con protección térmica.'],
     ['advanced', 'Avanzado', 'sliders-horizontal', 'Herramientas y mantenimiento', 'Preferencias de terminal, datos del navegador y energía del servidor.'],
   ];
   const layout = document.createElement('div'); layout.className = 'settings-layout';
@@ -60,6 +63,9 @@
   panes.advanced.insertAdjacentHTML('afterbegin', '<label>Tamaño de letra de la terminal<select id="settings-terminal-font"><option>12</option><option>14</option><option>16</option><option>18</option><option>20</option></select></label><button type="button" class="btn-secondary" id="settings-clear-recent">Limpiar archivos recientes de este navegador</button>');
   const footer = form.querySelector('.modal-actions'); footer.className = 'settings-savebar';
   window.AxonConnections?.mount(panes.connections);
+  const sessions = window.AxonDeviceControls?.mountSessions(panes.sessions);
+  const fans = window.AxonDeviceControls?.mountFans(panes.fans);
+  const usb = window.AxonUsb?.mount(panes.usb);
   footer.insertAdjacentHTML('afterbegin', '<span id="settings-save-state" role="status">Sin cambios pendientes</span>');
   const error = document.querySelector('#settings-error');
   layout.append(tabs, content); form.prepend(layout); form.append(error, footer);
@@ -69,6 +75,13 @@
   const snapshot = () => JSON.stringify([...form.querySelectorAll('.settings-pane input:not([data-local]), .settings-pane textarea, .settings-pane select:not([data-local])')].filter(n=>!['settings-motion','settings-density'].includes(n.id)).map(n=>[n.id,n.value]));
   function dirty() { document.querySelector('#settings-save-state').textContent = snapshot() === saved ? 'Sin cambios pendientes' : 'Tenés cambios sin guardar'; }
   let selected='general';
+  function revealSelectedTab() {
+    const tab = document.querySelector(`#settings-tab-${selected}`);
+    if (!tab || !tabs.clientWidth || tabs.scrollWidth <= tabs.clientWidth) return;
+    const target = tab.getBoundingClientRect(), container = tabs.getBoundingClientRect();
+    tabs.scrollLeft += target.left - container.left - (tabs.clientWidth - target.width) / 2;
+  }
+  new ResizeObserver(() => requestAnimationFrame(revealSelectedTab)).observe(tabs);
   function select(key) {
     if(!panes[key])key='general';selected=key;
     for (const [id] of sections) {
@@ -76,7 +89,11 @@
       const tab = document.querySelector(`#settings-tab-${id}`); tab.setAttribute('aria-selected', String(id === key)); tab.tabIndex = id === key ? 0 : -1;
     }
     try { sessionStorage.setItem('axon:settings-tab', key); } catch {}
-    footer.hidden=key==='connections';
+    requestAnimationFrame(revealSelectedTab);
+    footer.hidden=['connections','sessions','fans','usb'].includes(key);
+    if(key==='sessions')void sessions?.refresh();
+    if(key==='fans')void fans?.refresh();
+    if(key==='usb')void usb?.refresh();
     if(key==='connections')void window.AxonConnections?.refresh();
     if(window.AxonNavigation?.ready&&window.AxonNavigation.current?.section==='settings'&&!window.AxonNavigation.applying)window.AxonNavigation.update('settings',{section:key});
   }
@@ -115,7 +132,7 @@
   document.querySelector('#settings-clear-recent').addEventListener('click',async()=>{if(await confirmDialog('Limpiar recientes','Se borra la lista de este navegador. Los archivos se conservan.','Limpiar')){localStorage.removeItem('axon:recent-files:v1');window.AxonRecent?.clear?.();toast('Lista de recientes vaciada','ok');}});
   window.AxonSettings = {
     loaded() { saved=snapshot(); dirty(); permissionState(); syncThemes(); },
-    dirty:()=>saved && snapshot()!==saved,
+    dirty:()=>!!(saved && snapshot()!==saved || sessions?.dirty() || fans?.dirty()),
     promptPower(word) {
       return new Promise(resolve=>{
         const modal=document.createElement('div'); modal.className='modal';

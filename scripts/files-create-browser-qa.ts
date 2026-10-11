@@ -35,7 +35,7 @@ try {
     await page.locator('#fm-main:not(.hidden)').waitFor();
   };
   const create = async (name: string) => {
-    await page.locator('#fm-new-file-btn').click(); await page.locator('#fm-create-name').fill(name);
+    await page.locator('#fm-create-btn').click(); await page.locator('#fm-new-file-btn').click(); await page.locator('#fm-create-name').fill(name);
     await page.locator('.fm-create-submit').click(); await page.locator('#fm-editor:not(.hidden)').waitFor();
     assert((await page.locator('#fm-editor-name').textContent()).endsWith('/' + name), 'Wrong created editor');
   };
@@ -45,7 +45,7 @@ try {
     assert(await page.locator('#fm-dirty-dot').isHidden(), 'Saved file remains dirty');
   };
 
-  await page.locator('#fm-new-file-btn').click(); await page.locator('[data-name=".env"]').click();
+  await page.locator('#fm-create-btn').click(); await page.locator('#fm-new-file-btn').click(); await page.locator('[data-name=".env"]').click();
   assert(await page.locator('#fm-create-name').inputValue() === '.env', 'Env preset missing');
   await page.route('**/api/files/create', async (route: any) => { await new Promise(r => setTimeout(r, 700)); await route.continue(); });
   await page.locator('.fm-create-submit').click();
@@ -64,7 +64,7 @@ try {
   await page.locator('.fm-pv-text').waitFor(); assert((await page.locator('.fm-pv-text').textContent()).includes('NOMBRE=Prueba'), 'Text preview is broken');
   outcomes.push('Env creation, busy state, editing, Ctrl+S, reload, hidden visibility and text preview');
 
-  await page.locator('#fm-new-file-btn').click(); await page.locator('#fm-create-name').fill('existing.txt');
+  await page.locator('#fm-create-btn').click(); await page.locator('#fm-new-file-btn').click(); await page.locator('#fm-create-name').fill('existing.txt');
   await page.locator('.fm-create-submit').click(); await page.locator('#fm-create-error:not(.hidden)').waitFor();
   assert((await page.locator('#fm-create-error').textContent()).includes('Ya existe'), 'Duplicate needs an inline error');
   assert(await readFile(dir + '/existing.txt', 'utf8') === 'preservar', 'Duplicate overwrote original');
@@ -79,7 +79,7 @@ try {
   await page.locator('#ctx-menu').getByText('Editar', { exact: true }).click();
   await page.locator('#fm-editor:not(.hidden)').waitFor();
   assert(await page.locator('#fm-editor-text').inputValue() === 'Texto con extensión propia\n', 'Custom extension cannot be reopened');
-  await page.locator('#fm-editor-text').fill('Cambios pendientes\n'); await page.locator('#fm-new-file-btn').click();
+  await page.locator('#fm-editor-text').fill('Cambios pendientes\n'); await page.locator('#fm-create-btn').click(); await page.locator('#fm-new-file-btn').click();
   await page.locator('#confirm-modal[open] #confirm-body').waitFor(); await page.keyboard.press('Escape');
   assert(await page.locator('.fm-create-modal').count() === 0, 'Creating discarded unsaved content');
   assert(await page.locator('#fm-editor-text').inputValue() === 'Cambios pendientes\n', 'Dirty content lost');
@@ -119,7 +119,7 @@ try {
   assert(await page.locator('#fm-editor-text').getAttribute('readonly') !== null, 'Binary textarea is writable');
   await list(); outcomes.push('CRLF/BOM preserved and binary editing blocked');
 
-  await page.setViewportSize({ width: 390, height: 844 }); await page.locator('#fm-new-file-btn').click();
+  await page.setViewportSize({ width: 390, height: 844 }); await page.locator('#fm-create-btn').click(); await page.locator('#fm-new-file-btn').click();
   const box = await page.locator('.fm-create-form').boundingBox();
   assert(box && box.x >= 0 && box.x + box.width <= 390, 'Mobile dialog overflows');
   await page.screenshot({ path: '/tmp/axon-create-file-' + (production ? 'production' : 'local') + '.png', fullPage: true });

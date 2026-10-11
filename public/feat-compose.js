@@ -67,18 +67,22 @@
   }
 
   function cardHtml(p) {
-    const file = p.configFile || p.path || '';
+    const file = p.configFile || p.path || p.supabaseWorkdir || '';
     const running = p.services.filter((s) => s.status === 'running').length;
     const chips = p.services.length
       ? p.services.map(chipHtml).join('')
       : '<span class="cp-chip cp-off"><span class="cp-dot"></span>sin servicios</span>';
-    const acts = file
+    const acts = p.supabaseProject
+      ? `<button class="btn-danger cp-supabase-stop" title="Detener el proyecto con Supabase CLI">${icon('square')} Detener stack</button>`
+      : file && p.configFile
       ? `<button class="btn-primary btn-inline cp-edit" title="Editar el archivo compose">${icon('pencil')} Editar</button>
          <button class="btn-secondary cp-preview" title="Renderizar config + estado">${icon('eye')} Preview</button>
          <button class="btn-secondary cp-pull" title="docker compose pull">${icon('download')} Pull</button>
          <button class="btn-secondary cp-up" title="docker compose up -d">${icon('play')} Up</button>
          <button class="btn-danger cp-down" title="docker compose down">${icon('square')} Down</button>`
-      : '<span class="listener-note">Sin archivo de config detectado</span>';
+      : p.source === 'containers'
+        ? `<button class="btn-danger cp-project-stop" title="Detener todos los contenedores activos de este proyecto; conserva recursos">${icon('square')} Detener stack</button>`
+      : '<span class="listener-note">Sin archivo de config Compose detectado</span>';
     const badge = running
       ? `<span class="badge badge-status-running">${running} activo${running === 1 ? '' : 's'}</span>`
       : p.source === 'disk'
@@ -523,6 +527,40 @@
     }
   }
 
+  async function doSupabaseStop(project) {
+    if (!project) return;
+    const ok = await confirmDialog(
+      `Detener ${project}`,
+      'Se detienen los contenedores locales de Supabase. Los volúmenes y sus datos se conservan.',
+      'Detener stack'
+    );
+    if (!ok) return;
+    try {
+      const res = await api('/api/compose/supabase/stop', { method: 'POST', body: { project, confirm: true } });
+      showJob(res.job, `supabase stop: ${project}`);
+      setTimeout(load, 2000);
+    } catch (err) {
+      errToast(err);
+    }
+  }
+
+  async function doProjectStop(project) {
+    if (!project) return;
+    const ok = await confirmDialog(
+      `Detener ${project}`,
+      'Se detienen los contenedores activos del proyecto. Los contenedores, redes y volúmenes se conservan.',
+      'Detener stack'
+    );
+    if (!ok) return;
+    try {
+      const res = await api('/api/compose/stop-project', { method: 'POST', body: { project, confirm: true } });
+      showJob(res.job, `docker compose stop: ${project}`);
+      setTimeout(load, 2000);
+    } catch (err) {
+      errToast(err);
+    }
+  }
+
   async function doPull(path) {
     try {
       const res = await api('/api/compose/pull', { method: 'POST', body: { path } });
@@ -673,6 +711,8 @@
       else if (btn.classList.contains('cp-pull')) doPull(path);
       else if (btn.classList.contains('cp-up')) doUp(path);
       else if (btn.classList.contains('cp-down')) doDown(path, p && p.project);
+      else if (btn.classList.contains('cp-supabase-stop')) doSupabaseStop(p && p.supabaseProject);
+      else if (btn.classList.contains('cp-project-stop')) doProjectStop(p && p.project);
     });
 
     el('cp-ed-save').addEventListener('click', saveEditor);
