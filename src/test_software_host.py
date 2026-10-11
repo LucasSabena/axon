@@ -52,7 +52,7 @@ class NativeContract(unittest.TestCase):
             if args[1]=="remote-ls":return "org.unknown.App/x86_64/stable\t"+commit+"\tmy-origin\n"
             raise AssertionError(args)
         with patch.object(host,"context",return_value=ctx),patch.object(host,"tool",side_effect=lambda name,*_:"/bin/flatpak" if name=="flatpak" else None),patch.object(host,"command",side_effect=command),patch.object(host,"enrich"),patch.object(host,"local_executables"),patch.object(host.os,"getuid",return_value=0):
-            rows=host.scan({"user":"any","updates":True})["installations"]
+            rows=host.scan({"user":"any","updates":True,"managers":["flatpak"]})["installations"]
         system,user=rows;self.assertNotEqual(system["id"],user["id"]);self.assertEqual(system["updateState"],"held");self.assertFalse(system["canUpdate"]);self.assertTrue(user["canUpdate"])
         self.assertEqual(user["targetCommit"],commit);tx=host.build_transaction([user]);self.assertIn("--user",tx["argv"]);self.assertIn("--commit="+commit,tx["argv"]);self.assertIn("--no-deps",tx["argv"])
 

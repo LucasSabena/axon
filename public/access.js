@@ -8,11 +8,11 @@
   const bytes=n=>{if(n<1024)return fmt(n)+' B';let i=-1;do{n/=1024;i++;}while(n>=1024&&i<3);return n.toFixed(1)+' '+['KB','MB','GB','TB'][i];};
   const state=t=>t.revoked?'Revocada':t.expiresAt<=Date.now()?'Vencida':t.paused?'Pausada':'Activa';
   let data,selected='',days=7,filter='',status='',ticket=0,usageTicket=0,editor=null;
-  function inlineError(parent,e){let box=parent.querySelector('.access-error');if(!box){box=document.createElement('p');box.className='access-error';box.setAttribute('role','alert');parent.prepend(box);}box.textContent=e.message||'No se pudo completar la acción.';}
+  function inlineError(parent,e){let box=parent.querySelector('.access-error');if(!box){box=document.createElement('p');box.className='access-error';box.setAttribute('role','alert');parent.prepend(box);}box.textContent=e.message||'No se pudo completar la acción.';if(parent===node){const retry=document.createElement('button');retry.type='button';retry.className='btn-secondary';retry.textContent='Reintentar';retry.onclick=load;box.append(' ',retry);}}
   async function load(){
     if(editor||node.querySelector('[data-secret]')||document.activeElement?.closest('#access-content input,#access-content select'))return;
     const current=++ticket;node.setAttribute('aria-busy','true');
-    try{const d=await api('/api/access/tokens');if(current!==ticket)return;data=d;render();await loadUsage();}catch(e){inlineError(node,e);if(!data){const retry=document.createElement('button');retry.className='btn-secondary';retry.textContent='Reintentar';retry.onclick=load;node.append(retry);}}finally{if(current===ticket)node.removeAttribute('aria-busy');}
+    try{const d=await api('/api/access/tokens');if(current!==ticket)return;data=d;render();await loadUsage();}catch(e){inlineError(node,e);}finally{if(current===ticket)node.removeAttribute('aria-busy');}
   }
   function render(){
     const shown=data.tokens.filter(t=>(!filter||(t.name+' '+(t.description||'')+' '+t.id).toLowerCase().includes(filter.toLowerCase()))&&(!status||state(t)===status));
