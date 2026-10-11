@@ -42,9 +42,10 @@ try{
   }
   checks.push('Source picker and four production routes at 1440/768/390/320 px');
   const library=await get('/api/library');
-  if(library.items.length){
-    await go('/biblioteca?type=all&sort=name-asc&item='+encodeURIComponent(library.items[0].id));await page.locator('#lv-next').waitFor();
-    if(library.items.length>1&&await page.locator('#lv-next').isEnabled()){
+  const photo=library.items.find((it:any)=>it.k==='image');
+  if(photo){
+    await go('/biblioteca?type=kind&value=image&sort=name-asc&item='+encodeURIComponent(photo.id));await page.locator('#lv-next').waitFor();
+    if(library.items.filter((it:any)=>it.k==='image').length>1&&await page.locator('#lv-next').isEnabled()){
       const before=page.url();await page.locator('#lv-next').click();assert(page.url()!==before,'Library next did not update item');await page.locator('#lv-prev').click();
     }
     await page.screenshot({path:output+'/library-viewer-mobile.png'});await page.locator('#lv-close').click();
