@@ -128,4 +128,37 @@ class NativeContract(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,"dependencias cambiaron"):host.execute({"plan":{"createdAt":host.time.time()*1000,"transactions":[tx]}})
             command.assert_not_called()
 
+    def test_light_verification_scan_skips_metadata_and_integrations(self):
+        ctx={"uid":42,"user":"any","home":"/srv/home","env":{}}
+        with patch.object(host,"context",return_value=ctx),patch.object(host,"tool",return_value=None),patch.object(host,"enrich") as enrich,patch.object(host,"local_executables") as local:
+            result=host.scan({"user":"any","updates":False,"light":True,"integrations":[{"id":"x","binary":"tool","package":"tool"}]})
+        enrich.assert_not_called();local.assert_not_called();self.assertEqual(result["installations"],[])
+
+    def test_systemd_unit_pids_reads_show_output(self):
+        output="Id=a.service\nExecMainPID=1234\n\nId=b.service\nExecMainPID=0\n\nId=c.service\nExecMainPID=-\n"
+        with patch.object(host,"command",return_value=output):
+            self.assertEqual(host.systemd_unit_pids(["a.service","b.service","c.service"]),{"a.service":1234,"b.service":0})
+
+    def test_restart_only_units_running_updated_package_binaries(self):
+        calls=[]
+        def command(argv,*a,**k):
+            if argv[1]=="list-units":return "tailscaled.service loaded active running tailscaled\nother.service loaded active running other\n"
+            if argv[1]=="show":return "Id=tailscaled.service\nExecMainPID=1234\n\nId=other.service\nExecMainPID=5678\n"
+            if argv[0]=="dpkg-query":return "tailscale: /usr/sbin/tailscaled\notherpkg: /usr/bin/other\n"
+            if argv[1]=="try-restart":calls.append(argv);return ""
+            raise AssertionError(argv)
+        with patch.object(host,"tool",return_value="/bin/systemctl"),patch.object(host,"command",side_effect=command),patch.object(host.os,"readlink",side_effect=lambda p:"/usr/sbin/tailscaled" if "1234" in p else "/usr/bin/other"):
+            host.restart_services(["tailscale"])
+        self.assertEqual(calls,[["systemctl","try-restart","tailscaled.service"]])
+
+    def test_a_failed_service_restart_warns_without_failing_the_update(self):
+        def command(argv,*a,**k):
+            if argv[1]=="list-units":return "a.service loaded active running a\n"
+            if argv[1]=="show":return "Id=a.service\nExecMainPID=42\n"
+            if argv[0]=="dpkg-query":return "pkg: /usr/bin/a\n"
+            if argv[1]=="try-restart":raise RuntimeError("denied")
+            raise AssertionError(argv)
+        with patch.object(host,"tool",return_value="/bin/systemctl"),patch.object(host,"command",side_effect=command),patch.object(host.os,"readlink",return_value="/usr/bin/a"):
+            host.restart_services(["pkg"])
+
 if __name__=="__main__":unittest.main()

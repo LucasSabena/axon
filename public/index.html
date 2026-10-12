@@ -244,8 +244,8 @@
               <div class="section-header">
                 <h2>Actualizar programas</h2>
                 <div class="section-actions">
-                  <button id="update-all-btn" class="btn-primary btn-inline"><i data-lucide="arrow-up-circle" class="lucide-icon"></i> Revisar actualizaciones</button>
-                  <button id="programs-refresh" class="btn-secondary" title="Recargar"><i data-lucide="refresh-cw" class="lucide-icon"></i></button>
+                  <button id="update-all-btn" class="btn-primary btn-inline"><i data-lucide="arrow-up-circle" class="lucide-icon"></i> Actualizar todo</button>
+                  <button id="programs-refresh" class="btn-secondary" title="Volver a comprobar actualizaciones"><i data-lucide="refresh-cw" class="lucide-icon"></i> Comprobar</button>
                   <span class="last-updated" id="programs-updated"></span>
                 </div>
               </div>
@@ -258,6 +258,7 @@
               <div id="software-notice" role="status"></div>
               <div id="software-toolbar" class="software-toolbar">
                 <input type="search" id="software-query" placeholder="Buscar programa o paquete…" aria-label="Buscar programa o paquete">
+                <select id="software-kind" aria-label="Filtrar por tipo"><option value="">Programas y sistema</option><option value="programs">Sólo programas</option><option value="system">Sólo sistema</option></select>
                 <select id="software-manager" aria-label="Filtrar por gestor"><option value="">Todos los gestores</option></select>
                 <select id="software-scope" aria-label="Filtrar por ámbito"><option value="">Todos los ámbitos</option><option value="system">Sistema</option><option value="user">Usuario</option></select>
               </div>

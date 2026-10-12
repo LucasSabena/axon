@@ -191,9 +191,12 @@ export class SoftwareService {
   }
   private async read(updates:boolean,progress?:Progress,managers?:string[]):Promise<SoftwareSnapshot>{
     const cfg=await this.config(), integration=await this.integrationLoader(), users=[...new Set([HOST_USER,...(cfg.users||[])])];
-    let combined:SoftwareSnapshot;
-    for(const user of users){
-      const value:SoftwareSnapshot=await this.run({action:'scan',user,settings:cfg.contexts?.[user]||{},integrations:integration,updates,...(managers?{managers}:{})},progress?(source,rows)=>{this.decorate(rows,cfg);progress(source,rows);}:undefined);
+    // Each configured account runs its own host scan; they are independent
+    // processes, so parallelizing them removes whole serial passes from the
+    // page load on multi-user hosts.
+    const scans=await Promise.all(users.map(user=>this.run({action:'scan',user,settings:cfg.contexts?.[user]||{},integrations:integration,updates,...(managers?{managers}:{})},progress?(source,rows)=>{this.decorate(rows,cfg);progress(source,rows);}:undefined)));
+    let combined:SoftwareSnapshot|undefined;
+    for(const value of scans){
       if(!value?.ok||!Array.isArray(value.installations)||!Array.isArray(value.sources))throw new Error('Inventario inválido');
       if(!combined)combined=value;
       else {combined.installations=[...new Map([...combined.installations,...value.installations].map(p=>[p.id,p])).values()];combined.sources=[...new Map([...combined.sources,...value.sources].map(p=>[p.id,p])).values()];}
@@ -268,28 +271,20 @@ export class SoftwareService {
   }
   async plan(ids:string[]):Promise<SoftwarePlan>{
     if(!Array.isArray(ids)||!ids.length||ids.length>200||ids.some(id=>typeof id!=='string'))throw new Error('Seleccioná entre 1 y 200 instalaciones');
-    let known=await this.get();
-    if(ids.some(id=>known.installations.find(p=>p.id===id)?.updateState==='unchecked')){await this.updates;known=this.snapshot!;}
-    const requested=[...new Set(ids)].map(id=>known.installations.find(p=>p.id===id));
-    if(known.error||requested.some(p=>!p?.canUpdate))throw new Error('Alguna instalación no tiene una actualización gestionada disponible');
-    // Revalidate selected managers only. An unrelated repository cannot make
-    // reviewing one global tool wait for a full-host scan.
-    const snapshot=await this.read(true,undefined,[...new Set(requested.map(p=>p!.manager))]),cfg=await this.config();
-    const sources=new Map(snapshot.sources.map(s=>[s.id,s]));
-    for(const row of snapshot.installations.filter(p=>ids.includes(p.id))){
-      const source=sources.get(row.sourceId!);
-      if(!source?.complete||source.error){row.canUpdate=false;continue;}
-      if(['pnpm','bun'].includes(row.manager)&&!['held','unmanaged'].includes(row.updateState)){
-        const target=registryCandidate(await this.metadata(row.packageName),row);row.targetVersion=target||undefined;row.canUpdate=!!target&&!!row.version&&compareVersions(target,row.version)>0;
-      }
-    }
-    if(snapshot.error)throw new Error('No se puede planificar con un inventario fallido');
-    const items=[...new Set(ids)].map(id=>snapshot.installations.find(p=>p.id===id));
-    if(items.some(p=>!p?.canUpdate))throw new Error('Alguna instalación no tiene una actualización gestionada disponible');
+    // The cached snapshot is enough to assemble the request: the host-side
+    // plan re-scans only the selected managers and re-validates every version
+    // and candidate before producing transactions. Re-reading the inventory
+    // here duplicated that scan and was the visible "Revisar" delay.
+    let known=this.snapshot;
+    if(!known){known=await this.get();}
+    if(ids.some(id=>known.installations.find(p=>p.id===id)?.updateState==='unchecked')){this.check();await this.updates;known=this.snapshot??known;}
+    const items=[...new Set(ids)].map(id=>known.installations.find(p=>p.id===id));
+    if(known.error||items.some(p=>!p?.canUpdate))throw new Error('Alguna instalación no tiene una actualización gestionada disponible');
+    const cfg=await this.config(),integrations=await this.integrationLoader();
     const groups=new Map<string,SoftwareInstallation[]>();
     for(const item of items as SoftwareInstallation[]){const key=item.scope==='system'?HOST_USER:item.user;groups.set(key,[...(groups.get(key)||[]),item]);}
     const transactions:SoftwareTransaction[]=[];
-    for(const [user,group] of groups){const value=await this.run({action:'plan',user,settings:cfg.contexts?.[user]||{},integrations:await this.integrationLoader(),hooks:cfg.hooks||{},items:group});transactions.push(...value.transactions);}
+    for(const [user,group] of groups){const value=await this.run({action:'plan',user,settings:cfg.contexts?.[user]||{},integrations,hooks:cfg.hooks||{},items:group});transactions.push(...value.transactions);}
     const plan:SoftwarePlan={ok:true,id:randomUUID(),createdAt:Date.now(),expiresAt:Date.now()+600000,transactions};
     this.plans.set(plan.id!,{plan,config:cfg});for(const [id,saved] of this.plans)if(saved.plan.expiresAt!<Date.now())this.plans.delete(id);
     while(this.plans.size>100)this.plans.delete(this.plans.keys().next().value!);

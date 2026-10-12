@@ -1,26 +1,31 @@
 /* Native software inventory. Catalog recommendations never define inventory. */
 (() => {
 'use strict';
-let snapshot=null, flight=null, timer=null, mode='updates', query='', manager='', scope='', state='', page=0, signedIn=false;
-const selected=new Set(), size=75;
+let snapshot=null, flight=null, timer=null, mode='updates', query='', manager='', scope='', state='', kind='', kindDefaulted=false, page=0, signedIn=false;
+const selected=new Set(), size=75, planning=new Set();
 const hasUpdate=p=>p.canUpdate||p.updateState==='unsupported'&&!!(p.targetVersion||p.targetRevision||p.targetCommit);
+// User-facing programs (desktop apps, CLI tools, toolchains) vs OS packages.
+const category=p=>['application','tool','toolchain'].includes(p.kind)?'programs':'system';
+const CATEGORY_ORDER={programs:0,system:1};
+const CATEGORY_LABEL={programs:'Programas',system:'Sistema operativo'};
+const updateLabel=()=>planning.size?'Preparando…':selected.size?`Actualizar ${selected.size} seleccionados`:'Actualizar todo';
 let renderedRevision=null;
 document.addEventListener('axon:authenticated',()=>{signedIn=true;});
 document.addEventListener('axon:session-expired',()=>{signedIn=false;clearTimeout(timer);});
 const el=id=>document.getElementById(id);
 const states={unchecked:'Pendiente',available:'Actualización disponible',current:'Sin actualizaciones detectadas',held:'Retenido',unsupported:'Sólo lectura',unmanaged:'Origen no comprobado',error:'No se pudo comprobar'};
-const params=()=>({view:mode==='updates'?'':mode,q:query,manager,scope,state,page:page?String(page+1):''});
+const params=()=>({view:mode==='updates'?'':mode,q:query,manager,scope,state,kind,page:page?String(page+1):''});
 const sync=()=>window.AxonNavigation?.update('programs',params());
 const sourceLabel=p=>p.manager+' · '+(p.scope==='system'?'Sistema':p.user);
 function selectionLabel(){
- el('update-all-btn').textContent=selected.size?`Revisar ${selected.size} seleccionadas`:'Revisar actualizaciones';
+ el('update-all-btn').textContent=updateLabel();
  el('programs-grid').querySelectorAll('[data-select]').forEach(input=>input.checked=selected.has(input.dataset.select));
  const ids=matching().slice(page*size,(page+1)*size).filter(p=>p.canUpdate).map(p=>p.id);
  el('software-select-page').textContent=ids.length&&ids.every(id=>selected.has(id))?'Deseleccionar página':'Seleccionar página';
 }
 function matching(){
  const q=query.toLocaleLowerCase('es');
- return (snapshot?.installations||[]).filter(p=>(mode!=='updates'||hasUpdate(p))&&(!manager||p.manager===manager)&&(!scope||p.scope===scope)&&(!state||p.updateState===state)&&(!q||[p.name,p.packageName,p.user,p.root,p.description].join(' ').toLocaleLowerCase('es').includes(q))).sort((a,b)=>(mode==='updates'?Number(b.canUpdate)-Number(a.canUpdate)||0:0)||a.name.localeCompare(b.name,'es'));
+ return (snapshot?.installations||[]).filter(p=>(mode!=='updates'||hasUpdate(p))&&(!kind||category(p)===kind)&&(!manager||p.manager===manager)&&(!scope||p.scope===scope)&&(!state||p.updateState===state)&&(!q||[p.name,p.packageName,p.user,p.root,p.description].join(' ').toLocaleLowerCase('es').includes(q))).sort((a,b)=>CATEGORY_ORDER[category(a)]-CATEGORY_ORDER[category(b)]||(mode==='updates'?Number(b.canUpdate)-Number(a.canUpdate)||0:0)||a.name.localeCompare(b.name,'es'));
 }
 function render(){
  if(!snapshot)return;
@@ -29,14 +34,14 @@ function render(){
  el('programs-updated').textContent=snapshot.loading?'Leyendo programas instalados…':snapshot.checking?'Comprobando actualizaciones…':snapshot.checkedAt?'Comprobado '+new Date(snapshot.checkedAt).toLocaleTimeString():'Inventario sin completar';
  el('programs-grid').setAttribute('aria-busy',String(!!snapshot.loading));
  el('software-summary').textContent=`${snapshot.installations.length} instalaciones · ${pending.length} actualizaciones detectadas · ${snapshot.sources.filter(s=>s.available&&s.manager!=='metadata').length} fuentes detectadas`;
- el('update-all-btn').disabled=!manageable.length;
- el('update-all-btn').textContent=selected.size?`Revisar ${selected.size} seleccionadas`:'Revisar actualizaciones';
+ el('update-all-btn').disabled=planning.size>0||!manageable.length;
+ el('update-all-btn').textContent=updateLabel();
  el('software-modes').querySelectorAll('[data-mode]').forEach(b=>{b.classList.toggle('active',b.dataset.mode===mode);b.setAttribute('aria-pressed',String(b.dataset.mode===mode));});
  el('software-manager').innerHTML='<option value="">Todos los gestores</option>'+[...new Set(snapshot.installations.map(p=>p.manager))].sort().map(m=>`<option value="${esc(m)}"${m===manager?' selected':''}>${esc(m)}</option>`).join('');
  const errors=snapshot.sources.filter(s=>s.error);
  const complete=snapshot.sources.filter(s=>s.available&&s.manager!=='metadata'&&s.updateState!=='unchecked').length;
  const detected=snapshot.sources.filter(s=>s.available&&s.manager!=='metadata').length;
- el('software-notice').innerHTML=(snapshot.checking?`<p class="software-progress" role="status">${icon('loader','spin')} ${snapshot.loading?'Leyendo instalaciones. Los programas aparecen a medida que se detectan.':`Comprobando fuentes (${complete}/${detected}). Las actualizaciones aparecen a medida que se encuentran.`}</p>`:'')+(snapshot.error?`<p class="software-warning">${esc(snapshot.error)}. Se conserva la última lectura. <button class="btn-secondary" data-retry>Reintentar</button></p>`:'')+(errors.length?`<details class="software-warning"><summary>${errors.length} fuentes necesitan revisión</summary>${errors.map(s=>`<p><strong>${esc(sourceLabel(s))}</strong>: ${esc(s.error)}</p>`).join('')}</details>`:'');
+ el('software-notice').innerHTML=(planning.size?`<p class="software-progress" role="status">${icon('loader','spin')} Preparando el plan de actualización de ${planning.size===1?'un programa':planning.size+' programas'}… Esto vuelve a comprobar el gestor y puede tardar.</p>`:'')+(snapshot.checking?`<p class="software-progress" role="status">${icon('loader','spin')} ${snapshot.loading?'Leyendo instalaciones. Los programas aparecen a medida que se detectan.':`Comprobando fuentes (${complete}/${detected}). Las actualizaciones aparecen a medida que se encuentran.`}</p>`:'')+(snapshot.error?`<p class="software-warning">${esc(snapshot.error)}. Se conserva la última lectura. <button class="btn-secondary" data-retry>Reintentar</button></p>`:'')+(errors.length?`<details class="software-warning"><summary>${errors.length} fuentes necesitan revisión</summary>${errors.map(s=>`<p><strong>${esc(sourceLabel(s))}</strong>: ${esc(s.error)}</p>`).join('')}</details>`:'');
  el('software-toolbar').classList.toggle('hidden',mode==='sources');
  el('programs-grid').className='software-list';
  // A table only exists when rows exist. Source cards and empty/loading
@@ -47,7 +52,16 @@ function render(){
   el('programs-grid').innerHTML=snapshot.sources.filter(s=>s.manager!=='metadata').map(s=>`<article class="software-source"><div><strong>${esc(sourceLabel(s))}</strong><p>${s.available?s.complete?'Inventario leído':'Inventario incompleto':'No disponible en este host'}</p><small>${esc(s.root||'')}</small></div><div><span>${esc(s.available?(s.updateState==='ok'?'Comprobado':states[s.updateState]||'Sólo lectura'):'No instalado')}</span>${s.metadataAt?`<p>Índices: ${esc(new Date(s.metadataAt).toLocaleString())}</p>`:''}${s.note?`<p>${esc(s.note)}</p>`:''}${s.manager==='apt'&&s.available&&snapshot.canAdministerSystem?'<button class="btn-secondary" data-indices>Actualizar índices</button>':''}</div></article>`).join('');
  }else{
   const visible=rows.slice(page*size,(page+1)*size);
-  el('programs-grid').innerHTML=visible.length?`<div class="software-columns" role="row" aria-hidden="true"><span role="columnheader">Programa / paquete</span><span role="columnheader">Instalación</span><span role="columnheader">Versión</span><span role="columnheader">Estado</span></div>`+visible.map(p=>`<article class="software-row" role="row"><div class="software-name" role="cell"><input type="checkbox" data-select="${esc(p.id)}" aria-label="Seleccionar ${esc(p.name)} · ${esc(sourceLabel(p))}"${selected.has(p.id)?' checked':''}${!p.canUpdate?' disabled':''}><img src="${esc(p.iconUrl)}" alt="" width="32" height="32" loading="lazy" onerror="this.style.visibility='hidden'"><div><button type="button" class="software-detail" data-detail="${esc(p.id)}">${esc(p.name)}</button><small>${esc(p.packageName)}</small></div></div><span class="software-origin" role="cell">${esc(sourceLabel(p))}</span><span class="software-version" role="cell">${esc(p.version||'Versión no registrada')}${hasUpdate(p)?`<small>→ ${esc(p.targetVersion||p.targetRevision||p.targetCommit?.slice(0,12)||'nuevo commit')}</small>`:''}</span><div class="software-status" role="cell">${p.canUpdate?`<button type="button" class="btn-secondary" data-update="${esc(p.id)}">${icon('arrow-up-circle')} Revisar</button>`:`<span class="software-state s-${esc(p.updateState)}">${esc(states[p.updateState]||'No comprobado')}</span>`}</div></article>`).join(''):`<div class="empty-state">${snapshot.loading?'Leyendo instalaciones… Los resultados aparecen a medida que se detectan.':mode==='updates'?(snapshot.checking?'Buscando actualizaciones… Podés abrir Instalados mientras termina.':'No hay actualizaciones gestionadas disponibles. Consultá Instalados y Fuentes para ver la cobertura.'):'No hay instalaciones que coincidan con los filtros.'}</div>`;
+  const statusCell=p=>planning.has(p.id)?`<span class="software-state s-pending">${icon('loader','spin')} Preparando…</span>`
+   :p.canUpdate?`<button type="button" class="btn-secondary" data-update="${esc(p.id)}"${planning.size?' disabled':''}>${icon('arrow-up-circle')} Actualizar</button>`
+   :`<span class="software-state s-${esc(p.updateState)}">${esc(states[p.updateState]||'No comprobado')}</span>`;
+  let lastCategory=null;
+  const body=visible.map(p=>{
+   const cat=category(p),header=cat!==lastCategory?`<div class="software-group" role="row"><span role="cell">${CATEGORY_LABEL[cat]}</span></div>`:'';
+   lastCategory=cat;
+   return header+`<article class="software-row" role="row"><div class="software-name" role="cell"><input type="checkbox" data-select="${esc(p.id)}" aria-label="Seleccionar ${esc(p.name)} · ${esc(sourceLabel(p))}"${selected.has(p.id)?' checked':''}${!p.canUpdate?' disabled':''}><img src="${esc(p.iconUrl)}" alt="" width="32" height="32" loading="lazy" onerror="this.style.visibility='hidden'"><div><button type="button" class="software-detail" data-detail="${esc(p.id)}">${esc(p.name)}</button><small>${esc(p.packageName)}</small></div></div><span class="software-origin" role="cell">${esc(sourceLabel(p))}</span><span class="software-version" role="cell">${esc(p.version||'Versión no registrada')}${hasUpdate(p)?`<small>→ ${esc(p.targetVersion||p.targetRevision||p.targetCommit?.slice(0,12)||'nuevo commit')}</small>`:''}</span><div class="software-status" role="cell">${statusCell(p)}${p.reason?`<small class="software-reason" title="${esc(p.reason)}">${esc(p.reason)}</small>`:''}</div></article>`;
+  }).join('');
+  el('programs-grid').innerHTML=visible.length?`<div class="software-columns" role="row" aria-hidden="true"><span role="columnheader">Programa / paquete</span><span role="columnheader">Instalación</span><span role="columnheader">Versión</span><span role="columnheader">Estado</span></div>`+body:`<div class="empty-state">${snapshot.loading?'Leyendo instalaciones… Los resultados aparecen a medida que se detectan.':mode==='updates'?(snapshot.checking?'Buscando actualizaciones… Podés abrir Instalados mientras termina.':'No hay actualizaciones gestionadas disponibles. Consultá Instalados y Fuentes para ver la cobertura.'):'No hay instalaciones que coincidan con los filtros.'}</div>`;
  }
  el('software-pagination').classList.toggle('hidden',mode==='sources');
  el('software-page').textContent=`${rows.length} resultados · página ${page+1} de ${pages}`;
@@ -97,17 +111,25 @@ function iconPicker(p){
 }
 async function confirmPlan(plan){
  const count=plan.transactions.reduce((n,tx)=>n+tx.items.length,0);
- const d=dialog(`Revisar ${count} actualizaciones`,plan.transactions.map(tx=>`<section class="software-plan"><h4>${esc(sourceLabel(tx))}</h4>${tx.argv?.length?`<p class="software-cmd"><code>${esc(tx.argv.join(' '))}</code></p>`:''}<ul>${tx.items.map(p=>`<li><strong>${esc(p.name)}</strong> · ${esc(p.version||'?')} → ${esc(p.targetVersion||p.targetRevision||p.targetCommit?.slice(0,12)||'nuevo commit')}</li>`).join('')}</ul><p>${esc(tx.effects)}</p>${tx.simulation.complete?`<details><summary>${tx.simulation.changes.length} cambios en paquetes y dependencias</summary><ul>${tx.simulation.changes.map(c=>`<li>${esc(c.packageName)} → ${esc(c.targetVersion||'?')}</li>`).join('')}</ul></details>`:'<p class="settings-help">El gestor puede modificar dependencias. No ofrece una simulación completa en este adaptador.</p>'}</section>`).join('')+'<p class="settings-help">El plan vence en 10 minutos. Antes de ejecutar se vuelve a comprobar la instalación y el candidato. El resultado se verifica en el registro del gestor.'+(count>3?' La ejecución puede tardar varios minutos; el progreso queda en el trabajo registrado y podés seguir usando AXON.':'')+'</p>');
+ const d=dialog(`Actualizar ${count===1?'1 programa':count+' programas'}`,plan.transactions.map(tx=>`<section class="software-plan"><h4>${esc(sourceLabel(tx))}</h4>${tx.argv?.length?`<p class="software-cmd"><code>${esc(tx.argv.join(' '))}</code></p>`:''}<ul>${tx.items.map(p=>`<li><strong>${esc(p.name)}</strong> · ${esc(p.version||'?')} → ${esc(p.targetVersion||p.targetRevision||p.targetCommit?.slice(0,12)||'nuevo commit')}</li>`).join('')}</ul><p>${esc(tx.effects)}</p>${tx.simulation.complete?`<details><summary>${tx.simulation.changes.length} cambios en paquetes y dependencias</summary><ul>${tx.simulation.changes.map(c=>`<li>${esc(c.packageName)} → ${esc(c.targetVersion||'?')}</li>`).join('')}</ul></details>`:'<p class="settings-help">El gestor puede modificar dependencias. No ofrece una simulación completa en este adaptador.</p>'}</section>`).join('')+'<p class="settings-help">El plan vence en 10 minutos. Antes de ejecutar se vuelve a comprobar la instalación y el candidato. El resultado se verifica en el registro del gestor.'+(count>3?' La ejecución puede tardar varios minutos; el progreso queda en el trabajo registrado y podés seguir usando AXON.':'')+'</p>');
  const button=document.createElement('button');button.className='btn-primary';button.type='button';button.textContent='Actualizar';d.querySelector('.modal-actions').append(button);
- button.onclick=async()=>{try{await AxonUI.busy(button,async()=>{const {job}=await api('/api/software/execute',{method:'POST',body:{planId:plan.id}});d.close();openJobModal(job);await load(true);});}catch(e){errToast(e);}};
+ button.onclick=async()=>{try{await AxonUI.busy(button,async()=>{button.textContent='Iniciando…';const {job}=await api('/api/software/execute',{method:'POST',body:{planId:plan.id}});d.close();openJobModal(job);toast('Actualización iniciada','ok');await load(true);});}catch(e){button.textContent='Actualizar';errToast(e);if(/en curso/i.test(e?.message||''))try{const {jobs}=await api('/api/jobs');const running=(jobs||[]).find(j=>j.status==='running'&&j.steps?.some(s=>s.group?.startsWith('software:')));if(running){d.close();openJobModal(running);}}catch{}}};
  refreshIcons();
 }
 function chooseInstallation(name,installations){
  const d=dialog('Elegir instalación de '+name,installations.map(p=>`<p><button type="button" class="btn-secondary" data-choice="${esc(p.id)}"${p.canUpdate===false?' disabled':''}>${esc(sourceLabel(p))} · ${esc(p.version||'Versión no registrada')}${p.canUpdate===false?' · Sin actualización gestionada':''}</button></p>`).join(''));
  d.addEventListener('click',e=>{const b=e.target.closest('[data-choice]');if(b){d.close();review([b.dataset.choice]);}});
 }
+// `planning` survives render(): the grid re-renders while the inventory polls,
+// so the busy state must live in data, not on the clicked button element.
 async function review(ids,button){
- try{await AxonUI.busy(button,async()=>{const {plan}=await api('/api/software/plan',{method:'POST',body:{ids}});await confirmPlan(plan);});}catch(e){errToast(e);}
+ const pending=[...new Set(ids)].filter(id=>!planning.has(id));
+ if(!pending.length)return;
+ pending.forEach(id=>planning.add(id));
+ if(snapshot)render();
+ try{await AxonUI.busy(button,async()=>{const {plan}=await api('/api/software/plan',{method:'POST',body:{ids:pending}});await confirmPlan(plan);});}
+ catch(e){errToast(e);if(/comprobar|cambi/i.test(e?.message||''))load(true);}
+ finally{pending.forEach(id=>planning.delete(id));if(snapshot)render();}
 }
 el('software-query').oninput=e=>{query=e.target.value;page=0;render();sync();};
 el('software-manager').onchange=e=>{manager=e.target.value;page=0;render();sync();};
@@ -117,14 +139,15 @@ const stateSelect=document.createElement('select');stateSelect.id='software-stat
 stateSelect.innerHTML='<option value="">Todos los estados</option>'+Object.entries(states).map(([v,l])=>`<option value="${esc(v)}"${v===state?' selected':''}>${esc(l)}</option>`).join('');
 el('software-toolbar').append(stateSelect);
 stateSelect.onchange=e=>{state=e.target.value;page=0;render();sync();};
-el('software-modes').onclick=e=>{const b=e.target.closest('[data-mode]');if(b){mode=b.dataset.mode;page=0;render();sync();}};
+el('software-kind').onchange=e=>{kind=e.target.value;kindDefaulted=true;page=0;render();sync();};
+el('software-modes').onclick=e=>{const b=e.target.closest('[data-mode]');if(b){mode=b.dataset.mode;if(mode==='installed'&&!kind&&!kindDefaulted){kind='programs';kindDefaulted=true;el('software-kind').value=kind;}page=0;render();sync();}};
 el('software-prev').onclick=()=>{page--;render();sync();};el('software-next').onclick=()=>{page++;render();sync();};
 el('software-select-page').onclick=()=>{const ids=matching().slice(page*size,(page+1)*size).filter(p=>p.canUpdate).map(p=>p.id);const remove=ids.every(id=>selected.has(id));ids.forEach(id=>remove?selected.delete(id):selected.size<200&&selected.add(id));selectionLabel();};
 el('programs-grid').onchange=e=>{if(e.target.dataset.select){if(e.target.checked&&selected.size>=200){e.target.checked=false;toast('El plan admite hasta 200 instalaciones','info');return;}e.target.checked?selected.add(e.target.dataset.select):selected.delete(e.target.dataset.select);selectionLabel();}};
 el('programs-grid').onclick=e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.detail)detail(b.dataset.detail);if(b.dataset.update)review([b.dataset.update],b);if(b.hasAttribute('data-indices'))refreshIndices(b);};
 el('software-notice').onclick=e=>{if(e.target.closest('[data-retry]'))load(true);};
 el('programs-refresh').onclick=e=>AxonUI.busy(e.currentTarget,()=>load(true));
-el('update-all-btn').onclick=e=>{const ids=selected.size?[...selected]:snapshot.installations.filter(p=>p.canUpdate).map(p=>p.id);if(ids.length>200){mode='updates';render();toast('Seleccioná hasta 200 instalaciones para revisar el plan','info');return;}review(ids,e.currentTarget);};
+el('update-all-btn').onclick=e=>{const ids=selected.size?[...selected]:snapshot.installations.filter(p=>p.canUpdate).map(p=>p.id);if(ids.length>200){mode='updates';render();toast('Seleccioná hasta 200 instalaciones por plan','info');return;}review(ids,e.currentTarget);};
 // El diálogo genérico de index.html fija variant="danger"; acá se ajusta por
 // acción y se restaura, sin tocar el archivo compartido.
 async function confirmVariant(title,body,okLabel,variant='brand'){
@@ -140,6 +163,6 @@ async function refreshIndices(button){if(!await confirmVariant('Actualizar índi
 document.addEventListener('visibilitychange',()=>{clearTimeout(timer);if(!document.hidden&&activeTabName==='programs'&&signedIn)load();});
 document.addEventListener('axon:tab',e=>{if(e.detail!=='programs')clearTimeout(timer);});
 document.addEventListener('axon:job-complete',e=>{const job=e.detail;if(activeTabName==='programs'&&job?.steps?.some(s=>s.group?.startsWith('software:')))load(true);});
-window.AxonPages ||= {};window.AxonPages.programs={params,capture:params,restore:async p=>{mode=['installed','sources'].includes(p.view)?p.view:'updates';query=p.q||'';manager=p.manager||'';scope=['system','user'].includes(p.scope)?p.scope:'';state=states[p.state]?p.state:'';page=Math.max(0,(Number(p.page)||1)-1);el('software-query').value=query;el('software-scope').value=scope;stateSelect.value=state;await load();render();}};
-window.AxonSoftware={load,review,confirmPlan,chooseInstallation,installed:()=>{mode='installed';page=0;render();sync();},snapshot:()=>snapshot};
+window.AxonPages ||= {};window.AxonPages.programs={params,capture:params,restore:async p=>{mode=['installed','sources'].includes(p.view)?p.view:'updates';query=p.q||'';manager=p.manager||'';scope=['system','user'].includes(p.scope)?p.scope:'';state=states[p.state]?p.state:'';kind=['programs','system'].includes(p.kind)?p.kind:'';kindDefaulted=!!p.kind;page=Math.max(0,(Number(p.page)||1)-1);el('software-query').value=query;el('software-scope').value=scope;el('software-kind').value=kind;stateSelect.value=state;await load();render();}};
+window.AxonSoftware={load,review,confirmPlan,chooseInstallation,installed:()=>{mode='installed';if(!kind&&!kindDefaulted){kind='programs';kindDefaulted=true;el('software-kind').value=kind;}page=0;render();sync();},snapshot:()=>snapshot};
 })();

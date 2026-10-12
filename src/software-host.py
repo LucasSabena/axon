@@ -403,11 +403,12 @@ def scan(req):
         sources.append(src)
     for task in pending: task.result()
     pool.shutdown()
+    light = bool(req.get("light"))
     # Version checks reuse known desktop metadata, rather than rescanning icons.
-    if not updates: enrich(rows, ctx, req.get("settings", {}), sources)
-    if not req.get("managers"): local_executables(rows, ctx, req.get("settings", {}), sources)
+    if not updates and not light: enrich(rows, ctx, req.get("settings", {}), sources)
+    if not req.get("managers") and not light: local_executables(rows, ctx, req.get("settings", {}), sources)
     # Optional integration metadata enriches records; it never limits enumeration.
-    for item in req.get("integrations", []):
+    for item in req.get("integrations", []) if not light else ():
         binary = item.get("binary", "")
         if not re.fullmatch(r"[A-Za-z0-9_.+-]+", binary): continue
         executable = tool(binary, ctx)
@@ -667,7 +668,7 @@ def build_transaction(items):
         tx["argv"] = ["apt-get", "install", "--only-upgrade", "--no-remove", "-y", "--"] + targets
         tx["simulation"] = apt_simulation(command(["apt-get", "--simulate", "install", "--only-upgrade", "--no-remove", "--"] + targets))
         if tx["simulation"]["removals"]: raise ValueError("El plan elimina paquetes; operación bloqueada")
-        tx["effects"] = "El plan APT incluye todos los cambios de dependencias de su simulación"
+        tx["effects"] = "El plan APT incluye todos los cambios de dependencias de su simulación · Los servicios en ejecución que usen estos paquetes se reinician al finalizar"
     elif manager in ["pnpm", "bun"]:
         if any(not row.get("targetVersion") or not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?", row["targetVersion"]) for row in items): raise ValueError("Candidato pnpm inválido")
         tx["argv"] = ([manager, "--dir", first["root"], "add", "-g"] if manager == "pnpm" else [manager, "add", "-g"]) + [row["packageName"] + "@" + row["targetVersion"] for row in items]
@@ -756,6 +757,59 @@ def transaction_key(tx):
     return ":".join([tx["manager"], tx["scope"], tx["user"], tx["root"]])
 
 
+def systemd_unit_pids(unit_ids):
+    """Main PID per unit, resolved in one `systemctl show` call."""
+    pids = {}
+    output = command(["systemctl", "show", "-p", "Id,ExecMainPID", "--"] + unit_ids, timeout=30, accepted=(0, 1))
+    current = None
+    for line in output.splitlines():
+        if line.startswith("Id="):
+            current = line[3:].strip()
+        elif line.startswith("ExecMainPID=") and current:
+            try: pids[current] = int(line.split("=", 1)[1])
+            except ValueError: pass
+    return pids
+
+
+def restart_services(packages):
+    """Running services whose process binary came from an updated package get
+    restarted. /proc/<pid>/exe identifies the real executable, so env wrappers,
+    `bash -c` and interpreted services all resolve to what is actually running;
+    `try-restart` no-ops on anything no longer active.
+    """
+    names = {p.split(":")[0] for p in packages}
+    if not names or not tool("systemctl") or not tool("dpkg-query"): return
+    try:
+        out = command(["systemctl", "list-units", "--type=service", "--state=running", "--no-legend", "--no-pager", "--plain"], timeout=20, accepted=(0, 1))
+        units = [line.split()[0] for line in out.splitlines() if line.strip()]
+        binaries = {}
+        for unit, pid in systemd_unit_pids(units).items():
+            if pid <= 0: continue
+            try: binaries[unit] = os.readlink("/proc/%d/exe" % pid).removesuffix(" (deleted)")
+            except OSError: continue
+        owners = {}
+        paths = list(binaries.values())
+        for i in range(0, len(paths), 200):
+            for line in command(["dpkg-query", "-S"] + paths[i:i + 200], timeout=20, accepted=(0, 1)).splitlines():
+                package, separator, path = line.partition(": ")
+                if separator: owners.setdefault(path, package.split(",")[0].strip().split(":")[0])
+        for unit in [unit for unit, path in binaries.items() if owners.get(path) in names]:
+            print("Reiniciando " + unit + ": el servicio corre con el paquete recién actualizado", flush=True)
+            try:
+                command(["systemctl", "try-restart", unit], timeout=60)
+            except RuntimeError as e:
+                print("Aviso: no se pudo reiniciar " + unit + ": " + str(e), flush=True)
+    except RuntimeError as e:
+        print("Aviso: no se pudieron revisar los servicios en ejecución: " + str(e), flush=True)
+
+
+def running_flatpaks(selector, ctx):
+    try:
+        return set(command(["flatpak", "ps", selector, "--columns=application"], ctx, timeout=15, accepted=(0, 1)).split())
+    except RuntimeError:
+        return set()
+
+
 def execute(req):
     approved = req["plan"]
     if time.time() * 1000 - approved["createdAt"] > 600000: raise ValueError("El plan venció; generá uno nuevo")
@@ -763,6 +817,7 @@ def execute(req):
     handles = acquire(transaction_key(tx) for tx in transactions)
     try:
         items = [p for tx in transactions for p in tx["items"]]
+        print("Comprobando el estado actual de las instalaciones…", flush=True)
         current = plan({**req, "items": items})
         if current["transactions"] != transactions: raise ValueError("El plan o sus dependencias cambiaron. No se ejecutó la actualización.")
         for tx in transactions:
@@ -780,7 +835,10 @@ def execute(req):
                 argv = ["bash", "-c", hook]
             print("Actualizando " + ", ".join(p["name"] for p in tx["items"]), flush=True)
             command(argv, ctx, timeout=3600, stream=True, inherited=handles)
-            verified = {p["id"]: p for p in scan({**req, "updates": False})["installations"]}
+            print("Verificando el resultado en el registro de " + tx["manager"] + "…", flush=True)
+            # Light, manager-scoped scan: version verification needs no desktop
+            # metadata, icon resolution or the other sources' readers.
+            verified = {p["id"]: p for p in scan({**req, "updates": False, "managers": [tx["manager"]], "light": True})["installations"]}
             for expected in tx["items"]:
                 actual = verified.get(expected["id"])
                 if not actual: raise RuntimeError("La instalación no aparece después de actualizar")
@@ -790,7 +848,13 @@ def execute(req):
                 elif tx["manager"] == "snap": valid = actual.get("revision") == expected["targetRevision"]
                 else: valid = actual["version"] == expected["targetVersion"]
                 if not valid: raise RuntimeError("La versión instalada no coincide con el objetivo aprobado: " + expected["name"])
+            if tx["manager"] == "flatpak":
+                running = running_flatpaks(tx["items"][0].get("selector", "--" + tx["scope"]), ctx)
+                for p in tx["items"]:
+                    if p["packageName"].split("/")[1] in running:
+                        print("Aviso: " + p["name"] + " sigue abierta con la versión anterior; reiniciarla para usar la nueva.", flush=True)
             print("Instalaciones verificadas en el registro del gestor", flush=True)
+        restart_services([p["packageName"] for tx in transactions if tx["manager"] == "apt" for p in tx["items"]])
         return {"ok": True, "verified": True}
     finally:
         for fd in handles: os.close(fd)

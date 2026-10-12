@@ -83,6 +83,14 @@ describe('native software discovery and update contract',()=>{
   expect(plan.id).toBeTruthy();expect(plan.transactions[0].items).toHaveLength(1);expect(plan.transactions[0].items[0].targetVersion).toBe('1.2.0');
   expect(requests.findLast(r=>r.action==='plan').settings).toEqual({});
  });
+ test('a plan reuses the cached inventory and only revalidates on the host',async()=>{
+  const requests:any[]=[];
+  const service=new SoftwareService(async req=>{requests.push(req);return req.action==='plan'?{ok:true,transactions:[{manager:'pnpm',scope:'user',user:'any-user',root:'/srv/home/custom/global',items:req.items,argv:[],effects:'',simulation:{complete:false,changes:[],removals:[]}}]}:snapshot([row()]);},async()=>({}),async()=>[],metadata);
+  await service.settled();requests.length=0;
+  await service.plan(['native-unlisted']);
+  expect(requests.filter(r=>r.action==='scan')).toHaveLength(0);
+  expect(requests.filter(r=>r.action==='plan')).toHaveLength(1);
+ });
  test('invalid or expired plan IDs never reach a host executor',async()=>{
   let calls=0;const service=new SoftwareService(async()=>{calls++;return snapshot([row()]);},async()=>({}),async()=>[],metadata);
   await expect(service.execute('invented-plan')).rejects.toThrow('plan');expect(calls).toBe(0);
