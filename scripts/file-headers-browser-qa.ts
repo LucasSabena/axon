@@ -9,6 +9,8 @@ const browser=await chromium.launch({headless:true}),context=await browser.newCo
 const errors:string[]=[],measurements:any[]=[];
 page.on('pageerror',e=>errors.push(e.message));
 const assert=(v:unknown,m:string)=>{if(!v)throw new Error(m);};
+// The disks button lives in the expandable "Filtros y más" drawer of the new file header.
+const openDisks=async()=>{if(await page.locator('#fm-drawer').isHidden())await page.locator('#fm-more-btn').click();await page.locator('#fm-disks-open').click();};
 const provider={id:'dropbox',name:'Dropbox',configured:true,connected:true,visible:true,account:{name:'Cuenta de prueba',email:'qa@example.test'},sources:[{id:'account',name:'Mi Dropbox',type:'account'}]};
 await page.route('**/api/connections',r=>r.fulfill({json:{ok:true,providers:[provider]}}));
 await page.route(/\/api\/files\/dropbox\//,r=>{
@@ -23,7 +25,9 @@ const axe=async(selector:string)=>{
 try{
   await page.goto(origin+'/archivos');await page.locator('#username').fill('qa');await page.locator('#password').fill('axon-local-qa');await page.locator('#login-form button[type=submit]').click();
   await page.waitForFunction(()=>(window as any).AxonNavigation?.ready);
+  if(await page.locator('#fm-drawer').isHidden())await page.locator('#fm-more-btn').click();
   await page.locator('#fm-disk-label').getByText('Disco interno',{exact:false}).waitFor();
+  await page.locator('#fm-more-btn').click();
   const root=await page.locator('#fm-location').inputValue();
   assert((await readFile(root+'/.axon-qa-owned','utf8')).includes('isolated-qa'),'Not an owned fixture');
   await writeFile(root+'/media/nota.txt','Contenido de prueba');
@@ -46,22 +50,22 @@ try{
   await page.locator('.fm-row[data-name="nota.txt"]').waitFor();assert(await page.locator('#fm-breadcrumb').isVisible(),'Breadcrumb did not return');
   await page.keyboard.press('Control+Shift+l');await page.locator('#fm-location').fill('/cancelled');await page.keyboard.press('Escape');
   assert(await page.locator('#fm-location').inputValue()===root+'/media','Cancel changed path');
-  await page.locator('#fm-disks-open').click();await page.locator('#fm-disks-dialog[open]').waitFor();await axe('#fm-disks-dialog');
+  await openDisks();await page.locator('#fm-disks-dialog[open]').waitFor();await axe('#fm-disks-dialog');
   await page.keyboard.press('Escape');assert(await page.locator('#fm-disks-open').evaluate(el=>el===document.activeElement),'Disk modal lost focus');
-  await page.locator('#fm-disks-open').click();await go('/almacenamiento?view=disks');await page.locator('#fm-disks-dialog').waitFor({state:'hidden'});await go('/archivos');
-  await page.locator('#fm-disks-open').click();const volume=page.locator('#fm-volumes [data-volume]').first();await volume.click();await page.locator('#fm-disks-dialog').waitFor({state:'hidden'});
+  await openDisks();await go('/almacenamiento?view=disks');await page.locator('#fm-disks-dialog').waitFor({state:'hidden'});await go('/archivos');
+  await openDisks();const volume=page.locator('#fm-volumes [data-volume]').first();await volume.click();await page.locator('#fm-disks-dialog').waitFor({state:'hidden'});
   await page.waitForFunction(root=>(document.querySelector('#fm-location') as HTMLInputElement)?.value===root,root);
-  await page.locator('#fm-disks-open').click();
+  await openDisks();
   await page.route('**/api/files/volumes',r=>r.fulfill({status:503,json:{ok:false,error:'QA inventory outage'}}));
   await page.locator('#fm-volumes-refresh:not([disabled])').click();await page.locator('#fm-volumes-error:not(.hidden)').waitFor();
   assert(await page.locator('#fm-volumes [data-volume]').count()>0,'Refresh failure erased last inventory');
   await page.keyboard.press('Escape');assert(await page.locator('#fm-disks-open').getAttribute('class')?.then(s=>s?.includes('fm-disks-warning')),'Hidden disk error has no indicator');
-  await page.unroute('**/api/files/volumes');await page.locator('#fm-disks-open').click();await page.locator('#fm-volumes-error.hidden').waitFor({state:'attached'});await page.keyboard.press('Escape');
+  await page.unroute('**/api/files/volumes');await openDisks();await page.locator('#fm-volumes-error.hidden').waitFor({state:'attached'});await page.keyboard.press('Escape');
   await page.locator('#fm-create-btn').click();await axe('#fm-create-menu');await page.locator('#fm-new-file-btn').click();await page.locator('#fm-create-name').waitFor();await page.keyboard.press('Escape');
   await page.locator('#fm-create-btn').click();await page.locator('#fm-mkdir-btn').click();await page.locator('.fm-prompt-modal').waitFor();await page.keyboard.press('Escape');
   await page.locator('#fm-create-btn').click();const chooser=page.waitForEvent('filechooser');await page.locator('#fm-upload-dir-btn').click();await chooser;assert(!await page.locator('#fm-create-menu').isVisible(),'Upload menu stayed open');
-  await page.locator('[data-source=dropbox]').click();await page.locator('.cloud-panel:not([hidden])').waitFor();assert(await page.locator('.cloud-source-tabs').isVisible(),'Cloud source switcher hidden');
-  await page.locator('[data-source=server]').click();await page.locator('#fm-breadcrumb').waitFor();assert(await page.locator('.fm-top .cloud-source-tabs').isVisible(),'Source switcher not restored');
+  await go('/archivos?source=dropbox');await page.locator('.cloud-panel:not([hidden])').waitFor();assert(await page.locator('#fm-nav').isVisible(),'Navigation pane hidden in cloud mode');
+  await go('/archivos');await page.locator('#fm-breadcrumb').waitFor();assert(await page.locator('.fm-cmdbar').isVisible(),'Command bar not restored');
   await go('/biblioteca');assert(await page.locator('#tab-library>.host-disks-panel').count()===0,'Library still has permanent disks');
   await page.locator('[data-host-disks-open]').click();await page.locator('.host-disks-dialog[open]').waitFor();await axe('.host-disks-dialog');
   const selection=await page.locator('#lib-body .sel').count();await page.keyboard.press('Control+a');assert(await page.locator('#lib-body .sel').count()===selection,'Modal shortcut changed library selection');
@@ -73,12 +77,12 @@ try{
   const unmounted={...inventory.volumes[0],id:'qa-unmounted',uuid:'qa-unmounted-uuid',name:'Disco sin montar (QA)',hidden:false,technical:false,device:'/dev/qa-unmounted',diskId:'qa-unmounted',path:null,mountId:null,canMount:true};
   await page.route('**/api/files/volumes',r=>r.fulfill({json:{...inventory,volumes:[...inventory.volumes,unmounted]}}));
   await page.route('**/api/files/volumes/qa-unmounted/mount',r=>r.fulfill({status:503,json:{ok:false,error:'No se pudo montar (QA)'}}));
-  await page.locator('#fm-disks-open').click();await page.locator('[data-volume=qa-unmounted]').click();await page.getByText('No se pudo montar (QA)',{exact:true}).waitFor();
+  await openDisks();await page.locator('[data-volume=qa-unmounted]').click();await page.getByText('No se pudo montar (QA)',{exact:true}).waitFor();
   assert(await page.locator('[data-volume=qa-unmounted]').isEnabled(),'Failed mount blocks retry');await page.keyboard.press('Escape');
   await go('/biblioteca');await page.locator('[data-host-disks-open]').click();await page.locator('.host-disks-dialog [data-host-volume=qa-unmounted]').click();await page.locator('.host-disks-dialog').getByText('No se pudo montar (QA)',{exact:true}).waitFor();await page.keyboard.press('Escape');
   await page.unroute('**/api/files/volumes');await page.unroute('**/api/files/volumes/qa-unmounted/mount');await go('/archivos');
   for(const width of [390,320]){
-    await page.setViewportSize({width,height:844});await page.locator('#fm-disks-open').click();await page.locator('#fm-disks-dialog[open]').waitFor();await axe('#fm-disks-dialog');
+    await page.setViewportSize({width,height:844});await openDisks();await page.locator('#fm-disks-dialog[open]').waitFor();await axe('#fm-disks-dialog');
     assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Mobile disk modal overflow');
     await page.screenshot({path:output+'/files-disks-'+width+'.png'});await page.keyboard.press('Escape');
     await go('/biblioteca');await page.locator('[data-host-disks-open]').click();await page.locator('.host-disks-dialog[open]').waitFor();await axe('.host-disks-dialog');

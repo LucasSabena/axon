@@ -106,8 +106,9 @@ wa-button::part(button) { font-family:var(--font-sans); font-size:13px; min-heig
 .is-busy svg,.is-busy i { animation:none; }
 .is-busy::after { content:''; display:inline-block; width:12px; height:12px; margin-left:6px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; animation:axon-spin .85s linear infinite; flex-shrink:0; }
 .toast { font-family:var(--font-sans); border-radius:10px; background:var(--bg-panel); border:1px solid var(--border-strong); box-shadow:0 8px 32px #0003; }
-.ctx-menu,.cmdk-box { background:var(--bg-panel); border:1px solid var(--border-strong); border-radius:10px; }
-.ctx-item,.cmdk-item { font-family:var(--font-sans); min-height:34px; }
+.cmdk-box { background:var(--bg-panel); border:1px solid var(--border-strong); border-radius:10px; }
+.ctx-menu,.ctx-item,.cmdk-item { font-family:var(--font-sans); }
+.cmdk-item { min-height:34px; }
 .cmdk-item.selected { background:var(--accent-soft); }
 /* Home has a clear working area and a quieter activity rail. */
 .home-heading { margin:0 0 24px; }

@@ -18,6 +18,8 @@ El cupo diario es atómico y persistente. La telemetría se escribe en lotes de 
 
 ## Archivos y Biblioteca
 
+Biblioteca vive dentro de Archivos (ver [el explorador unificado](archivos-explorador.md)); las dos vistas siguen compartiendo esta organización.
+
 **Colores, etiquetas y marcas** está disponible para carpetas y archivos, individualmente o en una selección de hasta 200 elementos. Hay ocho colores, hasta 20 etiquetas y cuatro marcas independientes: Favorito, Me gusta, Guardado y Acceso rápido.
 
 Las dos vistas comparten la organización de cada usuario. Los accesos rápidos pueden apuntar a carpetas o archivos. Se puede filtrar por tipo, color, etiqueta y marca. Las búsquedas incluyen etiquetas; Biblioteca muestra también carpetas conocidas por su índice, incluidas las vacías, y permite buscar sólo carpetas. La búsqueda recursiva de Archivos combina resultados del servidor y coincidencias de las etiquetas personales.

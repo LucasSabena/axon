@@ -22,12 +22,12 @@ try{
   assert((await readFile(root+'/.axon-qa-owned','utf8')).includes('isolated-qa'),'Fixture ownership');
   const folder=root+'/external-drive/photos';await mkdir(folder,{recursive:true});
   for(const [name,color] of [['a.svg','red'],['b.svg','blue'],['c.svg','green']])await writeFile(folder+'/'+name,`<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300"><rect width="400" height="300" fill="${color}"/></svg>`);
-  await go('/biblioteca');await page.locator('#lib-add-folder').waitFor();
-  await page.locator('#lib-add-folder').click();await page.locator('#host-path-picker[open]').waitFor();
+  await go('/biblioteca');await page.locator('#tab-library .fm-nav-toggle').click();await page.locator('.fm-nav-i[data-action="lib-add"]').waitFor();
+  await page.locator('.fm-nav-i[data-action="lib-add"]').click();await page.locator('#host-path-picker[open]').waitFor();
   await page.locator('#host-picker-path').fill(folder);await page.locator('#host-picker-location button[type=submit]').click();
   await page.waitForFunction(folder=>(document.querySelector('#host-picker-path') as HTMLInputElement).value===folder&&!document.querySelector('#host-picker-select')?.hasAttribute('disabled'),folder);
   await page.locator('#host-picker-select').click();
-  await page.waitForFunction(folder=>(document.querySelector('#lib-side')?.textContent||'').includes('photos'),folder);
+  await page.waitForFunction(folder=>(document.querySelector('#fm-nav')?.textContent||'').includes('photos'),folder);
   await page.evaluate(async()=>{await fetch('/api/library/rescan?wait=1',{method:'POST'});});
   const library=(await request('/api/library')).data;
   assert(library.roots.includes(root+'/media')&&library.roots.includes(folder),'Add discarded existing roots');
@@ -47,8 +47,8 @@ try{
     await page.locator('#lv-prev').click();assert(await page.locator('#lv-stage').innerHTML()===before,'Library previous did not return');
     await page.locator('#lv-close').click();
     if(width<=768){
-      await page.locator('#lib-side-toggle').click();assert(await page.locator('#lib-side-toggle').getAttribute('aria-expanded')==='true','Section toggle state');
-      await page.locator('#lib-side .lib-nav[data-type=all]').click();assert(await page.locator('#lib-side-toggle').getAttribute('aria-expanded')==='false','Sections did not close');
+      await page.locator('#tab-library .fm-nav-toggle').click();assert(await page.locator('#tab-library .fm-nav-toggle').getAttribute('aria-expanded')==='true','Section toggle state');
+      await page.locator('#fm-nav [data-nav-key="lib:all:"]').click();assert(await page.locator('#tab-library .fm-nav-toggle').getAttribute('aria-expanded')==='false','Sections did not close');
     }
     assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Library overflow '+width);
     await go('/archivos?path='+encodeURIComponent(folder)+'&item=a.svg&sort=name&order=asc');

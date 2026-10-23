@@ -12,6 +12,7 @@ const username=await readFile(configPath,'utf8').then(text=>JSON.parse(text).aut
 const browser=await chromium.launch({headless:true,...(process.env.AXON_QA_BROWSER_CHANNEL?{channel:process.env.AXON_QA_BROWSER_CHANNEL}:{})});
 const context=await browser.newContext({viewport:{width:1440,height:1000}});
 const page=await context.newPage(),errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));
+await context.addInitScript(()=>{try{localStorage.setItem('fm-drawer','1');}catch{}});
 const assert=(v:unknown,message:string)=>{if(!v)throw new Error(message);};
 const cookie=await createSession(username);
 await context.addCookies([{name:'axon_session',value:cookie,url:origin,httpOnly:true,secure:origin.startsWith('https:'),sameSite:'Lax'}]);

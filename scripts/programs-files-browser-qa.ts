@@ -5,6 +5,7 @@ if(!root||!(await readFile(root+'/.axon-qa-owned','utf8')).includes('isolated-qa
 const output=process.env.AXON_QA_OUTPUT||'/tmp/axon-programs-files-qa';await mkdir(output,{recursive:true});
 await mkdir(root+'/media/Carpeta QA',{recursive:true});await writeFile(root+'/media/nota.txt','Fixture que se conserva.');
 const browser=await chromium.launch({headless:true,channel:"chrome"}),context=await browser.newContext(),page=await context.newPage(),errors:string[]=[],checks:any[]=[];
+await context.addInitScript(()=>{try{localStorage.setItem('fm-drawer','1');}catch{}});
 page.on('pageerror',e=>errors.push(e.message));
 const assert=(v:unknown,m:string)=>{if(!v)throw Error(m);};
 const go=(url:string)=>page.evaluate(url=>(window as any).AxonNavigation.go(url),url);
@@ -27,7 +28,7 @@ try{
  await page.reload();await page.waitForFunction(()=>(window as any).AxonNavigation?.ready);await page.locator('#fm-transfers-count').filter({hasText:'25'}).waitFor();
  for(const width of [1440,768,390,320]){
   await page.setViewportSize({width,height:844});await go('/archivos?'+new URLSearchParams({path:root+'/media',view:'list'}));await page.locator('.fm-row[data-name="Carpeta QA"]').waitFor();
-  const metrics=await page.evaluate(()=>{const box=(s:string)=>document.querySelector(s)!.getBoundingClientRect();return{width:innerWidth,top:box('.fm-top').height,main:box('.fm-main').height,footer:box('.fm-footer').height,overflow:document.documentElement.scrollWidth>innerWidth,tool:box('.fm-top .section-actions').height,filters:box('#fm-catalog-bar').height};});
+  const metrics=await page.evaluate(()=>{const box=(s:string)=>document.querySelector(s)!.getBoundingClientRect();return{width:innerWidth,top:box('.fm-top').height,main:box('.fm-main').height,footer:box('.fm-footer').height,overflow:document.documentElement.scrollWidth>innerWidth,tool:box('.fm-cmdbar').height,filters:box('#fm-catalog-bar').height};});
   console.log(JSON.stringify(metrics));assert(!metrics.overflow,'Page overflow '+width);assert(metrics.footer<=36,'Tall footer '+width);if(width<=390){assert(metrics.main>844*.50,'File area too small '+width);assert(metrics.tool<=48&&metrics.filters<=50,'Wrapping mobile controls '+width);}
   checks.push(metrics);await page.screenshot({path:output+'/files-'+width+'.png'});
   await page.locator('#fm-transfers-btn').click();await page.locator('.fm-transfer-dialog[open]').waitFor();assert(await page.locator('.fm-transfer-dialog article').count()===25,'History lost');await page.keyboard.press('Escape');await page.locator('.fm-transfer-dialog').waitFor({state:'detached'});assert(await page.locator('#fm-transfers-btn').evaluate(el=>el===document.activeElement),'History focus not restored');

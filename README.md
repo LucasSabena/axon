@@ -108,6 +108,8 @@ La página **Backups** guía en cuatro pasos: qué proteger, en qué discos guar
 
 El host necesita **Restic** y Python; el panel indica si falta Restic. [Preparar el servidor](docs/installation.md#dependencias-para-backups). Copiar los archivos de un disco no crea una imagen arrancable del sistema. [Guía y alcance de Backups](docs/backups-2026-10-06/README.md).
 
+La [publicación 1.5.0](https://github.com/LucasSabena/axon/releases/tag/v1.5.0) unifica Archivos y Biblioteca en un explorador con panel de navegación, menú contextual único y teclado completo. 
+
 La [publicación 1.4.0](https://github.com/LucasSabena/axon/releases/tag/v1.4.0) incorpora organización de archivos y carpetas, gestión de discos y sesiones, inventario progresivo de programas, lectura Markdown y navegación móvil con flechas en los visores. Biblioteca permite agregar carpetas de otros discos desde su cabecera. [Notas y actualización](docs/releases/v1.4.0.md).
 
 ## Si ya tenías AXON instalado con Compose
@@ -151,8 +153,8 @@ Luego conectá tus cuentas desde Agentes. El cambio de cuenta no convierte una s
 - Salud del servidor, CPU, memoria, disco, procesos y diagnóstico de uso. Optimización con propuesta, revalidación y recuperación; los servicios desconocidos y las bases de datos empiezan protegidos.
 - Puertos y procesos, proyectos de desarrollo, logs, terminal y programas del host.
 - Docker, edición y despliegue de Compose con borradores y registro persistente de operaciones.
-- Archivos: navegación, edición de texto, creación, transferencias, subidas por bloques y papelera recuperable.
-- Biblioteca multimedia: colecciones, favoritos, visualización, compartir y herramientas de procesamiento según dependencias disponibles.
+- Archivos: explorador con panel de navegación (acceso rápido, discos, etiquetas, nube), edición de texto, creación, transferencias, subidas por bloques y papelera recuperable.
+- Biblioteca multimedia dentro de Archivos: colecciones, favoritos, visor, links para compartir, optimización y transcripción desde el menú de cualquier archivo. Ver [docs/archivos-explorador.md](docs/archivos-explorador.md).
 - Tienda de aplicaciones, mantenimiento, inventario, migraciones, enlaces y notificaciones.
 - Temas, navegación por URL, búsqueda y autenticación con 2FA.
 
@@ -198,7 +200,7 @@ Archivos y Biblioteca guardan carpeta o colección, búsqueda, orden, vista, sel
 
 **Archivos → Nuevo archivo** crea un archivo vacío en la carpeta actual con cualquier nombre y extensión, incluidos `.txt`, `.env`, `.env.local`, JSON y nombres sin extensión. También aparece en clic derecho sobre el espacio vacío o una carpeta, y tiene el atajo `Ctrl/⌘ Alt N`. Crear nunca reemplaza un nombre existente; el editor se abre automáticamente y revela los archivos ocultos recién creados. Guardar / `Ctrl/⌘ S` conserva la revisión previa de cambios. Para volver a editar extensiones desconocidas, usar clic derecho → Editar o Abrir como texto. Sólo se edita texto UTF-8 completo de hasta 512 KiB; binarios, otras codificaciones y lecturas truncadas quedan en solo lectura. Se preservan BOM UTF-8 y saltos CRLF. Las escrituras respetan los permisos del usuario del host; `.env` y sus variantes se crean con permisos `600`.
 
-Flechas, Inicio/Fin, Enter y selección con Shift/Ctrl funcionan sobre los archivos. Archivos incluye la barra de ubicación (`Ctrl/⌘ Shift L`) y subir de carpeta (`Alt ↑`); Biblioteca permite buscar con `/`, escribir para saltar por nombre y usar Esc/←/→ en el visor. Cada sección tiene ayuda de atajos, y `Ctrl/⌘ K` abre la paleta global.
+Flechas, Inicio/Fin, Enter y selección con Shift/Ctrl funcionan sobre los archivos. Archivos incluye la barra de ubicación (`Ctrl/⌘ L`), el panel de navegación (`Ctrl/⌘ B`) y subir de carpeta (`Alt ↑`); la galería permite buscar con `/`, escribir para saltar por nombre y usar Esc/←/→ en el visor. Cada sección tiene ayuda de atajos, y `Ctrl/⌘ K` abre la paleta global.
 
 ## Discos y transferencias
 

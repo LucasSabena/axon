@@ -1,5 +1,7 @@
 # Cabeceras de Biblioteca y Archivos
 
+> Reemplazado por el explorador unificado: ver [archivos-explorador.md](archivos-explorador.md). La cabecera actual tiene una fila de navegación, una barra de comandos y un panel **Filtros y más** desplegable.
+
 Biblioteca ofrece **Discos** desde su barra de herramientas. El modal permite
 consultar capacidad, espacio libre, estado de montaje y abrir el volumen en
 Archivos. La información no ocupa un panel permanente sobre el contenido.

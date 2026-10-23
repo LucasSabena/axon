@@ -10,6 +10,7 @@ const assert=(value:unknown,message:string)=>{if(!value)throw new Error(message)
 let source='';
 try {
  const page=await browser.newPage({viewport:{width:1440,height:1000}});
+ await page.addInitScript(()=>{try{localStorage.setItem('fm-drawer','1');}catch{}});
  page.setDefaultTimeout(15000);
  page.setDefaultNavigationTimeout(15000);
  page.on('pageerror',(e:Error)=>errors.push(e.message));

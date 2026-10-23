@@ -1860,6 +1860,46 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers,catalog
     });
   });
 
+  // Resolve a host path to its library item — used by the file manager to
+  // offer "ver transcripción / transcribir" without loading the whole index.
+  app.get('/api/library/lookup', async (c) => {
+    await ensureReady();
+    const p = String(c.req.query('p') || '');
+    const it = p ? items.get(byPath.get(p) || '') : undefined;
+    if (!it) return fail(c, 404, 'No está en la biblioteca');
+    return c.json({ ok: true, item: publicItem(it) });
+  });
+
+  // Archivos hands over plain host paths; the library tools (share, optimize,
+  // transcribe, viewer) speak item ids. Resolve indexes files that live under a
+  // configured root on demand and reports the rest as `outside` so the client
+  // can offer to add the folder instead of failing silently.
+  app.post('/api/library/resolve', async (c) => {
+    await ensureReady();
+    const body = await c.req.json<{ paths?: string[] }>().catch(() => ({} as { paths?: string[] }));
+    const paths = [...new Set((Array.isArray(body.paths) ? body.paths : []).map((p) => String(p || '')).filter(Boolean))].slice(0, 500);
+    if (!paths.length) return fail(c, 400, 'Elegí al menos un archivo');
+    const found: ReturnType<typeof publicItem>[] = [];
+    const outside: string[] = [];
+    const missing: string[] = [];
+    for (const raw of paths) {
+      const known = items.get(byPath.get(raw) || '');
+      if (known) { const fresh = await freshItem(known.id); if (fresh) { found.push(publicItem(fresh)); continue; } }
+      const p = await resolveInRoots(raw);
+      if (!p) { outside.push(raw); continue; }
+      const st = await stat(hostToContainer(p)).catch(() => null);
+      if (!st?.isFile()) { missing.push(raw); continue; }
+      const it = await statItem(p, 'other');
+      if (!it) { missing.push(raw); continue; }
+      putItem(it);
+      saveIndex();
+      if (['image', 'raw', 'video', 'audio'].includes(it.k)) exifBatch([it]).then(() => { touched(); saveIndex(); }).catch(() => {});
+      else it.mx = 1;
+      found.push(publicItem(it));
+    }
+    return c.json({ ok: true, items: found, outside, missing, roots: state.roots, uploadRoot: state.uploadRoot });
+  });
+
   app.get('/api/library/recent', async (c) => {
     await ensureReady();
     const limit = Math.max(1, Math.min(24, Number(c.req.query('limit')) || 8));

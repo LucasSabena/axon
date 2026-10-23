@@ -220,11 +220,13 @@ const loaders = {
 
 let activeTabName = 'ports';
 function activateAxonSection(tab, load = true) {
-  $$('.tab-btn').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
-  $$('.tab-content').forEach((t) => t.classList.toggle('active', t.id === `tab-${tab}`));
+  // Biblioteca ya no es una pestaña: su galería vive dentro de Archivos (feat-explorer.js).
+  const host = tab === 'library' ? 'files' : tab;
+  $$('.tab-btn').forEach((b) => b.classList.toggle('active', b.dataset.tab === host));
+  $$('.tab-content').forEach((t) => t.classList.toggle('active', t.id === `tab-${host}`));
   if (activeTabName === 'navegador' && tab !== 'navegador') unloadBrowser();
-  activeTabName = tab;
-  if (load) loaders[tab]?.();
+  activeTabName = host;
+  if (load) loaders[host]?.();
   document.dispatchEvent(new CustomEvent('axon:section', { detail: tab }));
 }
 window.activateAxonSection = activateAxonSection;
@@ -1729,9 +1731,19 @@ function cmdkCommands() {
   // hardcodeada con ~8 de las 24 secciones).
   const sections = window.AxonNavigation?.sections
     || Object.fromEntries($$('.tab-btn').map((b) => [b.dataset.tab, ['', b.textContent.trim()]]));
+  // La galería de Biblioteca vive dentro de Archivos: no es una sección aparte en la paleta.
   for (const [key, [, label]] of Object.entries(sections)) {
+    if (key === 'library') continue;
     cmds.push({ icon: CMDK_SECTION_ICON[key] || 'box', label: `Ir a ${label || key}`, hint: 'sección', run: () => gotoTab(key) });
   }
+  const gallery = (type) => () => window.AxonNavigation?.go(window.AxonNavigation.url('library', { type }));
+  cmds.push(
+    { icon: 'images', label: 'Archivos: galería de la biblioteca', hint: 'archivos', run: gallery('all') },
+    { icon: 'clock', label: 'Archivos: recientes', hint: 'archivos', run: gallery('recent') },
+    { icon: 'star', label: 'Archivos: favoritos', hint: 'archivos', run: gallery('fav') },
+    { icon: 'link', label: 'Archivos: links compartidos', hint: 'archivos', run: gallery('shares') },
+    { icon: 'panel-left', label: 'Archivos: mostrar u ocultar el panel de navegación', hint: 'Ctrl+B', run: () => window.AxonExplorer?.toggleNav() },
+  );
   cmds.push(
     { icon: 'layout-grid', label: 'Agents: matriz de MCPs', hint: 'sección', run: () => window.pmGotoAgent?.('__matrix') },
     { icon: 'file-text', label: 'Agents: documentos', hint: 'sección', run: () => window.pmGotoAgent?.('__docs') },
@@ -1827,36 +1839,7 @@ if ('serviceWorker' in navigator && (location.protocol === 'https:' || isLocalCl
 }
 
 // ---------- Row context menu ----------
-
-const ctxMenu = $('#ctx-menu');
-let ctxOpen = false;
-
-function hideCtxMenu() {
-  ctxMenu.classList.add('hidden');
-  ctxMenu.innerHTML = '';
-  ctxOpen = false;
-}
-
-function showCtxMenu(items, x, y) {
-  ctxMenu.innerHTML = items
-    .filter(Boolean)
-    .map((it, i) => it.sep
-      ? '<div class="ctx-sep"></div>'
-      : `<button class="ctx-item${it.danger ? ' ctx-danger' : ''}" data-i="${i}">${icon(it.icon)} ${esc(it.label)}</button>`)
-    .join('');
-  ctxMenu.classList.remove('hidden');
-  const rect = ctxMenu.getBoundingClientRect();
-  ctxMenu.style.left = `${Math.min(x, innerWidth - rect.width - 8)}px`;
-  ctxMenu.style.top = `${Math.min(y, innerHeight - rect.height - 8)}px`;
-  refreshIcons();
-  ctxMenu.querySelectorAll('.ctx-item').forEach((el) => {
-    el.addEventListener('click', () => { const it = items[parseInt(el.dataset.i, 10)]; hideCtxMenu(); it.run(); });
-  });
-  ctxOpen = true;
-}
-
-document.addEventListener('click', (e) => { if (ctxOpen && !ctxMenu.contains(e.target)) hideCtxMenu(); });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && ctxOpen) hideCtxMenu(); });
+// Implemented in context-menu.js (showCtxMenu / hideCtxMenu are defined there).
 
 function procFirstUrl(p) {
   const port = (p.ports || [])[0];

@@ -9,6 +9,7 @@ await mkdir(output,{recursive:true});
 const configPath=process.env.CONFIG_PATH||'data/config.json';
 const username=await readFile(configPath,'utf8').then(v=>JSON.parse(v).auth.username).catch((e:any)=>{if(e.code!=='EACCES')throw e;return execFileSync('sudo',['-n','python3','-c','import json,sys; print(json.load(open(sys.argv[1]))["auth"]["username"])',configPath],{encoding:'utf8'}).trim();});
 const browser=await chromium.launch({headless:true}),context=await browser.newContext({viewport:{width:1440,height:1000}}),page=await context.newPage(),errors:string[]=[],checks:string[]=[];
+await context.addInitScript(()=>{try{localStorage.setItem('fm-drawer','1');}catch{}});
 page.on('pageerror',e=>errors.push(e.message));
 await context.addCookies([{name:'axon_session',value:await createSession(username),url:origin,httpOnly:true,secure:origin.startsWith('https:'),sameSite:'Lax'}]);
 let tokenId:string|undefined;

@@ -116,6 +116,17 @@ def load(name, job):
 # ---------- Audio ----------
 
 def to_wav(src, job=None):
+    # Cheap pre-check: videos without an audio stream fail inside ffmpeg with
+    # the cryptic "Error opening output files" — say what actually happened.
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_type", "-of", "csv=p=0", src],
+            capture_output=True, text=True, timeout=60,
+        )
+        if probe.returncode == 0 and "audio" not in probe.stdout:
+            raise RuntimeError("El archivo no tiene pista de audio")
+    except subprocess.TimeoutExpired:
+        pass
     fd, out = tempfile.mkstemp(prefix="axon-asr-", suffix=".wav")
     os.close(fd)
     # stderr goes to a temp file, not a pipe: polling without draining a pipe
@@ -233,6 +244,14 @@ def worker():
         wav = None
         try:
             job["state"] = "running"
+            if job.get("warm"):
+                # Warm pseudo-job: only pull the model into memory so the first
+                # real transcription doesn't pay the load cost.
+                job["stage"] = "loading"
+                load(job["opts"].get("model") or ("turbo" if args.engine == "whisper" else PARAKEET_NAME), job)
+                job["state"] = "done"
+                job["pct"] = 100
+                continue
             job["stage"] = "audio"
             wav, dur = to_wav(job["path"], job)
             job["duration"] = round(dur, 2)
@@ -354,12 +373,13 @@ class H(BaseHTTPRequestHandler):
             if not isinstance(b, dict):
                 return self.send(400, {"ok": False, "error": "cuerpo inválido"})
             p = b.get("path")
-            if not isinstance(p, str) or not os.path.isfile(p):
+            warm = b.get("warm") is True
+            if not warm and (not isinstance(p, str) or not os.path.isfile(p)):
                 return self.send(400, {"ok": False, "error": "archivo no encontrado"})
             jid = uuid.uuid4().hex[:12]
             with lock:
-                jobs[jid] = {"id": jid, "path": p, "opts": b.get("opts") or {}, "state": "queued", "stage": "queued",
-                             "pct": 0, "created": time.time()}
+                jobs[jid] = {"id": jid, "path": p if isinstance(p, str) else "", "opts": b.get("opts") or {}, "state": "queued", "stage": "queued",
+                             "pct": 0, "created": time.time(), "warm": warm}
                 order.append(jid)
             touch()
             q.put(jid)

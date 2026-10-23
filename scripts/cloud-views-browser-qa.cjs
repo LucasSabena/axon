@@ -14,6 +14,7 @@ async (page) => {
     if(action==='list'){lists++;const path=u.searchParams.get('path')||'';return r.fulfill({json:{ok:true,path,entries:u.searchParams.has('cursor')?[entry('Video.webm','file',2048,null)]:path?[{...entry('nota.txt','file',64,null),path:path+'/nota.txt'}]:entries,cursor:!path&&!u.searchParams.has('cursor')?'next':null}});}
     if(action==='stream'){streams++;return r.fulfill({body:'Texto de prueba',contentType:'text/plain'});}
     if(action==='downloads'){if(r.request().method()==='POST')copies.push(r.request().postDataJSON());return r.fulfill({json:{ok:true,id:'fixture-job',jobs:[]}});}
+    if(action==='organization')return r.fulfill({json:{ok:true,entries:[]}});
     return r.fulfill({status:404,json:{ok:false,error:'Unexpected fixture action'}});
   });
   const login=await page.context().request.post('http://127.0.0.1:3459/api/login',{data:{username:'qa',password:'axon-local-qa'},headers:{Origin:'http://127.0.0.1:3459'}});assert(login.ok(),'Fixture login failed');
@@ -48,7 +49,7 @@ async (page) => {
   await page.reload({waitUntil:'domcontentloaded'});await page.locator('#cloud-list[data-view=list] .cloud-row').first().waitFor();assert(new URL(page.url()).searchParams.get('sort')==='name','Sort not restored');
   await page.locator('.cloud-open[data-path="/Clientes"]').click();await page.locator('.cloud-open[data-path="/Clientes/nota.txt"]').waitFor();assert(await page.locator('#cloud-list').getAttribute('data-view')==='list','View lost on folder navigation');
   await page.goBack();await page.locator('.cloud-open[data-path="/Clientes"]').waitFor();
-  await page.locator('[data-source=server]').click();await page.locator('#fm-breadcrumb').waitFor({state:'visible'});await page.locator('[data-source=dropbox]').click();await page.locator('#cloud-list[data-view=list] .cloud-row').first().waitFor();
+  await page.locator('#fm-nav [data-nav-key^="home|"][aria-level="1"]').click();await page.locator('#fm-breadcrumb').waitFor({state:'visible'});await page.locator('#fm-nav [data-nav-provider=\"dropbox\"]').click();await page.locator('#cloud-list[data-view=list] .cloud-row').first().waitFor();
   await page.locator('.cloud-open[data-path="/nota.txt"]').click();await page.locator('.cloud-preview pre').waitFor();assert(streams===1,'Content not fetched only on open');assert(await page.locator('.cloud-preview pre').textContent()==='Texto de prueba','Preview failed');
   await page.locator('[aria-label="Cerrar vista previa"]').click();await page.locator('#cloud-preview').waitFor({state:'hidden'});
   await page.addScriptTag({path:require.resolve('axe-core/axe.min.js')});

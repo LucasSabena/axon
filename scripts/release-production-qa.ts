@@ -24,7 +24,7 @@ try{
     await page.reload();await page.waitForFunction(()=>(window as any).AxonNavigation?.ready);
     checks.push('Existing authenticated browser and service worker cache reload after deployment');
   }
-  const health=await get('/api/health');assert(health.version==='1.4.0','Unexpected production version');
+  const health=await get('/api/health');assert(health.version==='1.5.0','Unexpected production version');
   if(process.env.AXON_EXPECTED_REVISION)assert(health.revision===process.env.AXON_EXPECTED_REVISION,'Unexpected revision');
   for(const path of ['/api/files/volumes','/api/file-catalog','/api/sessions','/api/software','/api/compose'])await get(path);
   checks.push('Public HTTPS and authenticated disks/catalog/sessions/software/compose endpoints');
@@ -35,7 +35,7 @@ try{
       assert(await page.locator('#tab-'+tab+'>.host-disks-panel').count()===0,'Redundant disk panel '+route);
       assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Overflow '+route+' '+width);
     }
-    await go('/biblioteca');await page.locator('#lib-add-folder').click();await page.locator('#host-path-picker[open]').waitFor();
+    await go('/biblioteca');await page.locator('.fm-nav-i[data-action="lib-add"]').click();await page.locator('#host-path-picker[open]').waitFor();
     await page.locator('#host-path-picker [data-host-volume]').first().waitFor();
     assert(await page.locator('#host-picker-select').isVisible(),'Folder selector unavailable');
     await page.screenshot({path:output+'/folder-picker-'+width+'.png'});await page.keyboard.press('Escape');

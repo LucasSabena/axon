@@ -8,7 +8,8 @@ const assert=(value:unknown,message:string)=>{if(!value)throw new Error(message)
 const browser=await chromium.launch({channel:'chrome',headless:true});const errors:string[]=[];const results:Record<string,unknown>={};
 try{
  const context=await browser.newContext({viewport:{width:1440,height:1000}});const page=await context.newPage();page.setDefaultTimeout(20000);page.on('pageerror',(e:Error)=>errors.push(e.message));
- await page.goto(origin+'/archivos');await page.locator('#username').fill('qa');await page.locator('#password').fill('axon-local-qa');await page.locator('#login-form button[type=submit]').click();await page.locator('[data-volume="fixture-external"]').waitFor();
+ await context.addInitScript(()=>{try{localStorage.setItem('fm-drawer','1');}catch{}});
+ await page.goto(origin+'/archivos');await page.locator('#username').fill('qa');await page.locator('#password').fill('axon-local-qa');await page.locator('#login-form button[type=submit]').click();await page.locator('[data-volume="fixture-external"]').waitFor({state:'attached'});
  const call=async(url:string,body?:unknown)=>page.evaluate(async({url,body}:any)=>{const response=await fetch(url,{method:body?'POST':'GET',headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});return {status:response.status,data:await response.json()};},{url,body});
  const inventory=(await call('/api/files/volumes')).data, home=inventory.volumes.find((v:any)=>v.id==='fixture-internal').path;
  const folder='Fotos-'+Date.now();const from=home+'/media/'+folder,to=home+'/external-drive/'+folder;await mkdir(from);await writeFile(from+'/a.txt','archivo A');await writeFile(from+'/b.txt','archivo B');

@@ -747,60 +747,96 @@ async function saveTranscript(tk: string, t: Transcript): Promise<void> {
   trSet.add(tk);
 }
 
+// A first-run failure that should be retried once transparently: the engine
+// restarting between submit and poll (the job 404s), a POST that lands while
+// the worker is coming up or dying at the idle boundary, or a model load that
+// hiccups on its first attempt (CUDA init, HF download). Errors in the audio
+// or transcribing stages are deterministic — retrying only burns time.
+class TransientAsrError extends Error {}
+
 async function runTranscribe(j: Job, it: LibItem): Promise<void> {
   const engine = (j.opts.engine === 'parakeet' ? 'parakeet' : 'whisper') as Engine;
-  j.stage = 'starting';
-  j.pct = 0;
-  await ensureAsr(engine, j);
   const base = `http://127.0.0.1:${ENGINES[engine].port}`;
   const opts = { model: j.opts.model, language: j.opts.language || null, task: j.opts.task, prompt: j.opts.prompt };
-  const r = await fetch(`${base}/jobs`, { method: 'POST', headers: asrHeaders(engine), body: JSON.stringify({ path: it.p, opts }), signal: AbortSignal.timeout(10_000) });
-  const d = (await r.json().catch(() => ({}))) as { ok?: boolean; id?: string; error?: string };
-  if (!d.ok || !d.id) throw new Error(d.error || 'El motor rechazó el trabajo');
-  const wid = d.id;
-  j.cancel = () => {
-    j.cancelled = true;
-    fetch(`${base}/jobs/${wid}`, { method: 'DELETE', headers: asrHeaders(engine), signal: AbortSignal.timeout(3000) }).catch(() => {});
-  };
-  let misses = 0;
-  while (true) {
-    await Bun.sleep(1200);
-    let s: Record<string, unknown> | null = null;
+
+  const submitAndWait = async (): Promise<Record<string, unknown>> => {
+    j.stage = 'starting';
+    j.pct = 0;
+    await ensureAsr(engine, j);
+    let r: Response;
     try {
-      const res = await fetch(`${base}/jobs/${wid}`, { headers: asrHeaders(engine), signal: AbortSignal.timeout(5000) });
-      s = (await res.json()) as Record<string, unknown>;
-    } catch { /* worker busy or gone */ }
-    if (!s || s.ok === false) {
-      if (++misses > 8) throw new Error('El motor de transcripción se cerró inesperadamente');
-      continue;
+      r = await fetch(`${base}/jobs`, { method: 'POST', headers: asrHeaders(engine), body: JSON.stringify({ path: it.p, opts }), signal: AbortSignal.timeout(30_000) });
+    } catch (e) {
+      throw new TransientAsrError(String((e as Error)?.message || e));
     }
-    misses = 0;
-    j.stage = String(s.stage || s.state);
-    j.pct = Number(s.pct) || 0;
-    if (s.state === 'cancelled') throw new Error('cancelado');
-    if (s.state === 'error') throw new Error(String(s.error || 'falló la transcripción'));
-    if (s.state === 'done') {
-      const res = s.result as Record<string, unknown>;
-      const segs = (res.segments as Segment[]) || [];
-      await saveTranscript(it.tk, {
-        name: it.n,
-        engine,
-        model: String(res.model || ''),
-        device: String(res.device || ''),
-        language: (res.language as string) || (j.opts.language as string) || null,
-        created: Date.now(),
-        duration: Number(res.duration) || it.d,
-        elapsed: Number(res.elapsed) || undefined,
-        segments: segs,
-      });
-      j.note = segs.length ? `${segs.length} segmentos · ${res.device === 'cuda' ? 'GPU' : 'CPU'} · ${Math.round(Number(res.elapsed) || 0)} s` : 'No se detectó voz';
-      j.outId = it.id;
-      j.state = 'done';
-      j.pct = 100;
-      toolsCtx.touched();
-      return;
+    const d = (await r.json().catch(() => ({}))) as { ok?: boolean; id?: string; error?: string };
+    if (!d.ok || !d.id) throw new Error(d.error || 'El motor rechazó el trabajo');
+    const wid = d.id;
+    j.cancel = () => {
+      j.cancelled = true;
+      fetch(`${base}/jobs/${wid}`, { method: 'DELETE', headers: asrHeaders(engine), signal: AbortSignal.timeout(3000) }).catch(() => {});
+    };
+    let misses = 0;
+    while (true) {
+      await Bun.sleep(1200);
+      let s: Record<string, unknown> | null = null;
+      let status = 0;
+      try {
+        const res = await fetch(`${base}/jobs/${wid}`, { headers: asrHeaders(engine), signal: AbortSignal.timeout(5000) });
+        status = res.status;
+        s = (await res.json()) as Record<string, unknown>;
+      } catch { /* worker busy or gone */ }
+      if (!s || s.ok === false) {
+        // The worker no longer knows the job: it restarted and lost it.
+        if (status === 404) throw new TransientAsrError('El motor se reinició y perdió el trabajo');
+        if (++misses > 30) throw new TransientAsrError('El motor de transcripción se cerró inesperadamente');
+        if (misses === 3) ensureAsr(engine).catch(() => {}); // revive it if it died
+        continue;
+      }
+      misses = 0;
+      j.stage = String(s.stage || s.state);
+      j.pct = Number(s.pct) || 0;
+      if (s.state === 'cancelled') throw new Error('cancelado');
+      if (s.state === 'error') {
+        const err = String(s.error || 'falló la transcripción');
+        const stage = String(s.stage || '');
+        if (['queued', 'loading', 'downloading'].includes(stage)) throw new TransientAsrError(err);
+        throw new Error(err);
+      }
+      if (s.state === 'done') return (s.result || {}) as Record<string, unknown>;
+    }
+  };
+
+  let res: Record<string, unknown> | null = null;
+  let lastErr: Error | null = null;
+  for (let attempt = 0; attempt < 2 && !j.cancelled; attempt++) {
+    try {
+      res = await submitAndWait();
+      break;
+    } catch (e) {
+      lastErr = e as Error;
+      if (!(e instanceof TransientAsrError) || j.cancelled) throw e;
+      j.note = undefined; // a second go shouldn't look retried unless it fails too
     }
   }
+  if (!res) throw lastErr || new Error(j.cancelled ? 'cancelado' : 'falló la transcripción');
+  const segs = (res.segments as Segment[]) || [];
+  await saveTranscript(it.tk, {
+    name: it.n,
+    engine,
+    model: String(res.model || ''),
+    device: String(res.device || ''),
+    language: (res.language as string) || (j.opts.language as string) || null,
+    created: Date.now(),
+    duration: Number(res.duration) || it.d,
+    elapsed: Number(res.elapsed) || undefined,
+    segments: segs,
+  });
+  j.note = segs.length ? `${segs.length} segmentos · ${res.device === 'cuda' ? 'GPU' : 'CPU'} · ${Math.round(Number(res.elapsed) || 0)} s` : 'No se detectó voz';
+  j.outId = it.id;
+  j.state = 'done';
+  j.pct = 100;
+  toolsCtx.touched();
 }
 
 // ---------- Transcript formats ----------
@@ -1062,6 +1098,27 @@ export function registerLibraryTools(app: Hono, ctx: LibCtx): void {
     const engine = c.req.param('engine') as Engine;
     if (!ENGINES[engine]) return fail(c, 404, 'Motor desconocido');
     await fetch(`http://127.0.0.1:${ENGINES[engine].port}/shutdown`, { method: 'POST', headers: asrHeaders(engine), signal: AbortSignal.timeout(3000) }).catch(() => {});
+    return c.json({ ok: true });
+  });
+
+  // Pull the model into memory ahead of the first job: the transcribe modal
+  // calls this when opened so the first file doesn't eat the load time (and
+  // first-load hiccups happen here instead of on a real job).
+  app.post('/api/library/asr/warm', async (c) => {
+    const b = await c.req.json<{ engine?: string; model?: string }>().catch(() => ({} as never));
+    const engine = (b?.engine === 'parakeet' ? 'parakeet' : 'whisper') as Engine;
+    const k = await getCaps();
+    if (engine === 'whisper' && !k.whisper) return fail(c, 400, 'Whisper no está instalado en el servidor');
+    const models = ENGINES[engine].models as readonly string[];
+    const model = models.includes(String(b?.model)) ? String(b?.model) : models[0];
+    await ensureAsr(engine);
+    const r = await fetch(`http://127.0.0.1:${ENGINES[engine].port}/jobs`, {
+      method: 'POST', headers: asrHeaders(engine),
+      body: JSON.stringify({ warm: true, opts: { model } }),
+      signal: AbortSignal.timeout(15_000),
+    }).catch(() => null);
+    const d = r ? ((await r.json().catch(() => ({}))) as { ok?: boolean; error?: string }) : null;
+    if (!d?.ok) return fail(c, 502, d?.error || 'El motor no respondió');
     return c.json({ ok: true });
   });
 }

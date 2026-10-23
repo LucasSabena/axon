@@ -24,7 +24,7 @@ export function registerQaBoundary(app:Hono,root:string|null){
    const fixtureTrash=/^\/api\/storage\/trash\/(restore|migration-plans(?:\/[^/]+\/(?:execute|recover))?)$/.test(p);
    const fixtureCatalog=p==='/api/file-catalog'||p==='/api/fans'||p==='/api/usb';
    const fixtureSessions=/^\/api\/sessions\/(revoke-others|[^/]+(?:\/revoke)?)$/.test(p);
-   const fixtureLibrary=/^\/api\/library\/(favorite|shares|collections|rescan|settings)$/.test(p);
+   const fixtureLibrary=/^\/api\/library\/(favorite|shares|collections|rescan|settings|resolve)$/.test(p);
    // Conversion only stages root-validated fixture bytes in a private cache.
    const fixtureDocuments=/^\/api\/(files\/document|library\/document\/[^/]+)$/.test(p);
    const fixtureProject=/^\/api\/projects$/.test(p);

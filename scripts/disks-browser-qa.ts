@@ -5,6 +5,7 @@ const browser=await chromium.launch({headless:true,...(process.env.AXON_QA_BROWS
 const errors:string[]=[];
 try{
  const context=await browser.newContext({viewport:{width:1440,height:1000}});const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));
+await context.addInitScript(()=>{try{localStorage.setItem('fm-drawer','1');}catch{}});
  await page.goto(origin+'/almacenamiento?view=disks');await page.locator('#username').fill('qa');await page.locator('#password').fill('axon-local-qa');await page.locator('#login-form button[type=submit]').click();
  await page.locator('#disk-manager [data-disk="fixture-new"][data-disk-operation="layout"]').waitFor();
  await page.waitForFunction(()=>(window as any).AxonNavigation?.ready);

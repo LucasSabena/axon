@@ -1,6 +1,6 @@
 {
   "name": "axon",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Panel de control web self-hosted para administrar un servidor completo: puertos, proyectos, Docker, dominios y más",
   "license": "MIT",
   "author": "Lucas Sabena <01studiobinary@gmail.com>",
@@ -28,6 +28,7 @@
     "test": "bun run scripts/test.ts",
     "test:agents": "for f in scripts/*-test.py; do echo \"== $f\"; python3 \"$f\" || exit 1; done",
     "check": "tsc --noEmit && bun run scripts/check-frontend.ts && bun run scripts/check-dist.ts",
+    "qa:explorer": "bun --no-env-file run scripts/explorer-browser-qa.ts",
     "qa:serve": "bun --no-env-file run scripts/qa-server.ts",
     "qa:stability": "bun --no-env-file run scripts/stability-browser-qa.ts",
     "qa:maintenance:read": "bun --no-env-file run scripts/maintenance-readonly.ts",

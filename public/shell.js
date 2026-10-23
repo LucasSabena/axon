@@ -2,7 +2,7 @@
 (() => {
   const nav = document.querySelector('.sidebar-nav');
   const groups = [
-    ['Trabajo', ['projects','files','library','agents']],
+    ['Trabajo', ['projects','files','agents']],
     ['Servidor', ['docker','ports','compose','domains','storage','backups']],
     ['Salud', ['ops','metrics','logs','audit']],
     ['Herramientas', ['terminal','navegador','desktop','scripts','drop','access']],

@@ -1,4 +1,4 @@
-import { SECTIONS, readRoute, routeUrl, readStored } from './navigation-model.js?v=e4db52b698c7';
+import { SECTIONS, readRoute, routeUrl, readStored } from './navigation-model.js?v=7cdeb78a13bc';
 
 const actors = new Map();
 let saved = {};
@@ -17,6 +17,12 @@ function closeDrawer(){
   document.body.classList.remove('sidebar-open');document.querySelector('#mobile-menu-btn')?.setAttribute('aria-expanded','false');
   const sidebar=document.querySelector('.sidebar');if(sidebar)sidebar.inert=mobile;
 }
+// Archivos y su galería (Biblioteca) comparten la entrada de la barra lateral y recuerdan lo último que se vio.
+const navSection = (section) => (section === 'library' ? 'files' : section);
+const resumeUrl = (tab) => {
+  if (tab === 'files' && saved.library?.url && (saved.library.t || 0) > (saved.files?.t || 0)) return saved.library.url;
+  return saved[tab]?.url || routeUrl(tab);
+};
 const writeSaved = () => { try { localStorage.setItem('axon:locations:v1', JSON.stringify(saved)); } catch { /* full or disabled storage */ } };
 // crypto.randomUUID is secure-context only; plain-HTTP LAN deploys need a fallback.
 const uid = () => crypto.randomUUID?.() ?? Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -31,7 +37,7 @@ function decorate() {
     for (const attr of button.attributes) link.setAttribute(attr.name, attr.value);
     link.dataset.tab = section;
     link.classList.add('tab-btn');
-    link.href = saved[section]?.url || routeUrl(section);
+    link.href = resumeUrl(section);
     link.append(...button.childNodes);
     actors.set(section, button);
     button.replaceWith(link);
@@ -43,10 +49,10 @@ function controls() {
   document.querySelectorAll('[data-axon-back]').forEach((b) => { b.disabled = !current || current.index <= 0; });
   document.querySelectorAll('[data-axon-forward]').forEach((b) => { b.disabled = !current || current.index >= maxIndex; });
   document.querySelectorAll('.sidebar-nav .tab-btn, #sidebar-settings').forEach((a) => {
-    const on = a.dataset.tab === current?.section;
+    const on = a.dataset.tab === navSection(current?.section);
     a.classList.toggle('active', on);
     if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
-    a.href = saved[a.dataset.tab]?.url || routeUrl(a.dataset.tab);
+    a.href = resumeUrl(a.dataset.tab);
   });
   if (current) document.title = `${SECTIONS[current.section][1]} · AXON`;
 }
@@ -96,7 +102,10 @@ async function apply(state) {
 async function go(input, { replace = false, remember: resume = false, view, transient = false } = {}) {
   let route = readRoute(input, location.origin);
   if (!route) return false;
-  if (resume && !Object.keys(route.params).length && saved[route.section]) {
+  if (resume && !Object.keys(route.params).length && route.section === 'files' && saved.library?.url && (saved.library.t || 0) > (saved.files?.t || 0)) {
+    route = readRoute(saved.library.url, location.origin) || route;
+    view ??= saved.library?.view;
+  } else if (resume && !Object.keys(route.params).length && saved[route.section]) {
     route = readRoute(saved[route.section].url, location.origin) || route;
     view ??= saved[route.section]?.view;
   }
@@ -137,6 +146,8 @@ function close(params) {
 document.addEventListener('click', (e) => {
   const a = e.target.closest('a[href]');
   if (internal) { if (a) e.preventDefault(); return; }
+  // Components that own their clicks (tree toggles, menu buttons, local actions) opt out of routing.
+  if (a && (a.dataset.action || a.dataset.toggleOnly || a.dataset.unmounted || e.target.closest('[data-toggle],[data-collection-menu]'))) return;
   if (!ready || !a || a.target === '_blank' || a.hasAttribute('download')) return;
   const u = new URL(a.href, location.origin);
   if (u.origin !== location.origin || !readRoute(u.href)) return;

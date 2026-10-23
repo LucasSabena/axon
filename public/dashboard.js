@@ -6,9 +6,9 @@
   sec.innerHTML=`<header class="home-heading"><div><span class="home-eyebrow">AXON / TU SERVIDOR</span><h1>Inicio</h1><p>Todo a mano. Continuá donde estabas.</p></div><button class="btn-secondary" id="home-refresh">${icon('refresh-cw')} Actualizar</button></header>
     <div class="home-vitals" role="group" aria-label="Estado del servidor"><span>CPU <b id="home-cpu">—</b></span><span>Memoria <b id="home-ram">—</b></span><span>Disco sistema <b id="home-disk">—</b></span><span>Carga <b id="home-load">—</b></span><span>Temp <b id="home-temp">—</b></span><span>IP <b id="home-ip">—</b></span><span id="home-disks-wrap" hidden>Otros discos <b id="home-disks">—</b></span><span id="home-vitals-status" role="status" style="color:var(--warn)" hidden></span><a href="/salud">Ver salud ${icon('arrow-up-right')}</a></div>
     <div class="home-section-title"><h2>Continuar trabajando</h2><span>Tu última ubicación en cada sección</span></div><nav class="home-resume" id="home-resume" aria-label="Continuar trabajando"></nav>
-    <div class="home-quick" role="group" aria-label="Acciones rápidas"><button class="btn-primary" id="home-upload">${icon('upload')} Subir archivos</button><a class="btn-secondary" href="/terminal">${icon('terminal')} Abrir terminal</a><a class="btn-secondary" href="/agentes" data-resume>${icon('bot')} Gestionar agentes</a><button class="btn-secondary" id="home-search">${icon('search')} Buscar en Biblioteca</button><button class="home-command" id="home-command">Buscar una sección <kbd>Ctrl/⌘ K</kbd></button></div>
+    <div class="home-quick" role="group" aria-label="Acciones rápidas"><button class="btn-primary" id="home-upload">${icon('upload')} Subir archivos</button><a class="btn-secondary" href="/terminal">${icon('terminal')} Abrir terminal</a><a class="btn-secondary" href="/agentes" data-resume>${icon('bot')} Gestionar agentes</a><button class="btn-secondary" id="home-search">${icon('search')} Buscar archivos</button><button class="home-command" id="home-command">Buscar una sección <kbd>Ctrl/⌘ K</kbd></button></div>
     <div class="home-columns"><div><section class="home-section"><div class="home-section-title"><h2>Abiertos recientemente</h2><a href="/archivos" data-resume>Archivos ${icon('arrow-right')}</a></div><div id="home-opened" class="home-list"></div></section>
-    <section class="home-section"><div class="home-section-title"><h2>Últimas modificaciones</h2><a href="/biblioteca?type=recent">Biblioteca ${icon('arrow-right')}</a></div><div id="home-files" class="home-list" aria-live="polite">Cargando archivos…</div></section>
+    <section class="home-section"><div class="home-section-title"><h2>Últimas modificaciones</h2><a href="/biblioteca?type=recent">Ver todo ${icon('arrow-right')}</a></div><div id="home-files" class="home-list" aria-live="polite">Cargando archivos…</div></section>
     <section class="home-section"><div class="home-section-title"><h2>Espacios</h2><span>Enlaces directos a cada sección</span></div><nav id="home-spaces" class="home-spaces" aria-label="Espacios de Axon"></nav></section></div>
     <aside><section class="home-section"><div class="home-section-title"><h2>Cambios de agentes</h2><a href="/agentes">Ver todos ${icon('arrow-right')}</a></div><div id="home-agents" class="home-list" aria-live="polite">Cargando actividad…</div></section>
     <section class="home-section"><div class="home-section-title"><h2>Actividad del servidor</h2></div><div id="home-events" class="home-list" aria-live="polite">Cargando actividad…</div></section><div class="home-key-hint">${icon('keyboard')} Usá el teclado en Archivos y Biblioteca. El botón de atajos muestra las teclas disponibles.</div></aside></div>`;
@@ -29,7 +29,7 @@
   function localContent(){
     const n=window.AxonNavigation;if(!n)return;
     const saved=n.saved();
-    const pinned=['files','library','agents'];
+    const pinned=['files','agents'];
     const extra=Object.keys(saved).filter(s=>s!=='dashboard'&&!pinned.includes(s)&&n.sections[s]).sort((a,b)=>(saved[b]?.t||0)-(saved[a]?.t||0));
     const resumeList=[...new Set([...pinned,...extra])].filter(s=>n.sections[s]).slice(0,3+Math.min(3,extra.length));
     sec.querySelector('#home-resume').innerHTML=resumeList.map(s=>{
@@ -38,7 +38,7 @@
       return `<a class="home-resume-link" href="${esc(last?.url || n.url(s))}" data-resume>${icon(sectionIcon[s] || 'box')}<span><b>${esc(n.sections[s][1])}</b><small title="${esc(detail)}">${esc(detail)}</small></span>${icon('arrow-up-right')}</a>`;
     }).join('');
     sec.querySelector('#home-opened').innerHTML=recent.length?recent.slice(0,5).map(r=>row(r.url,r.name,r.path,r.t,sectionIcon[r.section])).join(''):empty('Cuando abras un archivo, lo vas a encontrar acá para volver con un clic.');
-    sec.querySelector('#home-spaces').innerHTML=Object.entries(n.sections).filter(([s])=>s!=='dashboard').map(([s,[href,label]])=>`<a href="${href}" data-resume>${icon(sectionIcon[s] || 'box')}<span>${esc(label)}</span>${icon('arrow-up-right')}</a>`).join('');
+    sec.querySelector('#home-spaces').innerHTML=Object.entries(n.sections).filter(([s])=>s!=='dashboard'&&s!=='library').map(([s,[href,label]])=>`<a href="${href}" data-resume>${icon(sectionIcon[s] || 'box')}<span>${esc(label)}</span>${icon('arrow-up-right')}</a>`).join('');
     refreshIcons();
   }
   const vitalsStatus=sec.querySelector('#home-vitals-status');
@@ -89,7 +89,7 @@
     if(ticket!==loading)return;
     const [files,events,agents,stats]=results;
     const items=files.status==='fulfilled'&&Array.isArray(files.value?.items)?files.value.items:null;
-    sec.querySelector('#home-files').innerHTML=items===null?empty('No se pudieron cargar los archivos. Podés reintentar con Actualizar.'):items.length?items.map(it=>row(navUrl('library',{type:'all',item:it.id}),it.n,it.p,it.m, it.k==='video'?'film':it.k==='audio'?'music':'file',it.th>=1?`/api/library/thumb/${encodeURIComponent(it.id)}?k=${encodeURIComponent(it.tk)}`:'')).join(''):empty('Todavía no hay archivos indexados. Agregá carpetas desde Biblioteca.');
+    sec.querySelector('#home-files').innerHTML=items===null?empty('No se pudieron cargar los archivos. Podés reintentar con Actualizar.'):items.length?items.map(it=>row(navUrl('library',{type:'all',item:it.id}),it.n,it.p,it.m, it.k==='video'?'film':it.k==='audio'?'music':'file',it.th>=1?`/api/library/thumb/${encodeURIComponent(it.id)}?k=${encodeURIComponent(it.tk)}`:'')).join(''):empty('Todavía no hay archivos indexados. Agregá carpetas a la biblioteca desde Archivos.');
     const list=events.status==='fulfilled'&&Array.isArray(events.value?.events)?events.value.events:null;
     if(list)renderFeed(list);else sec.querySelector('#home-events').innerHTML=empty('No se pudo cargar la actividad.');
     if(!list||!list.some(e=>e.type==='agent')){

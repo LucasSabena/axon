@@ -10,7 +10,7 @@
   const name=()=>names[S.provider];
   const tabs=document.createElement('nav');tabs.className='cloud-source-tabs';tabs.setAttribute('aria-label','Ubicación de archivos');
   tabs.innerHTML=`<button type="button" class="btn-secondary" data-source="server" aria-pressed="true">${icon('hard-drive')} Servidor</button><button type="button" class="btn-secondary" data-connections aria-pressed="false">${icon('plug')} Conexiones</button>`;
-  sec.querySelector('.fm-top .section-header').insertBefore(tabs,sec.querySelector('.fm-top .section-actions'));
+  // The source switcher now lives in the explorer navigation pane (feat-explorer.js); `tabs` stays as the detached model.
   const panel=document.createElement('div');panel.className='cloud-panel';panel.hidden=true;
   panel.innerHTML=`<div class="section-header cloud-header"><div><div class="cloud-title"><h2>Dropbox</h2><span class="cloud-access" title="Podés abrir y copiar archivos. Subir, editar y borrar en la nube no está habilitado.">${icon('lock-keyhole')} Sólo lectura</span></div><p class="listener-note">Abrí archivos a demanda o guardá una copia en tu disco.</p></div><button type="button" id="cloud-refresh" class="btn-secondary" aria-label="Actualizar Dropbox">${icon('refresh-cw')}<span>Actualizar</span></button></div>
     <p id="cloud-message" class="cloud-message" role="status" aria-live="polite"></p>
@@ -37,10 +37,11 @@
   function saveView(){try{localStorage.setItem('axon:cloud-view:v1',JSON.stringify({view:S.view,sort:S.sort,order:S.order}));}catch{}window.AxonNavigation.update('files',params());}
   function go(p={}){return window.AxonNavigation.go(window.AxonNavigation.url('files',{...params(),...p}));}
   function query(p,extra={}){return new URLSearchParams({location:S.location,path:p,...extra});}
-  function hide(){S.nav++;panel.hidden=true;sec.classList.remove('fm-cloud-mode');sec.querySelector('.fm-top .section-header').insertBefore(tabs,sec.querySelector('.fm-top .section-actions'));clearTimeout(S.poll);closePreview();void refreshSources();tabs.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.source==='server')));}
+  function hide(){S.nav++;panel.hidden=true;sec.classList.remove('fm-cloud-mode');clearTimeout(S.poll);closePreview();void refreshSources();tabs.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.source==='server')));}
   function closePreview(){const box=el('cloud-preview');box.querySelectorAll('video,audio').forEach(m=>{m.pause();m.removeAttribute('src');m.load();});box.replaceChildren();box.hidden=true;}
   function renderSources(){
     tabs.innerHTML=`<button type="button" class="btn-secondary" data-source="server" aria-pressed="${panel.hidden}">${icon('hard-drive')} Servidor</button>`+S.providers.filter(p=>p.connected&&p.visible).map(p=>`<button type="button" class="btn-secondary" data-source="${p.id}" aria-pressed="${!panel.hidden&&S.provider===p.id}">${window.AxonConnections.logo(p.id)} ${esc(p.name)}</button>`).join('')+`<button type="button" class="btn-secondary cloud-manage" data-connections>${icon('plug')} Conexiones</button>`;refreshIcons();
+    document.dispatchEvent(new CustomEvent('axon:cloud-sources',{detail:{providers:S.providers.filter(p=>p.connected&&p.visible).map(p=>({id:p.id,name:p.name})),active:panel.hidden?'':S.provider}}));
   }
   async function refreshSources(){const nav=++S.sourcesNav;try{const d=await request('/api/connections');if(nav!==S.sourcesNav)return;S.providers=d.providers;renderSources();}catch{ /* Existing navigation remains usable during an outage. */ }}
   document.addEventListener('axon:connections',e=>{S.sourcesNav++;S.providers=e.detail;renderSources();});
@@ -117,7 +118,7 @@
     }else body.textContent='Este formato no tiene vista previa en el navegador. Podés guardar una copia para abrirlo con una aplicación.';
   }
   async function restore(p,snapshot){
-    const nav=++S.nav;S.provider=Object.hasOwn(names,p.source)?p.source:'dropbox';base='/api/files/'+S.provider;S.crumbs=null;S.jobs=[];S.uploads=[];S.jobsKey='';el('cloud-jobs').replaceChildren();clearTimeout(S.poll);closePreview();S.local ||= window.AxonFilesLocal.params();sec.prepend(tabs);sec.classList.add('fm-cloud-mode');panel.hidden=false;
+    const nav=++S.nav;S.provider=Object.hasOwn(names,p.source)?p.source:'dropbox';base='/api/files/'+S.provider;S.crumbs=null;S.jobs=[];S.uploads=[];S.jobsKey='';el('cloud-jobs').replaceChildren();clearTimeout(S.poll);closePreview();S.local ||= window.AxonFilesLocal.params();sec.classList.add('fm-cloud-mode');panel.hidden=false;
     tabs.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.source===S.provider)));
     S.mark=p.mark||'';S.color=p.color||'';S.kind=p.kind||'';el('cloud-mark').value=S.mark;el('cloud-color').value=S.color;el('cloud-kind').value=S.kind;
     S.location=p.location||'account';S.path=p.cloudPath||'';S.filter=p.q||'';S.item=p.item||null;S.view=views.includes(p.view)?p.view:S.view;S.sort=sorts.includes(p.sort)?p.sort:S.sort;S.order=['asc','desc'].includes(p.order)?p.order:S.order;S.sel=new Set();S.entries=[];S.cursor=null;S.busy=true;el('cloud-browser').hidden=true;el('cloud-filter').value=S.filter;message('Consultando '+name()+'…');panel.querySelector('h2').textContent=name();await refreshSources();
@@ -200,5 +201,5 @@
   el('cloud-copy-path').onclick=e=>action(e.currentTarget,async()=>{await navigator.clipboard.writeText(S.path);message('Ruta copiada: '+(S.path||'raíz de la ubicación (ruta vacía)'));});
   el('cloud-save').onclick=e=>action(e.currentTarget,async()=>{const paths=[...S.sel],location=S.location,endpoint=base,dest=await chooseDestination();if(!dest)return;await request(endpoint+'/downloads',{location,paths,...dest});message('Copia iniciada. Continúa aunque cierres la pestaña.');S.sel.clear();renderList();await pollJobs();});
   const localLeave=window.AxonPages.files.leave;window.AxonPages.files.leave=()=>{localLeave();closePreview();clearTimeout(S.poll);};
-  window.AxonCloud=window.AxonDropbox={params,restore,hide,refreshSources,capture:()=>({sel:[...S.sel],top:panel.scrollTop})};
+  window.AxonCloud=window.AxonDropbox={params,restore,hide,refreshSources,providers:()=>S.providers.filter(p=>p.connected&&p.visible).map(p=>({id:p.id,name:p.name})),active:()=>panel.hidden?'':S.provider,capture:()=>({sel:[...S.sel],top:panel.scrollTop})};
 })();

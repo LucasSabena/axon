@@ -10,7 +10,7 @@ async page => {
     return route.fulfill({json:{ok:true,jobs:[]}});
   });
   await page.goto(origin+'/archivos',{waitUntil:'domcontentloaded'});await page.waitForFunction(()=>window.AxonNavigation?.ready);
-  await page.locator('[data-source="dropbox"]').click();await page.locator('#cloud-configure').waitFor();
+  await page.locator('#fm-nav [data-nav-provider=\"dropbox\"]').click();await page.locator('#cloud-configure').waitFor();
   assert((await page.locator('#cloud-redirect').inputValue())===origin+'/api/files/dropbox/oauth/callback','Wrong redirect URI');
   await page.locator('#cloud-configure input').fill('fixture-browser-key');await page.locator('#cloud-configure button').click();await page.locator('#cloud-connect').waitFor();
   checks.push('Configuration form and exact callback URI');
@@ -56,7 +56,7 @@ async page => {
     await page.locator('[data-select="/Nota.txt"]').uncheck();
   }
   checks.push('Desktop/tablet/mobile at 1440/768/390/320px and keyboard-dismissable destination dialog');
-  await page.locator('[data-source="server"]').click();await page.locator('#fm-breadcrumb').waitFor({state:'visible'});assert(await page.locator('#cloud-browser').isHidden(),'Cloud view stayed visible');
+  await page.locator('#fm-nav [data-nav-key^="home|"][aria-level="1"]').click();await page.locator('#fm-breadcrumb').waitFor({state:'visible'});assert(await page.locator('#cloud-browser').isHidden(),'Cloud view stayed visible');
   await page.goBack();await page.locator('#cloud-browser').waitFor({state:'visible'});checks.push('Local source restored and Back returns to Dropbox');
   assert(!errors.length,'Browser errors: '+errors.join('; '));
   return {ok:true,checks,errors,realAccount:false,dropboxResponses:'mocked',copies,streams};

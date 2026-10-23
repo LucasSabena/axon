@@ -9,7 +9,8 @@ const browser=await chromium.launch({channel:'chrome',headless:true});
 const results:Record<string,unknown>={},errors:string[]=[];
 try {
  const context=await browser.newContext({viewport:{width:1440,height:1000}}),page=await context.newPage();page.setDefaultTimeout(20000);page.on('pageerror',(e:Error)=>errors.push(e.message));
- await page.goto('http://127.0.0.1:3459/archivos');await page.locator('#username').fill('qa');await page.locator('#password').fill('axon-local-qa');await page.locator('#login-form button[type=submit]').click();await page.locator('[data-volume="fixture-external"]').waitFor();
+ await context.addInitScript(()=>{try{localStorage.setItem('fm-drawer','1');}catch{}});
+ await page.goto('http://127.0.0.1:3459/archivos');await page.locator('#username').fill('qa');await page.locator('#password').fill('axon-local-qa');await page.locator('#login-form button[type=submit]').click();await page.locator('[data-volume="fixture-external"]').waitFor({state:'attached'});
  const home=await page.evaluate(async()=>{const r=await fetch('/api/files/volumes');return (await r.json()).volumes.find((v:any)=>v.id==='fixture-internal').path;});
  const name='pending-'+Date.now(),from=home+'/media/'+name,to=home+'/external-drive/'+name;
  await mkdir(from);await writeFile(from+'/original.txt','Original preservado durante el bloqueo.');

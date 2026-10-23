@@ -117,6 +117,40 @@
     toast('Link copiado', 'ok', '', 2500);
   }
 
+  async function clip(t) {
+    try { await navigator.clipboard.writeText(t); }
+    catch {
+      const ta = document.createElement('textarea');
+      ta.value = t;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
+  }
+
+  async function copyTranscript(it) {
+    try {
+      const r = await fetch(`/api/library/transcript/${it.id}/export?fmt=txt`);
+      if (!r.ok) throw new Error(await r.text() || 'Sin transcripción');
+      await clip(await r.text());
+      toast('Transcripción copiada', 'ok', '', 2000);
+    } catch (err) { errToast(err instanceof Error ? err : new Error(String(err))); }
+  }
+
+  async function copyTranscripts(items) {
+    try {
+      const parts = [];
+      for (const it of items) {
+        const r = await fetch(`/api/library/transcript/${it.id}/export?fmt=txt`).catch(() => null);
+        if (r?.ok) parts.push(`${items.length > 1 ? `── ${it.n} ──\n\n` : ''}${(await r.text()).trim()}`);
+      }
+      if (!parts.length) return toast('Ninguno tiene transcripción', 'warn', '', 2500);
+      await clip(parts.join('\n\n'));
+      toast(`${parts.length} transcripción${parts.length > 1 ? 'es copiadas' : ' copiada'}`, 'ok', '', 2500);
+    } catch (err) { errToast(err instanceof Error ? err : new Error(String(err))); }
+  }
+
   // ---------- DOM ----------
 
   function activateTab() {
@@ -138,17 +172,7 @@
 
   function ensureDom() {
     if ($('#tab-library')) return;
-    const nav = $('.sidebar-nav');
-    const anchor = document.querySelector('.tab-btn[data-tab="terminal"]');
-    if (nav) {
-      const btn = document.createElement('button');
-      btn.className = 'nav-item tab-btn';
-      btn.dataset.tab = 'library';
-      btn.innerHTML = `${icon('images')}<span class="nav-label">Biblioteca</span><span class="nav-count" id="nav-count-library"></span>`;
-      if (anchor) nav.insertBefore(btn, anchor);
-      else nav.appendChild(btn);
-      btn.addEventListener('click', activateTab);
-    }
+    // Biblioteca no tiene entrada propia en la barra lateral: vive dentro de Archivos (feat-explorer.js).
     const main = $('main.content');
     if (!main) return;
     const sec = document.createElement('section');
@@ -299,6 +323,8 @@
   function tabActive() {
     return $('#tab-library')?.classList.contains('active');
   }
+  // Modals and the viewer are shared with Archivos, so their keys work from either mode.
+  const overlayOpen = () => !!$('#lib-modal') && !$('#lib-modal').classList.contains('hidden');
 
   // ---------- Data ----------
 
@@ -332,9 +358,11 @@
       for (const id of [...L.sel]) if (!L.byId.has(id)) L.sel.delete(id);
       const nc = $('#nav-count-library');
       if (nc) nc.textContent = d.items.length ? d.items.length.toLocaleString('es-AR') : '';
+      pathMap = null;
       const first = !L.rendered;
       L.rendered = true;
       render({ keep: !first });
+      document.dispatchEvent(new CustomEvent('axon:library'));
       if (viewerId) {
         const i = L.list.findIndex((x) => x.id === viewerId);
         if (i >= 0) {
@@ -445,7 +473,7 @@
       list = list.filter((it) => ids.has(it.id));
     } else if (v.type === 'folder') {
       list = L.q ? list.filter((it) => it.p.startsWith(v.value + '/')) : list.filter((it) => dirOf(it.p) === v.value);
-    }
+    } else if (v.type === 'tr') list = list.filter((it) => it.tr);
     if(['liked','saved','pinned'].includes(v.type))list=list.filter(it=>AxonFileCatalog.get(it.p)[v.type]);
     if(v.type==='tag')list=list.filter(it=>AxonFileCatalog.get(it.p).tags.includes(v.value));
     list=list.filter(it=>AxonFileCatalog.matches(it.p,{color:L.catalogColor,tag:L.catalogTag,kind:L.catalogKind},'file'));
@@ -588,6 +616,7 @@
     if (v.type === 'col') return 'Esta colección está vacía. Seleccioná archivos y usá "Agregar a colección"';
     if (v.type === 'folder') return 'Esta carpeta no tiene archivos multimedia';
     if (v.type === 'recent') return 'No hay archivos de los últimos 30 días';
+    if (v.type === 'tr') return 'Todavía no hay transcripciones — transcribí un video o audio desde su menú';
     return 'No hay archivos. Subí algunos o agregá carpetas en ajustes ⚙';
   }
 
@@ -629,6 +658,7 @@
       : it.k !== 'image' ? `<span class="lib-badge">${esc(it.e.toUpperCase())}</span>` : '';
     return `<div class="lib-tile${sel ? ' sel' : ''}" data-i="${i}" data-id="${it.id}"${AxonFileCatalog.attr(it.p)} title="${esc(it.n)}">
       ${media}${badge}
+      ${it.tr ? `<button class="lib-trb" data-act="tr" title="Ver transcripción">${icon('captions')}</button>` : ''}
       <button class="lib-check" data-act="sel" aria-label="Seleccionar ${esc(it.n)}">${icon('check')}</button>
       <button class="lib-fav${fav ? ' on' : ''}" data-act="fav" aria-label="Marcar favorito ${esc(it.n)}">${icon('star')}</button>
       <span class="lib-cap">${esc(it.n)}${AxonFileCatalog.badges(it.p)}</span>
@@ -640,7 +670,7 @@
     const media = it.th === -1 ? `<span class="lib-ext k-${it.k}">${icon(KIND[it.k]?.ic || 'file')}</span>` : `<img loading="lazy" src="${thumbUrl(it)}" alt="" data-k="${it.k}" data-e="${esc(it.e)}">`;
     return `<div class="lib-row${sel ? ' sel' : ''}" data-i="${i}" data-id="${it.id}"${AxonFileCatalog.attr(it.p)}>
       <span class="lib-row-th"><button class="lib-check" data-act="sel" aria-label="Seleccionar ${esc(it.n)}">${icon('check')}</button>${media}</span>
-      <span class="lib-row-n">${L.favs.has(it.id) ? `<span class="lib-star">${icon('star')}</span>` : ''}${esc(it.n)}${AxonFileCatalog.badges(it.p)}</span>
+      <span class="lib-row-n">${L.favs.has(it.id) ? `<span class="lib-star">${icon('star')}</span>` : ''}${it.tr ? `<button class="lib-trb lib-trb-row" data-act="tr" title="Ver transcripción">${icon('captions')}</button>` : ''}${esc(it.n)}${AxonFileCatalog.badges(it.p)}</span>
       <span>${esc(KIND_ONE[it.k])}${it.d ? ' · ' + fmtDur(it.d) : ''}</span>
       <span>${fmtSize(it.s)}</span>
       <span>${fmtDate(when(it))}</span>
@@ -687,6 +717,7 @@
     if (lpFired) { lpFired = false; return; }
     const act = e.target.closest('[data-act]')?.dataset.act;
     if (act === 'fav') { e.stopPropagation(); return toggleFav([it.id], !L.favs.has(it.id)); }
+    if (act === 'tr') { e.stopPropagation(); return openById(it.id, true); }
     if (act === 'sel' || e.ctrlKey || e.metaKey || L.selMode || (L.sel.size && !e.shiftKey)) return toggleSel(i, e.shiftKey);
     if (e.shiftKey) return toggleSel(i, true);
     openViewer(i);
@@ -723,24 +754,47 @@
     root.addEventListener('scroll', cancel, true);
   }
 
+  // Same layout as the folder view's menu (feat-files.js): quick row, then open · share & process · organize · move · delete.
   function itemMenu(it, ids, i) {
     const list = ids.map((id) => L.byId.get(id)).filter(Boolean);
+    const many = ids.length > 1;
     const nTool = list.filter(canTool).length;
     const nTr = list.filter(canTranscribe).length;
-    return [
-      ...(i != null ? [{ icon: 'eye', label: 'Ver', run: () => openViewer(i) }] : []),
-      { icon: 'share-2', label: ids.length > 1 ? `Compartir ${ids.length} archivos` : 'Compartir link', run: () => openShareModal(ids) },
+    const allFav = list.every((x) => L.favs.has(x.id));
+    const paths = list.map((x) => x.p);
+    const share = [{ icon: 'share-2', label: many ? `Compartir ${ids.length} archivos…` : 'Compartir link…', run: () => openShareModal(ids) }];
+    if (nTool) share.push({ icon: 'wand-2', label: nTool > 1 ? `Optimizar / convertir ${nTool}…` : 'Optimizar / convertir…', run: () => openTools(ids) });
+    if (it.tr && !many) share.push({ icon: 'captions', label: 'Ver transcripción', run: () => openById(it.id, true) });
+    if (nTr) share.push({ icon: 'captions', label: nTr > 1 ? `Transcribir ${nTr}…` : it.tr ? 'Transcribir de nuevo…' : 'Transcribir…', run: () => openTranscribe(ids) });
+    const more = [
+      { icon: 'folder-plus', label: 'Agregar a una colección…', run: () => addToCollection(ids) },
+      ...(L.view.type === 'col' ? [{ icon: 'folder-minus', label: 'Quitar de esta colección', run: () => removeFromCollection(ids) }] : []),
       { icon: 'link-2', label: 'Agregar a un link existente…', run: () => addToShare(ids) },
-      { icon: 'download', label: 'Descargar', run: () => downloadIds(ids) },
-      ...(nTool ? [{ icon: 'wand-2', label: nTool > 1 ? `Optimizar / convertir ${nTool}…` : 'Optimizar / convertir…', run: () => openTools(ids) }] : []),
-      ...(nTr ? [{ icon: 'captions', label: nTr > 1 ? `Transcribir ${nTr}…` : 'Transcribir…', run: () => openTranscribe(ids) }] : []),
-      { icon: 'star', label: L.favs.has(it.id) ? 'Quitar de favoritos' : 'Favorito', run: () => toggleFav(ids, !L.favs.has(it.id)) },
-      {icon:'tags',label:'Colores, etiquetas y marcas…',run:()=>AxonFileCatalog.edit(ids.map(id=>L.byId.get(id)?.p).filter(Boolean))},
-      { icon: 'folder-plus', label: 'Agregar a colección…', run: () => addToCollection(ids) },
+      { sep: true },
+      ...(it.tr ? [{ icon: 'copy', label: 'Copiar transcripción', run: () => copyTranscripts(list.filter((x) => x.tr)) }] : []),
+      { icon: 'clipboard', label: many ? 'Copiar rutas' : 'Copiar ruta', run: () => clip(paths.join('\n')).then(() => toast('Ruta copiada', 'ok', '', 2000)) },
+      ...(!many ? [{ icon: 'external-link', label: 'Abrir original en otra pestaña', run: () => window.open(mediaUrl(it), '_blank', 'noopener') }] : []),
+    ];
+    return [
+      { row: [
+        { icon: 'share-2', label: 'Compartir', run: () => openShareModal(ids) },
+        { icon: 'download', label: 'Descargar', run: () => downloadIds(ids) },
+        { icon: 'star', label: allFav ? 'Quitar favorito' : 'Favorito', short: 'Favorito', run: () => toggleFav(ids, !allFav) },
+        { icon: 'pencil', label: 'Renombrar', short: 'Renombrar', disabled: many, run: () => renameItem(it) },
+        { icon: 'trash-2', label: 'Eliminar', danger: true, kbd: 'Supr', run: () => trashIds(ids) },
+      ] },
+      { sep: true },
+      ...(i != null ? [{ icon: 'eye', label: 'Abrir en el visor', kbd: 'Enter', run: () => openViewer(i) }] : []),
+      { icon: 'download', label: many ? `Descargar ${ids.length} archivos (ZIP)` : 'Descargar', run: () => downloadIds(ids) },
+      { icon: 'folder-open', label: 'Ver en su carpeta', run: () => { closeViewer(false); window.AxonNavigation.go(window.AxonNavigation.url('files', { path: dirOf(it.p), item: baseOf(it.p) })); } },
+      { sep: true },
+      ...share,
+      { sep: true },
+      { icon: 'tags', label: 'Colores, etiquetas y marcas…', run: () => AxonFileCatalog.edit(paths) },
+      { icon: 'star', label: 'Favorito', checked: allFav, run: () => toggleFav(ids, !allFav) },
+      { sep: true },
       { icon: 'folder-input', label: 'Mover a…', run: () => openMove(ids) },
-      ...(ids.length === 1 ? [{ icon: 'pencil', label: 'Renombrar', run: () => renameItem(it) }] : []),
-      { icon: 'folder-open', label: 'Ir a la carpeta', run: () => { closeViewer(); setView({ type: 'folder', value: dirOf(it.p) }); } },
-      { icon: 'trash-2', label: 'Eliminar', danger: true, run: () => trashIds(ids) },
+      { icon: 'more-horizontal', label: 'Más acciones', children: more },
     ];
   }
 
@@ -828,6 +882,7 @@
         const r = e.currentTarget.getBoundingClientRect();
         showCtxMenu?.([
           ...(nTr ? [{ icon: 'captions', label: 'Transcribir…', run: () => openTranscribe(ids) }] : []),
+          ...(list.some((it) => it.tr) ? [{ icon: 'copy', label: 'Copiar transcripciones', run: () => copyTranscripts(list.filter((it) => it.tr)) }] : []),
           { icon: 'link-2', label: 'Agregar a un link existente…', run: () => addToShare(ids) },
           { icon: 'star', label: 'Favorito', run: () => toggleFav(ids, !ids.every((id) => L.favs.has(id))) },
           { icon: 'folder-plus', label: 'Agregar a colección…', run: () => addToCollection(ids) },
@@ -864,6 +919,7 @@
         ${item('recent', undefined, 'clock', 'Recientes', nRecent)}
         ${item('fav', undefined, 'star', 'Favoritos', L.favs.size+L.directories.filter(p=>AxonFileCatalog.get(p).favorite).length)}
         ${item('liked',undefined,'heart','Me gusta')}${item('saved',undefined,'bookmark','Guardados')}${item('pinned',undefined,'pin','Acceso rápido')}
+        ${item('tr', undefined, 'captions', 'Transcripciones', L.items.filter((it) => it.tr).length)}
         ${item('shares', undefined, 'link', 'Links compartidos', L.sharesCount)}
         ${item('dupes', undefined, 'copy', 'Duplicados')}
       </div>
@@ -880,7 +936,7 @@
       </div>`;
     side.querySelectorAll('.lib-nav').forEach((b) => b.addEventListener('click', () => {
       const type = b.dataset.type;
-      setView(type === 'all' || type === 'recent' || type === 'fav' || type === 'shares' ? { type } : { type, value: b.dataset.value });
+      setView(type === 'all' || type === 'recent' || type === 'fav' || type === 'shares' || type === 'tr' ? { type } : { type, value: b.dataset.value });
     }));
     $('#lib-side-add-folder')?.addEventListener('click', addFolder);
     $('#lib-col-new')?.addEventListener('click', async () => {
@@ -890,24 +946,31 @@
     });
     side.querySelectorAll('.lib-nav-more').forEach((b) => b.addEventListener('click', (e) => {
       e.stopPropagation();
-      const col = L.cols.find((c) => c.id === b.dataset.col);
       const r = b.getBoundingClientRect();
-      showCtxMenu?.([
-        { icon: 'share-2', label: 'Compartir colección', run: () => openShareModal(col.ids, col.name) },
-        { icon: 'download', label: 'Descargar (ZIP)', run: () => downloadIds(col.ids, col.name) },
-        { icon: 'pencil', label: 'Renombrar', run: async () => {
-          const name = await promptModal('Renombrar colección', col.name);
-          if (name) { await api(`/api/library/collections/${col.id}`, { method: 'PATCH', body: { name } }).catch(errToast); load(); }
-        } },
-        { icon: 'trash-2', label: 'Eliminar colección', danger: true, run: async () => {
-          if (!(await confirmDialog('Eliminar colección', `Se elimina "${col.name}". Los archivos no se tocan.`))) return;
-          await api(`/api/library/collections/${col.id}`, { method: 'DELETE' }).catch(errToast);
-          if (L.view.type === 'col' && L.view.value === col.id) L.view = { type: 'all' };
-          load();
-        } },
-      ], r.left, r.bottom);
+      collectionMenu(b.dataset.col, r.left, r.bottom);
     }));
     refreshIcons();
+  }
+
+
+  function collectionMenu(id, x, y) {
+    const col = L.cols.find((c) => c.id === id);
+    if (!col) return;
+    showCtxMenu?.([
+      { icon: 'share-2', label: 'Compartir colección', run: () => openShareModal(col.ids, col.name) },
+      { icon: 'download', label: 'Descargar (ZIP)', run: () => downloadIds(col.ids, col.name) },
+      { sep: true },
+      { icon: 'pencil', label: 'Renombrar', run: async () => {
+        const name = await promptModal('Renombrar colección', col.name);
+        if (name) { await api(`/api/library/collections/${col.id}`, { method: 'PATCH', body: { name } }).catch(errToast); load(); }
+      } },
+      { icon: 'trash-2', label: 'Eliminar colección', danger: true, run: async () => {
+        if (!(await confirmDialog('Eliminar colección', `Se elimina "${col.name}". Los archivos no se tocan.`))) return;
+        await api(`/api/library/collections/${col.id}`, { method: 'DELETE' }).catch(errToast);
+        if (L.view.type === 'col' && L.view.value === col.id) L.view = { type: 'all' };
+        load();
+      } },
+    ], x, y);
   }
 
   function renderCrumbs() {
@@ -925,7 +988,7 @@
       }
       h += `<span class="lib-crumb-sp"></span><button class="lib-crumb-act" id="lib-mkdir">${icon('folder-plus')} Nueva carpeta</button>`;
     } else {
-      const titles = { all: 'Todo', recent: 'Recientes · últimos 30 días', fav: 'Favoritos' };
+      const titles = { all: 'Todo', recent: 'Recientes · últimos 30 días', fav: 'Favoritos', tr: 'Transcripciones' };
       const t = v.type === 'kind' ? KIND[v.value]?.label : v.type === 'col' ? `Colección · ${L.cols.find((c) => c.id === v.value)?.name || ''}` : titles[v.type];
       h = `<span class="lib-crumb-title">${esc(t || '')}</span>`;
       if (v.type === 'col') {
@@ -1271,11 +1334,10 @@
       e.stopPropagation();
       const r = e.currentTarget.getBoundingClientRect();
       showCtxMenu?.([
-        { icon: 'info', label: 'Información', run: () => togglePanel('info') },
-        { icon: 'star', label: L.favs.has(it.id) ? 'Quitar de favoritos' : 'Favorito', run: () => toggleFav([it.id], !L.favs.has(it.id)) },
-        { icon: 'download', label: 'Descargar original', run: () => { location.href = `/api/library/file/${it.id}?dl=1`; } },
-        { icon: 'external-link', label: 'Abrir original en otra pestaña', run: () => window.open(mediaUrl(it), '_blank') },
-        ...itemMenu(it, [it.id]).filter((x) => !['share-2', 'download', 'star'].includes(x.icon)),
+        { icon: 'info', label: 'Información', kbd: 'I', run: () => togglePanel('info') },
+        { icon: 'star', label: L.favs.has(it.id) ? 'Quitar de favoritos' : 'Favorito', kbd: 'F', run: () => toggleFav([it.id], !L.favs.has(it.id)) },
+        { sep: true },
+        ...itemMenu(it, [it.id]).slice(2),
       ], r.right - 240, r.bottom + 4);
     });
     refreshIcons();
@@ -1520,7 +1582,9 @@
   }
 
   function onKey(e) {
-    if (!tabActive() || document.querySelector('dialog[open], :popover-open')) return;
+    if (!(tabActive() || overlayOpen()) || document.querySelector('dialog[open], :popover-open')) return;
+    // The navigation pane is a tree with its own arrow keys.
+    if (e.target.closest?.('#fm-nav') && !overlayOpen()) return;
     const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || '');
     const modalOpen = !$('#lib-modal').classList.contains('hidden');
     if (modalOpen) {
@@ -1769,9 +1833,15 @@
     const actions={view:'Visita',play:'Reproducción iniciada',download:'Descarga iniciada',zip:'ZIP iniciado'};
     openModal(`<h3>${icon('activity')} ${esc(s.title)}</h3><p class="lib-muted">${s.views} visitas · ${s.downloads} descargas iniciadas · ${s.visitors || 0} visitantes anónimos${s.visitorsCapped?'+':''}. Un inicio de descarga no confirma que haya terminado.</p>
       <label class="lib-toggle"><input type="checkbox" id="share-activity-notify"${s.notifyActivity!==false?' checked':''}><span>Recibir notificaciones de este link</span></label>
-      <h4>Archivos compartidos</h4><ul class="share-files-list">${(s.files||[]).map(f=>`<li><b>${esc(f.name)}</b><small>${esc(prettyPath(f.path))} · ${fmtSize(f.size)}</small></li>`).join('')}</ul>
+      <h4>Archivos compartidos</h4><ul class="share-files-list">${(s.files||[]).map((f,fi)=>{const id=s.ids?.[fi];const it=id?L.byId.get(id):null;return `<li><button class="share-file" data-fi="${fi}"${id?'':' disabled'}><b>${esc(f.name)}${it?.tr?` <i class="share-file-tr" title="Tiene transcripción">${icon('captions')}</i>`:''}</b><small>${esc(prettyPath(f.path))} · ${fmtSize(f.size)}</small></button></li>`;}).join('')}</ul>
       <h4>Últimos 100 eventos</h4><p class="lib-muted">Los visitantes se identifican con un código anónimo. No identifica a una persona ni guarda su IP.</p><div class="share-activity-list">${(s.recentActivity||[]).map(ev=>`<div><b>${esc(actions[ev.kind]||ev.kind)}</b><span>${esc(ev.name||ev.client)}</span><small>${esc(fmtDateTime(ev.t))} · ${esc(ev.client)} · ${esc(ev.visitor)}</small></div>`).join('')||'<p>Todavía no hay actividad.</p>'}</div><div class="modal-actions"><button class="btn-secondary" data-close>Cerrar</button></div>`, 'lib-activity-modal');
     $('#share-activity-notify').addEventListener('change',async e=>{try{await api(`/api/library/shares/${s.id}`,{method:'PATCH',body:{notifyActivity:e.target.checked}});s.notifyActivity=e.target.checked;}catch(err){e.target.checked=!e.target.checked;errToast(err);}});
+    $$('#lib-modal .share-file').forEach((b) => b.addEventListener('click', () => {
+      const id = s.ids?.[Number(b.dataset.fi)];
+      if (!id) return;
+      closeModal();
+      openById(id);
+    }));
   }
 
   async function renderShares() {
@@ -2516,8 +2586,13 @@
       $('#tr-prompt-w').classList.toggle('hidden', engine !== 'whisper');
     };
     $('#tr-model').value = localStorage.getItem('tr-model') || 'turbo';
-    $$('.lt-engine').forEach((b) => b.addEventListener('click', () => { engine = b.dataset.e; sync(); }));
+    // Warm the engine + model in the background so the first file doesn't pay
+    // the load cost (and first-load hiccups don't land on a real job).
+    const warm = () => api('/api/library/asr/warm', { method: 'POST', body: { engine, model: engine === 'whisper' ? $('#tr-model').value : undefined } }).catch(() => {});
+    $$('.lt-engine').forEach((b) => b.addEventListener('click', () => { engine = b.dataset.e; sync(); warm(); }));
+    $('#tr-model').addEventListener('change', warm);
     sync();
+    if (engine === 'whisper' ? caps.caps?.whisper !== false : true) warm();
     $('#tr-free')?.addEventListener('click', async () => {
       await Promise.all(['whisper', 'parakeet'].map((e) => api(`/api/library/asr/${e}/stop`, { method: 'POST' }).catch(() => {})));
       toast('Memoria liberada', 'ok', '', 2000);
@@ -2570,6 +2645,7 @@
       el.innerHTML = `
         <div class="lv-tr-tools">
           <div class="lv-tr-q">${icon('search')}<input id="lv-tr-q" placeholder="Buscar en la transcripción" value="${esc(q)}"></div>
+          <button class="lv-btn" id="lv-tr-copy" title="Copiar texto">${icon('copy')}</button>
           <button class="lv-btn" id="lv-tr-edit" title="Editar texto">${icon(editing ? 'check' : 'pencil')}</button>
           <button class="lv-btn" id="lv-tr-more" title="Descargar / guardar">${icon('download')}</button>
         </div>
@@ -2582,6 +2658,7 @@
         const media = $('#lv-stage video, #lv-stage audio');
         if (seg && media) { media.currentTime = Number(seg.dataset.s) + 0.01; media.play?.().catch(() => {}); }
       });
+      $('#lv-tr-copy').addEventListener('click', () => copyTranscript(it));
       $('#lv-tr-edit').addEventListener('click', async () => {
         if (editing) {
           el.querySelectorAll('.lv-seg').forEach((row) => { t.segments[Number(row.dataset.i)].text = row.querySelector('p').textContent.trim(); });
@@ -2690,7 +2767,7 @@
     ensureDom();
     toggleSide(false);
     closeViewer(false);
-    L.view={type:['all','recent','fav','liked','saved','pinned','tag','kind','col','folder','shares','dupes'].includes(params.type)?params.type:'all',value:params.value || ''};
+    L.view={type:['all','recent','fav','liked','saved','pinned','tag','kind','col','folder','shares','dupes','tr'].includes(params.type)?params.type:'all',value:params.value || ''};
     L.q=params.q || '';L.catalogColor=params.color||'';L.catalogTag=params.tag||'';L.catalogKind=['file','dir'].includes(params.kind)?params.kind:'';
     if(['grid','list'].includes(params.view))L.layout=params.view;
     if(['date-desc','date-asc','name-asc','name-desc','size-desc','size-asc','kind'].includes(params.sort))L.sort=params.sort;
@@ -2710,7 +2787,7 @@
     if(params.item){
       let i=L.list.findIndex(it=>it.id===params.item);
       if(i<0 && L.byId.has(params.item)){L.view={type:'all'};L.q='';$('#lib-q').value='';render();i=L.list.findIndex(it=>it.id===params.item);}
-      if(i>=0){L.cursor=params.item;openViewer(i,true);}
+      if(i>=0){L.cursor=params.item;if(params.panel==='tr')vPanel='tr';openViewer(i,true);if(params.action==='transcribe')openTranscribe([params.item]);}
       else toast('Este archivo ya no está en la biblioteca','warn','',3500);
     }
     if(params.action==='upload')$('#lib-file').click();
@@ -2792,7 +2869,116 @@
     }, { once: true });
   }
 
-  window.pmLibrary = { open: () => window.AxonNavigation?.ready ? window.AxonNavigation.go("/biblioteca", {remember:true}) : activateTab(), share: openShareModal, tools: openTools, transcribe: openTranscribe };
+
+  // ---------- Bridge for Archivos ----------
+  // Archivos works with host paths; the tools above work with library items.
+  // This is the only surface the explorer uses: resolve paths → items, then call the same modals.
+  const KIND_BY_EXT = {};
+  const addKind = (k, exts) => exts.split(' ').forEach((e) => { KIND_BY_EXT[e] = k; });
+  addKind('image', 'jpg jpeg png gif webp avif bmp ico heic heif tif tiff jxl');
+  addKind('raw', 'nef nrw dng cr2 cr3 crw arw srf sr2 raf orf rw2 pef srw x3f 3fr erf iiq');
+  addKind('video', 'mp4 m4v mov webm mkv avi wmv mpg mpeg 3gp ts mts m2ts ogv flv');
+  addKind('audio', 'mp3 wav flac ogg oga m4a aac opus aiff aif wma');
+  addKind('pdf', 'pdf');
+  addKind('vector', 'svg svgz eps ai');
+  addKind('design', 'psd psb indd idml aep prproj fig sketch xd afdesign afphoto afpub cdr blend');
+  addKind('doc', 'doc docx xls xlsx ppt pptx odt ods odp rtf txt md markdown csv tsv docm dot dotx ott pptm pps ppsx pot potx otp xlsm xlt xltx ots key pages numbers');
+  // `.ts` / `.mts` are MPEG video in the library but TypeScript sources in a code folder: only trust them
+  // when the file is already indexed (callers pass the full path), never from the name alone.
+  const kindOfName = (nameOrPath) => {
+    const ext = (String(nameOrPath).split('.').pop() || '').toLowerCase();
+    if (ext === 'ts' || ext === 'mts') return String(nameOrPath).includes('/') ? pathIndex().get(String(nameOrPath))?.k || null : null;
+    return KIND_BY_EXT[ext] || null;
+  };
+  let pathMap = null;
+  const pathIndex = () => (pathMap ||= new Map(L.items.map((it) => [it.p, it])));
+
+  function mergeItems(list) {
+    let added = false;
+    for (const it of list || []) {
+      const known = L.byId.get(it.id);
+      if (known) { Object.assign(known, it); continue; }
+      L.items.push(it); L.byId.set(it.id, it); added = true;
+    }
+    if (added) pathMap = null;
+  }
+
+  // Returns the library items for the paths, indexing them first when they live under a library folder.
+  // Files outside every library folder get a one-click offer to add their folder.
+  async function resolvePaths(paths, { action = 'usar las herramientas de archivos', offer = true } = {}) {
+    const wanted = [...new Set(paths)].filter(Boolean);
+    if (!wanted.length) return [];
+    if (!L.loaded) await load();
+    const known = wanted.map((p) => pathIndex().get(p));
+    if (known.every(Boolean)) return known;
+    let r = await api('/api/library/resolve', { method: 'POST', body: { paths: wanted } });
+    if (r.outside?.length && offer) {
+      const dirs = [...new Set(r.outside.map(dirOf))];
+      const ok = await confirmDialog('Agregar a la biblioteca',
+        `Para ${action}, AXON tiene que indexar ${dirs.length === 1 ? 'la carpeta' : 'las carpetas'} ${dirs.map((d) => `«${prettyPath(d)}»`).join(', ')}. Los archivos no se mueven ni se modifican.`,
+        'Agregar y continuar');
+      if (!ok) return null;
+      for (const d of dirs) await api('/api/library/settings', { method: 'PUT', body: { addRoot: d } });
+      r = await api('/api/library/resolve', { method: 'POST', body: { paths: wanted } });
+      setTimeout(load, 1500);
+    }
+    mergeItems(r.items);
+    const items = wanted.map((p) => pathIndex().get(p)).filter(Boolean);
+    if (r.missing?.length) toast(`${r.missing.length} archivo${r.missing.length === 1 ? '' : 's'} ya no existe${r.missing.length === 1 ? '' : 'n'}`, 'warn', '', 3000);
+    if (!items.length && wanted.length) toast('Estos archivos no se pueden usar con las herramientas de la biblioteca', 'warn', '', 3500);
+    return items;
+  }
+  const withItems = (action, run) => async (paths, ...rest) => {
+    try { const items = await resolvePaths(paths, { action }); if (items?.length) return run(items, ...rest); }
+    catch (err) { errToast(err instanceof Error ? err : new Error(String(err))); }
+  };
+
+  window.AxonLibrary = {
+    kindOf: kindOfName,
+    canTool: (name) => ['image', 'raw', 'vector', 'video', 'audio'].includes(kindOfName(name)),
+    canTranscribe: (name) => ['video', 'audio'].includes(kindOfName(name)),
+    get loaded() { return L.loaded; },
+    ensureLoaded: () => (L.loaded ? Promise.resolve() : load()),
+    reload: () => load(),
+    // Cheap freshness check for the navigation pane: reload the index only when its revision moved.
+    async refreshIfChanged() {
+      if (!L.loaded) return load();
+      const status = await api('/api/library/status');
+      if (status.revision !== L.revision || status.metadataRevision !== L.metadataRevision) return load();
+    },
+    peek: (p) => pathIndex().get(p) || null,
+    summary() {
+      const kinds = {};
+      for (const it of L.items) kinds[it.k] = (kinds[it.k] || 0) + 1;
+      const cut = Date.now() - 30 * 86400e3;
+      return {
+        loaded: L.loaded, total: L.items.length, kinds, recent: L.items.filter((it) => it.m >= cut).length,
+        favs: L.favs.size, transcripts: L.items.filter((it) => it.tr).length, shares: L.sharesCount,
+        collections: L.cols.map((c) => ({ id: c.id, name: c.name, count: c.ids.length })),
+        roots: [...new Set([L.uploadRoot, ...L.roots])].filter(Boolean).map((r) => ({ path: r, upload: r === L.uploadRoot, count: L.items.filter((it) => rootOf(it.p) === r).length })),
+        directories: L.directories,
+      };
+    },
+    resolve: resolvePaths,
+    share: withItems('crear un link para compartir', (items) => openShareModal(items.map((it) => it.id))),
+    addToShare: withItems('agregar archivos a un link', (items) => addToShare(items.map((it) => it.id))),
+    tools: withItems('optimizar o convertir', (items, tab) => { const ok = items.filter(canTool); if (!ok.length) return toast('Estos archivos no se pueden optimizar', 'warn', '', 3000); return openTools(ok.map((it) => it.id), tab); }),
+    transcribe: withItems('transcribir', (items) => { const ok = items.filter(canTranscribe); if (!ok.length) return toast('Elegí videos o audios para transcribir', 'warn', '', 3000); return openTranscribe(ok.map((it) => it.id)); }),
+    transcript: withItems('ver la transcripción', (items) => window.AxonNavigation.go(window.AxonNavigation.url('library', { item: items[0].id, panel: 'tr' }), { transient: true })),
+    copyTranscript: withItems('copiar la transcripción', (items) => copyTranscripts(items)),
+    view: withItems('abrir el visor', (items) => window.AxonNavigation.go(window.AxonNavigation.url('library', { type: 'folder', value: dirOf(items[0].p), item: items[0].id }), { transient: true })),
+    addToCollection: withItems('agregar a una colección', (items) => addToCollection(items.map((it) => it.id))),
+    settings: () => openSettings(),
+    addFolder: () => addFolder(),
+    newCollection: async () => {
+      const name = await promptModal('Nueva colección', '', 'Ej: Portfolio, Cliente X, Viaje…');
+      if (!name) return;
+      try { await api('/api/library/collections', { method: 'POST', body: { name } }); await load(); } catch (err) { errToast(err); }
+    },
+    collectionMenu: (id, x, y) => collectionMenu(id, x, y),
+  };
+
+  window.pmLibrary = { open: () => window.AxonNavigation?.ready ? window.AxonNavigation.go('/biblioteca', { remember: true }) : activateTab(), share: openShareModal, tools: openTools, transcribe: openTranscribe, transcript: (id) => window.AxonNavigation?.go(window.AxonNavigation.url('library', { item: id, panel: 'tr' }), { transient: true }) };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();
 })();
