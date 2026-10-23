@@ -83,6 +83,7 @@ interface LibState {
   favorites: string[];    // paths
   collections: Collection[];
   shares: Share[];
+  extras?: string[];      // individual files outside the roots that were shared or opened from Archivos
 }
 
 const DATA_DIR = path.dirname(process.env.CONFIG_PATH || '/app/data/config.json');
@@ -311,6 +312,29 @@ function under(p: string, root: string): boolean {
   return p === root || p.startsWith(root.endsWith('/') ? root : root + '/');
 }
 
+// Library roots plus single files added on demand from Archivos (a file is its own root).
+const allRoots = (): string[] => [...state.roots, state.uploadRoot, ...(state.extras || [])];
+const isExtra = (p: string): boolean => !!state.extras?.includes(p);
+const FORBIDDEN_EXTRA = /^\/(proc|sys|dev|boot)(\/|$)|(^|\/)\.(ssh|gnupg|aws)(\/|$)|(^|\/)\.env[^/]*$/;
+
+// Archivos can use the library tools on any file the file manager can reach: the
+// file is remembered individually instead of indexing its whole folder.
+async function addExtraFile(input: string): Promise<string | null> {
+  if (!input || typeof input !== 'string' || input.includes('\0') || !path.posix.isAbsolute(input)) return null;
+  let p = path.posix.resolve(input.trim());
+  try {
+    const real = containerToHost(await realpath(hostToContainer(p)));
+    await hostVolumes.roots(real);
+    p = real;
+  } catch { return null; }
+  if (FORBIDDEN_EXTRA.test(p)) return null;
+  const st = await stat(hostToContainer(p)).catch(() => null);
+  if (!st?.isFile()) return null;
+  const extras = state.extras || (state.extras = []);
+  if (!extras.includes(p)) { extras.push(p); if (extras.length > 5000) extras.shift(); saveState(); }
+  return p;
+}
+
 // Resolve a host path (deepest existing ancestor through realpath so a
 // symlink can't escape) and require it inside one of the library roots.
 async function resolveInRoots(input: string): Promise<string | null> {
@@ -318,7 +342,7 @@ async function resolveInRoots(input: string): Promise<string | null> {
   let p = input.trim();
   if (p.startsWith('~/')) p = home + p.slice(1);
   p = path.posix.resolve(p);
-  const roots = [...state.roots, state.uploadRoot];
+  const roots = allRoots();
   try{await hostVolumes.roots(p);}catch{return null;}
   const realRoots = await Promise.all(roots.map(async (r) => {
     try { return containerToHost(await realpath(hostToContainer(r))); } catch { return r; }
@@ -436,6 +460,17 @@ async function scanOnce(): Promise<void> {
         }
       }
     }
+    const liveExtras: string[] = [];
+    for (const hp of state.extras || []) {
+      if (found.has(hp)) continue;
+      try { await hostVolumes.roots(hp); } catch { liveExtras.push(hp); continue; }
+      const it = await statItem(hp, 'other');
+      if (!it) continue;
+      liveExtras.push(hp);
+      const prev = items.get(it.id);
+      found.set(hp, prev && prev.tk === it.tk && prev.s === it.s && prev.m === it.m ? { ...prev, tk: it.tk, k: it.k } : it);
+    }
+    if (state.extras && liveExtras.length !== state.extras.length) { state.extras = liveExtras; saveState(); }
     // Part files whose upload never finished and whose tracker was lost on a
     // restart get swept once they're a day old.
     const tracked = new Set([...uploads.values()].map((u) => u.part));
@@ -472,11 +507,11 @@ async function freshItem(id: string): Promise<Item | undefined> {
   const previous = items.get(id);
   if (!previous) return undefined;
   try{await hostVolumes.roots(previous.p);}catch{return undefined;}
-  const roots = [...state.roots, state.uploadRoot];
+  const roots = allRoots();
   const mapper = { toContainer: hostToContainer, toHost: containerToHost };
   const realRoots = await canonicalRoots(roots, mapper);
   const allowed = await canonicalLibraryFile(previous.p, roots, realRoots, mapper);
-  const current = allowed ? await statItem(previous.p, under(previous.p, state.uploadRoot) ? 'other' : undefined) : null;
+  const current = allowed ? await statItem(previous.p, under(previous.p, state.uploadRoot) || isExtra(previous.p) ? 'other' : undefined) : null;
   // An overlapping scan may already have replaced the indexed entry.
   if (items.get(id) !== previous) return items.get(id);
   if (!current) { dropItem(id); saveIndex(); return undefined; }
@@ -1105,7 +1140,7 @@ async function shareFiles(s: Share): Promise<ShareFile[]> {
 }
 
 async function canonicalSharePaths(paths: string[]): Promise<string[]> {
-  const roots = [...state.roots, state.uploadRoot];
+  const roots = allRoots();
   const mapper = { toContainer: hostToContainer, toHost: containerToHost };
   const realRoots = await canonicalRoots(roots, mapper);
   const resolved = await Promise.all(paths.map(p => canonicalLibraryFile(p, roots, realRoots, mapper)));
@@ -1885,7 +1920,8 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers,catalog
     for (const raw of paths) {
       const known = items.get(byPath.get(raw) || '');
       if (known) { const fresh = await freshItem(known.id); if (fresh) { found.push(publicItem(fresh)); continue; } }
-      const p = await resolveInRoots(raw);
+      let p = await resolveInRoots(raw);
+      if (!p) p = await addExtraFile(raw);
       if (!p) { outside.push(raw); continue; }
       const st = await stat(hostToContainer(p)).catch(() => null);
       if (!st?.isFile()) { missing.push(raw); continue; }

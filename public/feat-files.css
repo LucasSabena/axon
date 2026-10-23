@@ -172,12 +172,13 @@
 }
 .fm-cols.hidden { display: none; }
 .fm-col {
-  flex: 0 0 240px; min-width: 0;
+  flex: 0 0 248px; min-width: 0;
   overflow-y: auto;
-  border-right: 1px solid var(--border);
+  border-right: 1px solid var(--border-strong, var(--border));
   padding: 4px;
 }
-.fm-col:last-child { border-right: 0; }
+.fm-col:nth-child(even) { background: color-mix(in srgb, var(--bg-hover) 35%, transparent); }
+.fm-col-fill { flex: 1 0 120px; display: grid; place-items: center; background: color-mix(in srgb, var(--bg-canvas) 60%, transparent); color: var(--text-faint); font-size: .8rem; padding: 12px; text-align: center; }
 .fm-col-row {
   display: flex; align-items: center; gap: 7px;
   padding: 5px 8px; border-radius: var(--radius-sm);

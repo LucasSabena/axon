@@ -2903,29 +2903,19 @@
     if (added) pathMap = null;
   }
 
-  // Returns the library items for the paths, indexing them first when they live under a library folder.
-  // Files outside every library folder get a one-click offer to add their folder.
+  // Returns the library items for the paths; the server indexes each file on demand, wherever it lives.
   async function resolvePaths(paths, { action = 'usar las herramientas de archivos', offer = true } = {}) {
     const wanted = [...new Set(paths)].filter(Boolean);
     if (!wanted.length) return [];
     if (!L.loaded) await load();
     const known = wanted.map((p) => pathIndex().get(p));
     if (known.every(Boolean)) return known;
-    let r = await api('/api/library/resolve', { method: 'POST', body: { paths: wanted } });
-    if (r.outside?.length && offer) {
-      const dirs = [...new Set(r.outside.map(dirOf))];
-      const ok = await confirmDialog('Agregar a la biblioteca',
-        `Para ${action}, AXON tiene que indexar ${dirs.length === 1 ? 'la carpeta' : 'las carpetas'} ${dirs.map((d) => `«${prettyPath(d)}»`).join(', ')}. Los archivos no se mueven ni se modifican.`,
-        'Agregar y continuar');
-      if (!ok) return null;
-      for (const d of dirs) await api('/api/library/settings', { method: 'PUT', body: { addRoot: d } });
-      r = await api('/api/library/resolve', { method: 'POST', body: { paths: wanted } });
-      setTimeout(load, 1500);
-    }
+    const r = await api('/api/library/resolve', { method: 'POST', body: { paths: wanted } });
+    if (r.outside?.length) toast(`${r.outside.length === 1 ? 'Este archivo no se puede' : 'Estos archivos no se pueden'} usar con las herramientas (ubicación protegida)`, 'warn', '', 3500);
     mergeItems(r.items);
     const items = wanted.map((p) => pathIndex().get(p)).filter(Boolean);
     if (r.missing?.length) toast(`${r.missing.length} archivo${r.missing.length === 1 ? '' : 's'} ya no existe${r.missing.length === 1 ? '' : 'n'}`, 'warn', '', 3000);
-    if (!items.length && wanted.length) toast('Estos archivos no se pueden usar con las herramientas de la biblioteca', 'warn', '', 3500);
+    if (!items.length && wanted.length && !r.outside?.length) toast('Estos archivos no se pueden usar con las herramientas de la biblioteca', 'warn', '', 3500);
     return items;
   }
   const withItems = (action, run) => async (paths, ...rest) => {

@@ -119,14 +119,14 @@ try {
   await page.keyboard.press('Escape');
   await page.locator('#lib-modal.hidden').waitFor({ state: 'attached' });
   const resolved = await api('/api/library/resolve', { paths: [root + '/media/Fotos/rojo.png', root + '/explorer/nota.txt'] });
-  assert(resolved.data.items.length === 1 && resolved.data.outside.length === 1, 'Resolve did not split indexed and outside files');
+  assert(resolved.data.items.length === 2 && resolved.data.outside.length === 0, 'Resolve did not index files outside the library folders');
   await go('/archivos?' + new URLSearchParams({ path: root + '/explorer', view: 'list' }));
   await page.locator('.fm-row[data-name="nota.txt"]').click({ button: 'right' });
   await menu.getByText('Compartir link…', { exact: true }).click();
-  await page.locator('#confirm-modal[open]').waitFor({ state: 'attached' });
-  assert(((await page.locator('#confirm-modal').getAttribute('label')) || '').includes('biblioteca'), 'No offer to add the folder to the library');
+  await page.locator('#lib-modal:not(.hidden)').waitFor();
+  assert(await page.locator('#confirm-modal[open]').count() === 0, 'Sharing a file outside the library asked for confirmation');
   await page.keyboard.press('Escape');
-  checks.push('share and optimize reach library items; outside folders get an offer, not an error');
+  checks.push('share and optimize reach library items; files outside the library folders are indexed on demand, without prompts');
 
   // ---- 6. embedded gallery: same tab, same sidebar entry
   await page.locator('#fm-nav [data-nav-key="lib:all:"]').click();

@@ -27,7 +27,7 @@ try{
   await page.locator('#host-picker-path').fill(folder);await page.locator('#host-picker-location button[type=submit]').click();
   await page.waitForFunction(folder=>(document.querySelector('#host-picker-path') as HTMLInputElement).value===folder&&!document.querySelector('#host-picker-select')?.hasAttribute('disabled'),folder);
   await page.locator('#host-picker-select').click();
-  await page.waitForFunction(folder=>(document.querySelector('#fm-nav')?.textContent||'').includes('photos'),folder);
+  for(let i=0;i<40&&!((await request('/api/library')).data.roots||[]).includes(folder);i++)await page.waitForTimeout(250);
   await page.evaluate(async()=>{await fetch('/api/library/rescan?wait=1',{method:'POST'});});
   const library=(await request('/api/library')).data;
   assert(library.roots.includes(root+'/media')&&library.roots.includes(folder),'Add discarded existing roots');

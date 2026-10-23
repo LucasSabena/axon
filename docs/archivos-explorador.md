@@ -22,12 +22,12 @@ La cabecera muestra sólo lo necesario. Los filtros, el disco, la papelera, el e
 
 | Sección | Contenido |
 | --- | --- |
-| **Acceso rápido** | Inicio, carpetas habituales del usuario (Escritorio, Descargas, Documentos…) y todo lo marcado como «Acceso rápido» (carpetas o archivos). |
-| **Este equipo** | *Resumen del equipo* (carpetas y unidades con espacio libre), **Inicio** y cada disco como árbol de carpetas con carga bajo demanda. Un disco sin montar se monta desde acá. |
-| **Biblioteca** | Todo, Recientes, Favoritos, Por tipo, Transcripciones, Links compartidos, Colecciones, Duplicados y las carpetas indexadas con su cantidad de archivos. El engranaje abre los ajustes de la biblioteca. |
+| **Acceso rápido** | *Recientes* y *Favoritos* (lo último que pasó en el servidor) y todo lo marcado como «Acceso rápido» (carpetas o archivos). |
+| **Este equipo** | *Resumen del equipo* y cada disco (el del sistema incluido) como árbol de carpetas con carga bajo demanda. Un disco sin montar se monta desde acá. La carpeta abierta se despliega sola y las ramas abiertas sólo para llegar a ella se pliegan al cambiar de carpeta. |
+| **Galería y colecciones** | Galería (todos los medios), Links compartidos, Transcripciones, Colecciones y Duplicados. Tipo, color y etiqueta se filtran desde el botón **Filtros** de la galería. |
 | **Etiquetas** | Todo lo organizado, marcas (Favoritos, Me gusta, Guardados), colores y etiquetas con su cantidad. Abre una vista con los resultados de todo el servidor. |
 | **Nube** | Dropbox, Google Drive y OneDrive conectados (sólo lectura) y acceso a Conexiones. |
-| **Sistema** | Papelera, historial de transferencias, Almacenamiento y discos, agregar carpeta a la biblioteca. |
+| **Sistema** | Papelera, historial de transferencias, Almacenamiento y discos, agregar carpeta a la galería. |
 
 El panel se ajusta arrastrando el borde (flechas con foco, doble clic para restablecer), se oculta con `Ctrl/⌘ B` y en pantallas chicas es un cajón. Las carpetas del árbol aceptan arrastrar y soltar para mover o copiar (con `Ctrl` o `Alt`); las subidas desde el sistema también.
 
@@ -55,8 +55,7 @@ Las entradas muestran su atajo y los submenús se abren con `→`. El espacio va
 
 Compartir, optimizar, transcribir y el visor trabajan sobre los archivos de la biblioteca. Archivos entrega rutas y el servidor las resuelve con `POST /api/library/resolve`:
 
-- Si el archivo está dentro de una carpeta de la biblioteca, se indexa en el momento.
-- Si no, AXON pregunta si querés **agregar su carpeta a la biblioteca** y continúa la acción. Los archivos no se mueven ni se modifican.
+- Funciona con cualquier archivo que el explorador pueda abrir: si está en una carpeta de la galería se indexa en el momento y, si no, AXON recuerda **sólo ese archivo** (no indexa su carpeta ni pregunta nada). Quedan excluidos `/proc`, `/sys`, `/dev`, `/boot`, `.ssh`, `.gnupg`, `.aws` y los `.env`.
 - `.ts` y `.mts` sólo se tratan como video cuando ya están indexados, para no confundir código TypeScript con video.
 
 ## Barra de selección

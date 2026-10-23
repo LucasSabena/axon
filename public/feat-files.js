@@ -789,7 +789,6 @@
 
   // ---------- Column (Miller / Finder) view ----------
   function colHtml(col, i) {
-    const last = i === S.cols.length - 1;
     if (col.loading) {
       return `<div class="fm-col" data-col="${i}"><div class="fm-col-state">Cargando…</div></div>`;
     }
@@ -801,9 +800,6 @@
       (e) => (S.showHidden || !e.name.startsWith('.')) && AxonFileCatalog.matches(join(col.path,e.name),{query:q,color:S.catalogColor,tag:S.catalogTag,kind:S.catalogKind},e.type==='dir'?'dir':'file')
     );
     let html = '';
-    if (last && parentOf(S.cwd) !== '/') {
-      html += `<div class="fm-col-row fm-col-up" data-col="${i}" data-name=".." data-type="dir">${icon('arrow-up')}<span class="fm-col-name">..</span></div>`;
-    }
     html += rows
       .map((e) => {
         const sel = col.sel.has(e.name);
@@ -814,19 +810,22 @@
         </div>`;
       })
       .join('');
-    return `<div class="fm-col" data-col="${i}">${html || '<div class="fm-col-state">Carpeta vacía</div>'}</div>`;
+    return `<div class="fm-col${i === S.cols.length - 1 ? ' fm-col-last' : ''}" data-col="${i}">${html || '<div class="fm-col-state">Carpeta vacía</div>'}</div>`;
   }
+
+  const lastCol = () => { const all = el('fm-cols').querySelectorAll('.fm-col'); return all[all.length - 1] || null; };
 
   function renderCols() {
     setState('');
     const c = el('fm-cols');
-    c.innerHTML = S.cols.map((col, i) => colHtml(col, i)).join('');
+    c.innerHTML = S.cols.map((col, i) => colHtml(col, i)).join('') + '<div class="fm-col-fill" aria-hidden="true"><span>Elegí una carpeta o un archivo</span></div>';
+    refreshIcons(c);
     // Keep the deepest column in view.
     requestAnimationFrame(() => {
       if(window.AxonNavigation?.applying)return;
-      const last = c.lastElementChild;
+      const last = lastCol();
       if (last) last.scrollIntoView({ inline: 'end', block: 'nearest' });
-      const selRow = c.querySelector('.fm-col:last-child .fm-col-row.fm-selected');
+      const selRow = c.querySelector('.fm-col.fm-col-last .fm-col-row.fm-selected');
       if (selRow) selRow.scrollIntoView({ block: 'nearest' });
     });
   }
@@ -1774,7 +1773,7 @@
 
   // Keyboard-focus ring — visually distinct from selection (dashed outline).
   function markCursor() {
-    const scope = S.searchMode ? el('fm-tbody') : S.view === 'grid' ? el('fm-grid') : S.view === 'cols' ? el('fm-cols').lastElementChild : el('fm-tbody');
+    const scope = S.searchMode ? el('fm-tbody') : S.view === 'grid' ? el('fm-grid') : S.view === 'cols' ? lastCol() : el('fm-tbody');
     const rows = Array.from(scope?.querySelectorAll('[data-name]') || []);
     const current = S.cursor || rows[0]?.dataset.name;
     rows.forEach((row) => {
@@ -3001,7 +3000,7 @@
   // only focus, Ctrl+Space toggles the focused item, Shift extends ranges.
   function scrollCursorIntoView() {
     if (!S.cursor) return;
-    const scope = S.view === 'cols' ? el('fm-cols').lastElementChild : sec;
+    const scope = S.view === 'cols' ? lastCol() : sec;
     scope
       ?.querySelector(`[data-name="${CSS.escape(S.cursor)}"]`)
       ?.scrollIntoView({ block: 'nearest' });

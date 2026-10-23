@@ -15,8 +15,8 @@
   const read = () => { try { const v = JSON.parse(localStorage.getItem(PREFS_KEY)); return v && typeof v === 'object' && !Array.isArray(v) ? v : {}; } catch { return {}; } };
   const prefs = read();
   prefs.sections = prefs.sections && typeof prefs.sections === 'object' ? prefs.sections : {};
-  const save = () => { try { localStorage.setItem(PREFS_KEY, JSON.stringify({ ...prefs, expanded: [...expanded].slice(-200) })); } catch { /* private mode */ } };
-  const expanded = new Set(Array.isArray(prefs.expanded) ? prefs.expanded : ['lib:roots']);
+  const save = () => { try { localStorage.setItem(PREFS_KEY, JSON.stringify({ ...prefs, expanded: [...expanded].filter((k) => !autoOpened.has(k)).slice(-200) })); } catch { /* private mode */ } };
+  const expanded = new Set(Array.isArray(prefs.expanded) ? prefs.expanded : []);
   const mobile = matchMedia('(max-width: 768px)');
   const sectionOpen = (id, fallback = true) => (id in prefs.sections ? prefs.sections[id] : fallback);
 
@@ -166,7 +166,7 @@
   ];
   const MAX_CHILDREN = 400;
 
-  async function loadDirs(path, { force = false } = {}) {
+  async function loadDirs(path, { force = false, quiet = false } = {}) {
     const known = dirs.get(path);
     if (known && !force && (known.loading || Date.now() - known.ts < TTL)) return known.promise || known;
     const entry = known || { items: [], ts: 0 };
@@ -185,7 +185,7 @@
         entry.items = sorted.slice(0, MAX_CHILDREN).map((e) => ({ name: e.name, path: join(data.path || path, e.name) }));
         entry.real = data.path || path;
         entry.ts = Date.now();
-        if (changed) scheduleRender();
+        if (changed && !quiet) scheduleRender();
       } catch (err) {
         entry.error = err?.message || 'No se pudo leer la carpeta';
         entry.ts = Date.now() - TTL + 5000; // retry soon, not on every render
@@ -196,7 +196,7 @@
       }
       return entry;
     })();
-    scheduleRender();
+    if (!quiet) scheduleRender();
     return entry.promise;
   }
 
@@ -209,17 +209,19 @@
 
   function rootsList() {
     const roots = [];
-    if (homePath()) roots.push({ key: 'home', path: homePath(), label: 'Inicio', icon: 'home' });
     for (const v of uniqueVolumes()) roots.push({ key: 'v:' + v.id, path: v.path || '', label: v.name, icon: v.external ? 'usb' : 'hard-drive', volume: v });
+    // The system disk already contains the user's folder; only list it apart when no disk covers it.
+    const home = homePath();
+    if (home && !roots.some((r) => r.path && (r.path === '/' || home === r.path || home.startsWith(r.path + '/')))) roots.unshift({ key: 'home', path: home, label: 'Carpeta personal', icon: 'home' });
     return roots;
   }
   // The root a path belongs to: Inicio for anything under it, otherwise the deepest volume.
   function rootFor(path) {
     if (!path) return null;
-    const home = homePath();
-    if (home && (path === home || path.startsWith(home + '/'))) return 'home';
     const best = uniqueVolumes().filter((v) => v.path && (v.path === '/' || path === v.path || path.startsWith(v.path + '/'))).sort((a, b) => b.path.length - a.path.length)[0];
-    return best ? 'v:' + best.id : null;
+    if (best) return 'v:' + best.id;
+    const home = homePath();
+    return home && (path === home || path.startsWith(home + '/')) ? 'home' : null;
   }
 
   // ---------- Current location ----------
@@ -234,6 +236,8 @@
 
   // Open every ancestor of the current folder in its tree and bring the node into view.
   let revealToken = 0;
+  // Branches opened only to show the current folder: they fold again when you browse elsewhere, so the pane stays short and steady.
+  const autoOpened = new Set();
   async function reveal() {
     const here = where();
     if (here.mode !== 'files' || !here.path || here.mark || here.color || here.tag) { scheduleRender(); return; }
@@ -243,23 +247,34 @@
     if (!rootInfo?.path) { scheduleRender(); return; }
     const rel = here.path.slice(rootInfo.path === '/' ? 1 : rootInfo.path.length).split('/').filter(Boolean);
     let acc = rootInfo.path;
-    expanded.add(nodeKey(root, acc));
-    let entry = await loadDirs(acc);
+    const onPath = new Set([nodeKey(root, acc)]);
+    for (let i = 0, p = acc; i < rel.length; i++) { p = join(p, rel[i]); onPath.add(nodeKey(root, p)); }
+    for (const k of autoOpened) if (!onPath.has(k)) { expanded.delete(k); autoOpened.delete(k); }
+    const open = (k) => { if (!expanded.has(k)) { expanded.add(k); autoOpened.add(k); } };
+    open(nodeKey(root, acc));
+    let entry = await loadDirs(acc, { quiet: true });
     for (const seg of rel) {
       if (token !== revealToken) return;
       // A folder created after the cached listing is missing from it: re-read once before giving up.
-      if (!entry?.items?.some((c) => c.name === seg)) entry = await loadDirs(acc, { force: true });
+      if (!entry?.items?.some((c) => c.name === seg)) entry = await loadDirs(acc, { force: true, quiet: true });
       acc = join(acc, seg);
       if (acc !== here.path) {
-        expanded.add(nodeKey(root, acc));
-        entry = await loadDirs(acc);
+        open(nodeKey(root, acc));
+        entry = await loadDirs(acc, { quiet: true });
       }
     }
     if (token !== revealToken) return;
     // The current folder shows its own children too, so deeper navigation feels continuous.
+    if (rel.length) { open(nodeKey(root, here.path)); await loadDirs(here.path, { quiet: true }); if (token !== revealToken) return; }
     save();
     render();
-    nav.querySelector('.fm-nav-i.is-current')?.scrollIntoView({ block: 'nearest' });
+    // Scroll only the pane, and only when the folder is out of sight: the list must not jump while you browse.
+    const cur = nav.querySelector('.fm-nav-i.is-current');
+    if (cur) {
+      const box = nav.getBoundingClientRect(), r = cur.getBoundingClientRect();
+      if (r.top < box.top + 8) nav.scrollTop -= box.top + 8 - r.top;
+      else if (r.bottom > box.bottom - 8) nav.scrollTop += r.bottom - box.bottom + 8;
+    }
   }
 
   // ---------- Data for the library / tags sections ----------
@@ -336,7 +351,6 @@
 
   function quickAccess(here) {
     const rows = [];
-    const home = homePath();
     const seen = new Set();
     const add = (path, label, ic, extra = {}) => {
       if (!path || seen.has(path)) return;
@@ -346,11 +360,13 @@
         soft: here.mode === 'files' && !here.mark && !here.color && !here.tag && here.path === path, attrs: ` data-path="${esc(path)}" data-quick="1"${extra.pinned ? ' data-pinned="1"' : ''}${catalogColorAttr(path)}`,
       }));
     };
-    if (home) add(home, 'Inicio', 'home');
-    const homeEntry = home ? dirs.get(home) : null;
-    for (const [es, en, ic] of HOME_STD) {
-      const hit = homeEntry?.items.find((c) => c.name === es || c.name === en);
-      if (hit) add(hit.path, hit.name, ic);
+    const L = window.AxonLibrary;
+    if (L) {
+      const sum = L.summary();
+      const cur = (type) => here.mode === 'library' && here.type === type;
+      const lib = (type, label, ic, n) => rows.push(item({ key: 'lib:' + type + ':', href: url('library', { type }), icon: ic, label, count: sum.loaded ? n : null, current: cur(type) }));
+      lib('recent', 'Recientes', 'clock', sum.recent);
+      lib('fav', 'Favoritos', 'star', sum.favs);
     }
     const stats = catalogStats();
     for (const r of stats.pinned.slice(0, 14)) {
@@ -372,26 +388,17 @@
     const li = (type, label, ic, n, value = '', level = 0, extra = {}) => item({
       key: `lib:${type}:${value}`, href: url('library', value ? { type, value } : { type }), icon: ic, label, count: sum.loaded ? n : null, current: cur(type, value), level, ...extra,
     });
-    const kindsOpen = expanded.has('lib:kinds'), colsOpen = expanded.has('lib:cols'), rootsOpen = expanded.has('lib:roots');
-    const rootRows = sum.roots.map((r) => li('folder', baseName(r.path) + (r.upload ? ' (subidas)' : ''), r.upload ? 'inbox' : 'hard-drive', r.count, r.path, 1, { parent: 'lib:roots', title: r.path, drop: r.path, attrs: ` data-path="${esc(r.path)}"` }));
-    const kindRows = LIB_KINDS.filter(([k]) => sum.kinds[k]).map(([k, label, ic]) => li('kind', label, ic, sum.kinds[k], k, 1, { parent: 'lib:kinds' }));
+    const colsOpen = expanded.has('lib:cols');
     const colRows = sum.collections.map((c) => li('col', c.name, 'album', c.count, c.id, 1, { parent: 'lib:cols', attrs: ` data-collection="${esc(c.id)}"`, extra: `<button type="button" class="fm-nav-more" data-collection-menu="${esc(c.id)}" tabindex="-1" aria-label="Opciones de ${esc(c.name)}">${icon('more-horizontal')}</button>` }));
     const body = [
-      li('all', 'Todo', 'library', sum.total),
-      li('recent', 'Recientes', 'clock', sum.recent),
-      li('fav', 'Favoritos', 'star', sum.favs),
-      item({ key: 'lib:kinds', href: url('library', { type: 'all' }), icon: 'layout-grid', label: 'Por tipo', tree: true, open: kindsOpen, attrs: ' data-toggle-only="1"' }),
-      kindsOpen ? (kindRows.join('') || '<div class="fm-nav-note" style="--lvl:1">Todavía no hay archivos indexados</div>') : '',
-      li('tr', 'Transcripciones', 'captions', sum.transcripts),
+      li('all', 'Galería', 'images', sum.total),
       li('shares', 'Links compartidos', 'link', sum.shares),
+      li('tr', 'Transcripciones', 'captions', sum.transcripts),
       item({ key: 'lib:cols', href: url('library', { type: 'all' }), icon: 'album', label: 'Colecciones', count: sum.loaded ? sum.collections.length : null, tree: true, open: colsOpen, attrs: ' data-toggle-only="1"' }),
       colsOpen ? (colRows.join('') || '<div class="fm-nav-note" style="--lvl:1">Agrupá archivos de distintas carpetas sin moverlos</div>') : '',
       li('dupes', 'Duplicados', 'copy', null),
-      item({ key: 'lib:roots', href: url('library', { type: 'all' }), icon: 'folders', label: 'Carpetas', count: sum.roots.length || null, tree: true, open: rootsOpen, attrs: ' data-toggle-only="1"' }),
-      rootsOpen ? (rootRows.join('') || '<div class="fm-nav-note" style="--lvl:1">Agregá carpetas con el engranaje</div>') : '',
     ].join('');
-    const actions = `<button type="button" class="fm-nav-add" data-lib-manage tabindex="-1" title="Carpetas de la biblioteca y ajustes" aria-label="Carpetas de la biblioteca y ajustes">${icon('settings-2')}</button>`;
-    return section('library', 'Biblioteca', body, { actions });
+    return section('library', 'Galería y colecciones', body);
   }
 
   function tagsSection(here) {
@@ -431,7 +438,7 @@
       if (root.key === 'home') {
         const key = nodeKey('home', root.path), open = expanded.has(key), kids = dirs.get(root.path);
         rows.push(item({
-          key, href: url('files', { path: root.path }), icon: 'home', label: 'Inicio', tree: !kids || kids.loading || kids.items.length > 0, open, loading: Boolean(kids?.loading) && open, title: root.path, drop: root.path,
+          key, href: url('files', { path: root.path }), icon: 'home', label: 'Carpeta personal', tree: !kids || kids.loading || kids.items.length > 0, open, loading: Boolean(kids?.loading) && open, title: root.path, drop: root.path,
           current: here.mode === 'files' && !here.mark && !here.color && !here.tag && here.path === root.path && rootFor(here.path) === 'home', attrs: ` data-root="home" data-path="${esc(root.path)}"`,
         }));
         if (open) rows.push(treeRows('home', root.path, 1, here, key));
@@ -458,7 +465,7 @@
       item({ key: 'sys:trash', href: '#', icon: 'trash-2', label: 'Papelera', attrs: ' data-action="trash"' }),
       item({ key: 'sys:transfers', href: '#', icon: 'arrow-left-right', label: 'Transferencias', attrs: ' data-action="transfers"' }),
       item({ key: 'sys:disks', href: '/almacenamiento?view=disks', icon: 'hard-drive-download', label: 'Almacenamiento y discos' }),
-      L ? item({ key: 'sys:folders', href: '#', icon: 'folder-plus', label: 'Agregar carpeta a la biblioteca', attrs: ' data-action="lib-add"' }) : '',
+      L ? item({ key: 'sys:folders', href: '#', icon: 'folder-plus', label: 'Agregar carpeta a la galería', attrs: ' data-action="lib-add"' }) : '',
     ].join(''), { fallbackOpen: true });
   }
 
@@ -481,6 +488,7 @@
   // ---------- Interaction ----------
   function toggleNode(key, force) {
     const open = force ?? !expanded.has(key);
+    autoOpened.delete(key);
     if (open) expanded.add(key); else expanded.delete(key);
     save();
     const path = nav.querySelector(`[data-nav-key="${CSS.escape(key)}"]`)?.dataset.path;
@@ -758,7 +766,7 @@
   async function bootstrapPaths() {
     try {
       if (!homePath()) { const d = await api('/api/files'); fallbackHome = d.home || ''; }
-      if (homePath()) { expanded.add(nodeKey('home', homePath())); void loadDirs(homePath()); }
+      if (homePath()) void loadDirs(homePath(), { quiet: true });
       if (!volumesList().length) await FL.refreshVolumes();
     } catch { /* offline or signed out: the pane renders what it has */ }
     scheduleRender();
