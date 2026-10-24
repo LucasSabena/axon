@@ -1719,7 +1719,7 @@ let cmdkItems = [];
 const CMDK_SECTION_ICON = {
   dashboard:'house', ports:'plug', projects:'folder-git-2', docker:'container', domains:'globe',
   files:'folder-open', library:'images', terminal:'terminal', navegador:'globe', programs:'package',
-  store:'store', drop:'upload-cloud', metrics:'chart-line', logs:'scroll-text', ops:'heart-pulse',
+  store:'store', metrics:'chart-line', logs:'scroll-text', ops:'heart-pulse',
   scripts:'code', storage:'hard-drive', compose:'layers', agents:'bot', settings:'settings',
   backups:'archive', audit:'history', access:'plug', desktop:'monitor',
 };

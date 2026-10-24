@@ -20,7 +20,7 @@
   const storedRecent=storageRead('axon:recent-files:v1',[]);
   const recent=Array.isArray(storedRecent)?storedRecent.filter(r=>r && typeof r.url==='string' && /^\/(?!\/)/.test(r.url)):[];
   window.AxonRecent={clear(){recent.length=0;localContent();},add(entry){const index=recent.findIndex(r=>r.url===entry.url);if(index>=0)recent.splice(index,1);recent.unshift({...entry,t:Date.now()});recent.splice(20);try{localStorage.setItem('axon:recent-files:v1',JSON.stringify(recent));}catch{}}};
-  const sectionIcon={files:'folder-open',library:'images',agents:'bot',ports:'plug',projects:'folder-git-2',docker:'container',domains:'globe',terminal:'terminal',navegador:'globe',programs:'package',store:'store',drop:'upload-cloud',metrics:'chart-line',logs:'scroll-text',ops:'heart-pulse',scripts:'code',compose:'layers',settings:'settings',storage:'hard-drive',backups:'archive',audit:'history',access:'key-round',desktop:'monitor'};
+  const sectionIcon={files:'folder-open',library:'images',agents:'bot',ports:'plug',projects:'folder-git-2',docker:'container',domains:'globe',terminal:'terminal',navegador:'globe',programs:'package',store:'store',metrics:'chart-line',logs:'scroll-text',ops:'heart-pulse',scripts:'code',compose:'layers',settings:'settings',storage:'hard-drive',backups:'archive',audit:'history',access:'key-round',desktop:'monitor'};
   const eventIcon={alert:'triangle-alert',domain:'globe',file:'file',job:'list-checks',auth:'key-round',system:'server',info:'info',agent:'bot'};
   const navUrl=(s,p)=>window.AxonNavigation?.url?.(s,p)||'#';
   const safeUrl=(r)=>window.AxonNavigation?.sections?.[r?.section] ? navUrl(r.section,r.params) : null;

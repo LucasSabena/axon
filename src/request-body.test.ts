@@ -22,7 +22,7 @@ test('declared lengths cannot bypass actual byte bounds and small JSON remains a
 });
 
 test('public shares and pairing have small limits; chunked uploads remain streamed with their existing per-block bounds', async () => {
-  for (const route of ['/pair', '/s/id/unlock', '/s/id/activity', '/x/drop/id', '/api/onboarding/setup', '/api/auth/password']) expect(requestBodyLimit(route, 'POST')).toBe(8192);
+  for (const route of ['/pair', '/s/id/unlock', '/s/id/activity', '/api/onboarding/setup', '/api/auth/password']) expect(requestBodyLimit(route, 'POST')).toBe(8192);
   const app = new Hono(); let sameBody = false;
   const stream = new ReadableStream({ start(c) { c.enqueue(new Uint8Array([1, 2, 3])); c.close(); } });
   app.use('*', boundedRequestBody);
@@ -31,7 +31,6 @@ test('public shares and pairing have small limits; chunked uploads remain stream
   expect(sameBody).toBe(true); expect([...new Uint8Array(await response.arrayBuffer())]).toEqual([1, 2, 3]);
   for (const route of ['/api/files/upload/id', '/api/library/upload/id', '/api/v1/cloud/uploads/id']) expect(requestBodyLimit(route, 'PUT')).toBeNull();
   expect(requestBodyLimit('/api/library/upload/init', 'POST')).toBe(8 * 1024 * 1024);
-  expect(requestBodyLimit('/api/drop/file', 'POST')).toBeGreaterThan(50 * 1024 * 1024);
 });
 
 test('interrupted bodies fail visibly without invoking a mutation', async () => {

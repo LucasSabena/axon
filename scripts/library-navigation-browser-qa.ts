@@ -66,6 +66,6 @@ try{
     await page.waitForFunction(()=>document.querySelector('#fm-prev-next')?.hasAttribute('disabled')&&document.querySelector('#fm-prev-previous')?.hasAttribute('disabled'));
     if(width===390)await page.screenshot({path:output+'/mobile.png'});
   }
-  for(const route of ['/agentes','/drop','/biblioteca']){await go(route);assert(await page.locator('#tab-agents>.host-disks-panel,#tab-drop>.host-disks-panel,#tab-library>.host-disks-panel').count()===0,'Redundant disk panel');}
+  for(const route of ['/agentes','/biblioteca']){await go(route);assert(await page.locator('#tab-agents>.host-disks-panel,#tab-library>.host-disks-panel').count()===0,'Redundant disk panel');}
   assert(!errors.length,errors.join('; '));const report={ok:true,widths:[1440,768,390,320],checks:['external folder picker and indexing','preserve existing sources','deduplicate sources','invalid source rejection','visible viewer arrows','keyboard navigation','queue boundaries and active filters','descending sort','mobile sections dismissal','no horizontal overflow','no redundant disk panels'],errors};await writeFile(output+'/report.json',JSON.stringify(report,null,2));console.log(JSON.stringify(report));
 }finally{await browser.close();}

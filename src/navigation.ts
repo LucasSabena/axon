@@ -14,6 +14,8 @@ export function registerNavigationRoutes(app: Hono): void {
     await next();
   });
   for (const alias of ['/respaldos','/respaldos/']) app.get(alias, async(c,next)=>{c.header('Cache-Control','private, no-store');return shell(c,next);});
+  // Drop was removed; its device list lives in Configuración → Sesiones.
+  for (const old of ['/drop','/drop/']) app.get(old, c => c.redirect('/configuracion?section=sessions', 301));
   for (const [pathname] of Object.values(SECTIONS) as [string, string][]) {
     app.get(pathname, async (c, next) => { c.header('Cache-Control', 'private, no-store'); return shell(c, next); });
     if (pathname !== '/') app.get(pathname + '/', async (c, next) => { c.header('Cache-Control', 'private, no-store'); return shell(c, next); });

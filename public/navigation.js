@@ -1,4 +1,4 @@
-import { SECTIONS, readRoute, routeUrl, readStored } from './navigation-model.js?v=7cdeb78a13bc';
+import { SECTIONS, readRoute, routeUrl, readStored } from './navigation-model.js?v=3c0373ac4cf5';
 
 const actors = new Map();
 let saved = {};

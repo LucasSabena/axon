@@ -5,7 +5,7 @@
     ['Trabajo', ['projects','files','agents']],
     ['Servidor', ['docker','ports','compose','domains','storage','backups']],
     ['Salud', ['ops','metrics','logs','audit']],
-    ['Herramientas', ['terminal','navegador','desktop','scripts','drop','access']],
+    ['Herramientas', ['terminal','navegador','desktop','scripts','access']],
     ['Aplicaciones', ['programs','store']],
   ];
   let collapsed = {};

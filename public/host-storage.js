@@ -88,8 +88,7 @@
   const fields={
     'project-edit-cwd':{title:'Carpeta del proyecto'},'settings-scan-dirs':{title:'Buscar proyectos en esta carpeta',append:true},
     'lst-roots':{title:'Agregar carpeta a Biblioteca',append:true},'lst-up':{title:'Carpeta de subidas',writable:true},
-    'backup-repository':{title:'Disco para guardar respaldos',suffix:'/AXON-Respaldos',writable:true},'agf-agent-dir':{title:'Carpeta de configuración del agente'},'drop-saveto':{title:'Guardar en esta carpeta',writable:true},
-    'drop-serve-path':{title:'Elegir archivo para compartir',mode:'file'}
+    'backup-repository':{title:'Disco para guardar respaldos',suffix:'/AXON-Respaldos',writable:true},'agf-agent-dir':{title:'Carpeta de configuración del agente'}
   };
   const bound=new WeakSet();
   function bind(){

@@ -2,7 +2,7 @@ export const SECTIONS = {
   dashboard: ['/', 'Inicio'], ports: ['/puertos', 'Puertos'], projects: ['/proyectos', 'Proyectos'],
   docker: ['/docker', 'Docker'], domains: ['/dominios', 'Dominios'], files: ['/archivos', 'Archivos'],
   library: ['/biblioteca', 'Archivos'], terminal: ['/terminal', 'Terminal'], navegador: ['/navegador', 'Navegador'],
-  programs: ['/programas', 'Programas'], store: ['/tienda', 'Tienda'], drop: ['/drop', 'Drop'], metrics: ['/metricas', 'Métricas'],
+  programs: ['/programas', 'Programas'], store: ['/tienda', 'Tienda'], metrics: ['/metricas', 'Métricas'],
   logs: ['/logs', 'Logs'], ops: ['/salud', 'Salud'], scripts: ['/scripts', 'Scripts'],
   storage: ['/almacenamiento', 'Almacenamiento'], compose: ['/compose', 'Compose'], agents: ['/agentes', 'Agentes'], bots: ['/bots', 'Bots'], settings: ['/configuracion', 'Configuración'],
   backups: ['/backups', 'Backups'], audit: ['/historial', 'Historial'], access: ['/integraciones', 'Integraciones'], desktop: ['/escritorio', 'Escritorio'],

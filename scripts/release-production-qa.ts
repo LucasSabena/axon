@@ -30,7 +30,7 @@ try{
   checks.push('Public HTTPS and authenticated disks/catalog/sessions/software/compose endpoints');
   for(const width of [1440,768,390,320]){
     await page.setViewportSize({width,height:1000});
-    for(const [route,tab] of [['/biblioteca','library'],['/agentes','agents'],['/drop','drop'],['/archivos','files']]){
+    for(const [route,tab] of [['/biblioteca','library'],['/agentes','agents'],['/archivos','files']]){
       await go(route);await page.locator('#tab-'+tab+'.active').waitFor();
       assert(await page.locator('#tab-'+tab+'>.host-disks-panel').count()===0,'Redundant disk panel '+route);
       assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Overflow '+route+' '+width);

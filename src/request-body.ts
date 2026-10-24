@@ -4,10 +4,9 @@ import type { MiddlewareHandler } from 'hono';
 export function requestBodyLimit(pathname: string, method: string): number | null {
   if (['GET', 'HEAD', 'OPTIONS'].includes(method)) return null;
   if (method === 'PUT' && /^\/api\/(?:files\/upload\/[^/]+|library\/upload\/[^/]+|v1\/cloud\/uploads\/[^/]+)$/.test(pathname)) return null;
-  if (pathname === '/api/drop/file') return 50 * 1024 * 1024 + 65536;
   if (/^\/api\/software\/icons\/[^/]+\/upload$/.test(pathname)) return 2 * 1024 * 1024 + 65536;
   if (pathname.startsWith('/api/v1/')) return 16384;
-  if (pathname === '/pair' || /^\/(?:s|x\/drop)\//.test(pathname) ||
+  if (pathname === '/pair' || /^\/s\//.test(pathname) ||
       /^\/api\/(?:login|auth\/|onboarding\/setup)/.test(pathname)) return 8192;
   if (pathname.startsWith('/api/')) return 8 * 1024 * 1024;
   return null;

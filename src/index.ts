@@ -96,7 +96,6 @@ import { registerServerBrowserRoutes } from './server-browser';
 import { registerFanRoutes, fixtureFanRunner } from './fans';
 import { registerPowerRoutes, fixturePowerRunner } from './power';
 import { registerUsbRoutes, fixtureUsbRunner } from './usb';
-import { registerDropRoutes, startDropSweeper, dropPathReferences } from './drop';
 import { registerLibraryRoutes, libraryHostGuard, libraryFileOperation } from './library';
 import { registerSessionRoutes, recordSession, sessionIdForToken, sessionIdFromRequest, isRevoked, touchSession, revokeSession, listSessions, onSessionRevoked } from './sessions';
 import { registerOnboardingPublic, registerOnboardingRoutes } from './onboarding';
@@ -516,7 +515,7 @@ app.get('/api/health', c => {
 });
 app.use('/api/*', requireAuth);
 app.use('/api/*',async(c,next)=>{
-  if(!['GET','HEAD'].includes(c.req.method)&&/^\/api\/(files|library|projects|compose|drop|agents)(?:\/|$)/.test(c.req.path))await hostVolumes.snapshot(true);
+  if(!['GET','HEAD'].includes(c.req.method)&&/^\/api\/(files|library|projects|compose|agents)(?:\/|$)/.test(c.req.path))await hostVolumes.snapshot(true);
   await next();
 });
 app.use('/api/*',auditMutations(platformStore,(pathname,resource) => {
@@ -1854,7 +1853,7 @@ fileTransfers.onReview(async(mode,from,to)=>{
     ...getProjects().map(p=>({title:`Proyecto: ${p.name}`,path:p.cwd,tree:true,detail:'El proyecto seguirá configurado con la ruta de origen. Moverlo puede impedir iniciarlo o abrir su terminal; actualizá su carpeta en Proyectos después del movimiento.'})),
     ...config.settings.scanDirs.map(p=>({title:'Búsqueda de proyectos',path:p,detail:'La búsqueda automática seguirá usando el origen. Actualizá esta carpeta en Configuración después del movimiento.'})),
     ...Object.keys(config.composeNotes||{}).map(p=>({title:'Compose con notas guardadas',path:p,detail:'Las notas guardadas seguirán asociadas al archivo de origen. Los servicios que usan rutas de este Compose pueden necesitar ajustes.'})),
-    ...agentPathReferences(),...dropPathReferences(),
+    ...agentPathReferences(),
     ...platformBackups.policies().flatMap(p=>[...platformBackups.sources(p).map(source=>({title:`Backup: ${p.name} · origen`,path:source,tree:true,detail:'El backup seguirá buscando la carpeta configurada. Actualizá su origen después del movimiento.'})),...platformBackups.targets(p).filter(t=>t.path).map(t=>({title:`Backup: ${p.name} · ${t.label}`,path:t.path,tree:true,detail:'Este destino contiene copias de seguridad. Conservar su ubicación permite recuperar las versiones anteriores.'}))])
   ];
   return includeConfiguredReferences(review,from,to,references);
@@ -1869,7 +1868,6 @@ registerAlertRoutes(app);
 registerScriptRoutes(app);
 registerLogsRoutes(app);
 registerMetricsRoutes(app);
-registerDropRoutes(app);
 registerFileCatalogRoutes(app,fileCatalog);
 registerLibraryRoutes(app,fileTransfers,fileCatalog);
 registerSessionRoutes(app);
@@ -1939,7 +1937,6 @@ registerServerBrowserRoutes(app, { fail, fixture: !!maintenanceQaRoot });
 
 startAlertLoop();
 startScriptScheduler();
-startDropSweeper();
 if (!maintenanceQaRoot) platformBackups.scheduler();
 
 // Warm the expensive caches in the background so the first Programs/Agents
