@@ -92,6 +92,7 @@ import { registerScriptRoutes, startScriptScheduler } from './scripts';
 import { parseLogsSrc, startLogsSocket, stopLogsSocket, registerLogsRoutes } from './logs';
 import type { LogsWsData } from './logs';
 import { registerMetricsRoutes } from './metrics';
+import { registerServerBrowserRoutes } from './server-browser';
 import { registerFanRoutes, fixtureFanRunner } from './fans';
 import { registerPowerRoutes, fixturePowerRunner } from './power';
 import { registerUsbRoutes, fixtureUsbRunner } from './usb';
@@ -1934,49 +1935,7 @@ registerComposeRoutes(app, {
   },
 });
 
-// Open a URL inside the embedded server-side Chromium via its CDP endpoint.
-// The jlesage image publishes remote debugging on 127.0.0.1:9222 when
-// CHROMIUM_REMOTE_DEBUGGING=1 — this only opens tabs in the running session.
-app.get('/api/browser/status', async c => {
-  if (maintenanceQaRoot) return c.json({ok:true,available:false,fixture:true});
-  const response = await fetch('http://127.0.0.1:5800/', {signal:AbortSignal.timeout(4000)}).catch(() => null);
-  await response?.body?.cancel().catch(() => {});
-  return c.json({ok:true, available:!!response?.ok});
-});
-app.post('/api/browser/open', async (c) => {
-  const body = await c.req.json<{ url?: string }>().catch(() => ({} as { url?: string }));
-  const raw = (body.url || '').trim();
-  let u: URL;
-  try {
-    u = new URL(raw);
-  } catch {
-    return fail(c, 400, 'URL inválida');
-  }
-  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
-    return fail(c, 400, 'Solo se pueden abrir URLs http/https');
-  }
-  // The embedded Chromium shares the host network (network_mode: host), so
-  // localhost URLs resolve to the server's own services directly.
-  const res = await fetch(`http://127.0.0.1:9222/json/new?${encodeURIComponent(u.toString())}`, {
-    method: 'PUT',
-    signal: AbortSignal.timeout(5000),
-  }).catch(() => null);
-  if (!res || !res.ok) {
-    return fail(c, 502, 'El navegador del servidor no responde', {
-      detail: res ? `CDP ${res.status}` : 'sin conexión a 127.0.0.1:9222',
-    });
-  }
-  // json/new opens the target in the background — activate it so the VNC
-  // display switches to the new tab, otherwise it looks like nothing happened.
-  const target = (await res.json().catch(() => ({}))) as { id?: string };
-  if (target.id) {
-    await fetch(`http://127.0.0.1:9222/json/activate/${target.id}`, {
-      method: 'PUT',
-      signal: AbortSignal.timeout(3000),
-    }).catch(() => {});
-  }
-  return c.json({ ok: true });
-});
+registerServerBrowserRoutes(app, { fail, fixture: !!maintenanceQaRoot });
 
 startAlertLoop();
 startScriptScheduler();

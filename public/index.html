@@ -12,7 +12,7 @@
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>AXON</title>
-  <link rel="stylesheet" href="/app.css?v=a357a4183760">
+  <link rel="stylesheet" href="/app.css?v=baf95f81d25b">
   <link rel="axon-feature" data-axon-style="/document-viewer.css?v=edeb44e4d558">
   <link rel="axon-feature" data-axon-style="/file-catalog.css?v=96f0317dffb4">
   <link rel="axon-feature" data-axon-style="/feat-files.css?v=1ad456cca720">
@@ -396,14 +396,18 @@
               <div class="section-header">
                 <h2>Navegador del servidor</h2>
                 <div class="section-actions">
+                  <button id="browser-manage-toggle" class="btn-secondary" aria-expanded="false" aria-controls="browser-manage"><i data-lucide="sliders-horizontal" class="lucide-icon"></i> Gestionar</button>
                   <button id="browser-reload" class="btn-secondary"><i data-lucide="rotate-cw" class="lucide-icon"></i> Recargar</button>
                   <button id="browser-open-ext" class="btn-secondary"><i data-lucide="external-link" class="lucide-icon"></i> Abrir aparte</button>
                 </div>
               </div>
-              <p class="listener-note browser-note">Chrome real corriendo en el servidor — los localhost, las cookies y las sesiones son del servidor. Todo lo que veas acá ocurre allá.</p>
-              <div class="browser-frame-wrap">
-                <div id="browser-state" class="browser-state" role="status" aria-live="polite"></div>
-                <iframe id="browser-frame" title="Navegador del servidor" allow="clipboard-read; clipboard-write"></iframe>
+              <div id="browser-bar" class="browser-bar" aria-live="polite"></div>
+              <div class="browser-body">
+                <div class="browser-frame-wrap">
+                  <div id="browser-state" class="browser-state" role="status" aria-live="polite"></div>
+                  <iframe id="browser-frame" title="Navegador del servidor" allow="clipboard-read; clipboard-write"></iframe>
+                </div>
+                <aside id="browser-manage" class="browser-manage" hidden></aside>
               </div>
             </section>
             <section id="tab-backups" class="tab-content"><div class="section-header"><div><h2>Backups</h2><p class="section-sub">Copias de tus archivos, listas para cuando las necesites.</p></div></div><div id="backup-content" class="backups-view"></div></section>
@@ -707,7 +711,7 @@
   <script type="text/axon-feature" data-src="/terminal-tools.js?v=dfff049a9a58"></script>
   <link rel="stylesheet" href="/software.css?v=32d85f7b0eab">
   <script defer src="/context-menu.js?v=73f8c703ea03"></script>
-  <script defer src="/app.js?v=5618b82d3ee8"></script>
+  <script defer src="/app.js?v=fe970aba774e"></script>
   <script defer src="/software.js?v=81b842c0161a"></script>
   <script defer src="/onboarding.js?v=8e8516b302ef"></script>
   <link rel="stylesheet" href="/host-storage.css?v=64594bea1d0d">
@@ -751,7 +755,7 @@
   <script type="text/axon-feature" data-src="/session-fans.js?v=ecba07e0b829"></script>
   <script type="text/axon-feature" data-src="/session-power.js?v=cf0b070d8148"></script>
   <script type="text/axon-feature" data-src="/settings.js?v=37b54565f28d"></script>
-  <script type="text/axon-feature" data-src="/view-controls.js?v=32eb2a959359"></script>
+  <script type="text/axon-feature" data-src="/view-controls.js?v=f2f5b1aa17a3"></script>
   <script type="text/axon-feature" data-src="/platform.js?v=f0bc7e0fbbcc"></script>
   <script type="text/axon-feature" data-src="/backups.js?v=ff03c4b00250"></script>
   <script type="text/axon-feature" data-src="/access.js?v=908d3590932e"></script>

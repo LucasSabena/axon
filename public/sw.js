@@ -1,5 +1,5 @@
 // Build-time stamp; only versioned vendor assets are cached per release.
-const CACHE = 'axon-6960669ef0f5';
+const CACHE = 'axon-052ab0c5a3da';
 
 // A new release stays "waiting" until the user accepts the reload bar —
 // swapping the shell mid-session could strand open edits and jobs.

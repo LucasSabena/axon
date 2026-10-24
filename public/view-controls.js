@@ -54,7 +54,7 @@
     if(target){const o=new MutationObserver(()=>{progress.classList.add('hidden');o.disconnect();});o.observe(target,{childList:true});setTimeout(()=>{o.disconnect();progress.classList.add('hidden');},90_000);}
   });
   const browserForm=document.createElement('form');browserForm.className='view-tools';browserForm.innerHTML='<input type="url" class="filter-input" aria-label="URL para abrir en el servidor" placeholder="https://… o http://localhost:puerto" required><button class="btn-primary" type="submit">Abrir en el servidor</button>';
-  document.querySelector('#tab-navegador .browser-note').after(browserForm);
+  document.querySelector('#browser-bar').after(browserForm);
   browserForm.addEventListener('submit',e=>{e.preventDefault();AxonUI.busy(browserForm.querySelector('button'),()=>openInServerBrowser(browserForm.querySelector('input').value));});
   refreshIcons();
 })();

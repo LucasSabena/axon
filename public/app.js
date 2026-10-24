@@ -2310,6 +2310,87 @@ window.openInServerBrowser = openInServerBrowser;
 $('#browser-open-ext').addEventListener('click', () => window.open(browserUrl, '_blank', 'noopener'));
 $('#browser-reload').addEventListener('click', e => AxonUI.busy(e.currentTarget, async () => { unloadBrowser(true); await loadBrowser(); }));
 
+// Estado y gestión: pestañas abiertas, agentes enganchados por CDP, el Chrome
+// de Playwright de agentes y el registro de limpieza automática.
+let browserInfoTimer = 0;
+const fmtAge = (sec) => sec < 3600 ? `${Math.max(1, Math.round(sec / 60))} min` : sec < 86400 ? `${(sec / 3600).toFixed(1)} h` : `${(sec / 86400).toFixed(1)} días`;
+const unitLine = (u) => !u ? 'no instalado' : u.active !== 'active' ? (u.active === 'inactive' ? 'apagado' : u.active)
+  : [u.cpuPct != null && `CPU ${u.cpuPct}%`, u.memoryMb != null && `RAM ${u.memoryMb >= 1024 ? (u.memoryMb / 1024).toFixed(1) + ' GB' : u.memoryMb + ' MB'}`].filter(Boolean).join(' · ') || 'activo';
+
+async function refreshBrowserInfo() {
+  clearTimeout(browserInfoTimer);
+  if (activeTabName !== 'navegador' || document.hidden) return;
+  let info;
+  try { info = await api('/api/browser/info'); } catch { info = null; }
+  if (activeTabName !== 'navegador') return;
+  browserInfoTimer = setTimeout(refreshBrowserInfo, 5000);
+  const bar = $('#browser-bar'), panel = $('#browser-manage');
+  if (!info || info.fixture) { bar.textContent = ''; return; }
+  const b = info.browser, tabs = info.tabs || [], clients = info.clients || [];
+  const stale = clients.filter((c) => c.ageSec > 3600);
+  bar.innerHTML = `
+    <span class="browser-chip" data-state="${b?.active === 'active' ? 'ok' : 'error'}">${icon('globe')} Chrome · ${esc(unitLine(b))}</span>
+    <span class="browser-chip">${icon('layers')} ${tabs.length} ${tabs.length === 1 ? 'pestaña' : 'pestañas'}</span>
+    <span class="browser-chip" data-state="${stale.length ? 'warn' : ''}">${icon('bot')} ${clients.length ? `${clients.length} ${clients.length === 1 ? 'agente conectado' : 'agentes conectados'}` : 'ningún agente conectado'}</span>
+    <span class="browser-chip">${icon('flask-conical')} Playwright de agentes · ${esc(unitLine(info.agents))}</span>`;
+  if (panel.hidden) { refreshIcons(bar); return; }
+  panel.innerHTML = `
+    <section>
+      <h3>Pestañas abiertas</h3>
+      ${tabs.length ? `<ul class="browser-list">${tabs.map((t) => `
+        <li><div><strong>${esc(t.title || 'Sin título')}</strong><small>${esc(t.url)}</small></div>
+        <button class="bk-icon-button" data-close-tab="${esc(t.id)}" title="Cerrar pestaña" aria-label="Cerrar ${esc(t.title || t.url)}">${icon('x')}</button></li>`).join('')}</ul>` : '<p class="browser-empty">No hay pestañas abiertas.</p>'}
+    </section>
+    <section>
+      <h3>Agentes conectados</h3>
+      ${clients.length ? `<ul class="browser-list">${clients.map((c) => `
+        <li><div><strong>${esc(c.label)}</strong><small>${esc(c.detail)} · conectado hace ${fmtAge(c.ageSec)}</small></div>
+        <button class="btn-secondary" data-disconnect="${c.pid}">Desconectar</button></li>`).join('')}</ul>`
+        : '<p class="browser-empty">Ningún agente está usando el navegador ahora.</p>'}
+      <p class="browser-hint">Las sesiones de playwright-cli sin uso por 30 minutos se cierran solas.</p>
+    </section>
+    <section>
+      <h3>Acciones</h3>
+      <div class="browser-actions">
+        <button class="btn-secondary" data-browser-action="cleanup">${icon('sparkles')} Limpiar ahora</button>
+        <button class="btn-secondary" data-browser-action="agents">${icon('flask-conical')} Reiniciar Playwright de agentes</button>
+        <button class="btn-secondary" data-browser-action="browser">${icon('power')} Reiniciar navegador</button>
+      </div>
+      <p class="browser-hint">Reiniciar cierra Chrome ordenado, así no se pierde la sesión de Google.</p>
+    </section>
+    <section>
+      <h3>Limpieza automática</h3>
+      ${(info.log || []).length ? `<ol class="browser-log">${info.log.map((l) => `<li>${esc(l)}</li>`).join('')}</ol>` : '<p class="browser-empty">Todavía no hizo falta limpiar nada.</p>'}
+    </section>`;
+  refreshIcons(bar); refreshIcons(panel);
+}
+
+$('#browser-manage-toggle').addEventListener('click', (e) => {
+  const panel = $('#browser-manage');
+  panel.hidden = !panel.hidden;
+  e.currentTarget.setAttribute('aria-expanded', String(!panel.hidden));
+  refreshBrowserInfo();
+});
+$('#browser-manage').addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  const run = (path, body, done) => AxonUI.busy(btn, async () => {
+    try { await api(path, { method: 'POST', body }); if (done) toast(done, 'success', '', 3000); }
+    catch (err) { toast(err.message || 'No se pudo completar', 'error', err.detail || '', 5000); }
+    await refreshBrowserInfo();
+  });
+  if (btn.dataset.closeTab) return run('/api/browser/tabs/close', { id: btn.dataset.closeTab });
+  if (btn.dataset.disconnect) return run('/api/browser/clients/disconnect', { pid: Number(btn.dataset.disconnect) }, 'Agente desconectado');
+  const action = btn.dataset.browserAction;
+  if (action === 'cleanup') return run('/api/browser/cleanup', {}, 'Limpieza hecha');
+  if (action === 'agents') return confirmDialog('¿Reiniciar Playwright de agentes?', 'Se cierra el Chrome headless que usan los agentes. Un agente que lo esté usando ahora pierde su página y tiene que volver a abrirla.', 'Reiniciar')
+    .then((ok) => ok && run('/api/browser/restart', { target: 'agents' }, 'Playwright de agentes reiniciado'));
+  if (action === 'browser') return confirmDialog('¿Reiniciar el navegador?', 'Chrome se cierra guardando todo y vuelve a abrir con las cuentas iniciadas. Las pestañas abiertas se cierran y los agentes conectados se desconectan.', 'Reiniciar')
+    .then((ok) => ok && run('/api/browser/restart', { target: 'browser' }, 'Navegador reiniciado').then(() => { unloadBrowser(true); loadBrowser(); }));
+});
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshBrowserInfo(); });
+document.addEventListener('axon:section', (e) => { if (e.detail === 'navegador') refreshBrowserInfo(); });
+
 // ---------- QR pairing ----------
 
 $('#pair-btn').addEventListener('click', async () => {

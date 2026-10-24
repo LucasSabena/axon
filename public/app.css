@@ -922,9 +922,37 @@ summary { cursor: pointer; color: var(--text-dim); font-size: 0.83rem; padding: 
 .term-page .xterm { height: 100%; }
 
 /* Embedded server browser */
-.browser-note { margin: 0 0 10px; }
+.browser-bar { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; min-height: 26px; }
+.browser-chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; font-size: 12px;
+  border: 1px solid var(--border); border-radius: 999px; color: var(--text-dim); background: var(--bg-panel);
+}
+.browser-chip .lucide-icon { width: 14px; height: 14px; }
+.browser-chip[data-state=ok] { color: var(--text); }
+.browser-chip[data-state=warn] { color: var(--warn); border-color: currentColor; }
+.browser-chip[data-state=error] { color: var(--danger); border-color: currentColor; }
+.browser-body { flex: 1; min-height: 0; display: flex; gap: 10px; }
 .browser-frame-wrap {
-  flex: 1; min-height: 0; overflow: hidden; background: var(--bg-canvas, #000);
+  flex: 1; min-width: 0; min-height: 0; overflow: hidden; background: var(--bg-canvas, #000);
+}
+.browser-manage {
+  width: 360px; flex: none; overflow-y: auto; display: grid; align-content: start; gap: 18px;
+  padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-panel); font-size: 13px;
+}
+.browser-manage[hidden] { display: none; }
+.browser-manage h3 { font-size: 13px; font-weight: 600; margin: 0 0 8px; }
+.browser-list { list-style: none; margin: 0; padding: 0; display: grid; }
+.browser-list li { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--border); }
+.browser-list li > div { flex: 1; min-width: 0; }
+.browser-list strong, .browser-list small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.browser-list small, .browser-hint, .browser-empty { color: var(--text-dim); font-size: 12px; }
+.browser-hint, .browser-empty { margin: 6px 0 0; }
+.browser-actions { display: grid; gap: 6px; }
+.browser-actions button { justify-content: flex-start; display: inline-flex; align-items: center; gap: 8px; }
+.browser-log { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; font-size: 12px; color: var(--text-dim); overflow-wrap: anywhere; }
+@media (max-width: 900px) {
+  .browser-body { flex-direction: column; }
+  .browser-manage { width: auto; max-height: 45vh; order: -1; }
 }
 #tab-navegador.tab-content.active {
   display: flex; flex-direction: column;
