@@ -26,6 +26,7 @@ AGENTS = {
     'claude': {'bin': 'claude', 'root': '.claude', 'env': 'CLAUDE_CONFIG_DIR',
                'shared': ['settings.json', 'CLAUDE.md', 'skills', 'plugins']},
 }
+SWITCH_MODES = ('safe', 'wait', 'force')
 class Failure(Exception):
     def __init__(self, message, status=400): super().__init__(message); self.status = status
 
@@ -200,6 +201,30 @@ class Store:
         try: tmp.symlink_to(target); os.replace(tmp, native)
         finally:
             if tmp.is_symlink(): tmp.unlink()
+    def begin_switch(self, state, mode):
+        """Remember the account to restore if the server switch cannot be applied."""
+        if mode not in SWITCH_MODES: raise Failure('Modo de cambio inválido')
+        state['switch'] = {'from': (state.get('switch') or {}).get('from') or state['active'], 'mode': mode}
+    def revert_switch(self, d):
+        """Restore the account selected before an unapplied server switch.
+
+        Skipped once the credential link already moved: the desktop may then
+        be running the new account and must not be pulled back underneath it.
+        """
+        state = d['agents']['codex']; prev = (state.pop('switch', None) or {}).get('from')
+        if not prev or prev == state['active'] or not any(p['id'] == prev for p in state['profiles']): return None
+        link = self.home / '.codex/auth.json'
+        if not link.is_symlink() or Path(os.readlink(link)) != self.profile_home('codex', prev) / 'auth.json': return None
+        state['active'] = prev
+        return prev
+    def settle_locked(self, ident, revert=False):
+        d = self.load(); state = d['agents']['codex']
+        if state['active'] != ident: return None
+        prev = self.revert_switch(d) if revert else state.pop('switch', None) and None
+        self.save(d)
+        return prev
+    def settle(self, ident, revert=False):
+        with self.lock(): return self.settle_locked(ident, revert)
     def enable_server(self, d):
         state = d['agents']['codex']
         if state.get('serverWide'): return
@@ -265,6 +290,7 @@ class Store:
                 if action == 'activate':
                     if not self.identity(agent, p['id'])['connected']: raise Failure('Conectá esta cuenta antes de activarla', 409)
                     if self.login_busy(agent, p['id']): raise Failure('Esperá a que termine el login', 409)
+                    if state.get('serverWide'): self.begin_switch(state, req.get('mode') or 'safe')
                     state['active'] = p['id']
                 else:
                     name = label(req.get('label'))
@@ -274,6 +300,11 @@ class Store:
                 if agent != 'codex': raise Failure('La conexión de escritorio sólo aplica a Codex')
                 if not self.identity(agent, state['active'])['connected']: raise Failure('Conectá la cuenta antes de habilitarla en el servidor', 409)
                 self.enable_server(d)
+                self.begin_switch(state, req.get('mode') or 'safe')
+            elif action == 'cancel-switch':
+                if agent != 'codex': raise Failure('La conexión de escritorio sólo aplica a Codex')
+                self.revert_switch(d)
+                atomic(self.root / 'desktop-status.json', json.dumps({'state': 'idle', 'selectedId': state['active'], 'updatedAt': int(time.time())}) + '\n')
             elif action == 'delete':
                 p = self.profile(d, agent, req.get('id'))
                 if p['id'] == 'current': raise Failure('La cuenta actual no se puede eliminar', 409)

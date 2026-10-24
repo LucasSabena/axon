@@ -15,7 +15,7 @@
       host.innerHTML = '<p class="listener-note" role="status">Cargando cuentas…</p>';
       // Every poll spawns a full python worker (~900/hour at 4s). Poll fast only
       // while a login is in progress; sleep entirely with the tab hidden.
-      const pollMs = () => (data?.profiles?.some((p) => p.loginBusy) ? 5_000 : 30_000);
+      const pollMs = () => (data?.profiles?.some((p) => p.loginBusy) || ['pending', 'restarting'].includes(data?.desktop?.state) ? 5_000 : 30_000);
       const onVisible = () => {
         if (document.hidden) return;
         document.removeEventListener('visibilitychange', onVisible);
@@ -65,8 +65,9 @@
           else {
             data = result; signature = JSON.stringify(data); editing = false;
             if (alive()) render();
-            if (action === 'activate' || action === 'enable-server') { toast(`Cuenta seleccionada${data.scope === 'server' ? ' para el servidor' : ' para la terminal'}: ${data.profiles.find(p => p.active)?.label}`, 'ok'); document.dispatchEvent(new Event('axon:accounts-changed')); }
+            if (action === 'activate' || action === 'enable-server') { toast(data.scope === 'server' ? 'Aplicando la cuenta al servidor… si hay tareas en curso, el panel te avisa' : `Cuenta seleccionada para la terminal: ${data.profiles.find(p => p.active)?.label}`, 'ok'); document.dispatchEvent(new Event('axon:accounts-changed')); }
             if (action === 'delete') toast('Cuenta eliminada', 'ok');
+            if (action === 'cancel-switch') toast('Cambio de cuenta cancelado', 'ok');
             if (!action) toast('Cuenta creada. Conectala para poder usarla.', 'ok');
           }
           if (action === 'login') void load(true);
@@ -75,15 +76,22 @@
       function render() {
         const server = agent === 'codex' && data.scope === 'server';
         const desktop = data.desktop?.selectedId === data.active ? data.desktop : null;
+        const labelOf = id => data.profiles.find(p => p.id === id)?.label || 'la cuenta elegida';
+        const threads = (desktop?.threads || []).map(t => `<li>${esc(t.title || 'Hilo sin título')}</li>`).join('');
         const desktopStatus = desktop?.state === 'ready' && desktop.verified
           ? `App por SSH: ${esc(desktop.email || '')} · Identidad verificada`
+          : desktop?.state === 'idle' ? 'Sin cambios pendientes en la app por SSH.'
           : desktop?.state === 'offline' ? 'App por SSH desconectada. La próxima conexión usará la cuenta seleccionada.'
-          : desktop?.state === 'error' ? 'No se pudo verificar el cambio en la app por SSH. La cuenta de la terminal sigue disponible; reintentá aplicar la cuenta al servidor.'
-          : `Cambio pendiente en la app por SSH${desktop?.email ? ` · Todavía usa ${esc(desktop.email)}` : ''}. Se renovará la conexión cuando terminen las tareas en curso.`;
+          : desktop?.state === 'blocked' ? `<strong>No se cambió a "${esc(labelOf(desktop.requestedId))}".</strong> Hay ${(desktop.threads || []).length ? `${desktop.threads.length} hilo${desktop.threads.length > 1 ? 's' : ''}` : 'tareas'} en curso en la app por SSH (sigue usando "${esc(labelOf(data.active))}"):${threads ? `<ul class="ag-desktop-threads">${threads}</ul>` : ''}`
+          : desktop?.state === 'error' ? `<strong>No se pudo cambiar${desktop.requestedId && desktop.requestedId !== data.active ? ` a "${esc(labelOf(desktop.requestedId))}"` : ''}.</strong> ${esc(desktop.detail || 'No se pudo verificar el cambio en la app por SSH.')} ${desktop.requestedId && desktop.requestedId !== data.active ? `Se mantiene "${esc(labelOf(data.active))}".` : 'La cuenta de la terminal sigue disponible.'}`
+          : `Cambio pendiente en la app por SSH${desktop?.email ? ` · Todavía usa ${esc(desktop.email)}` : ''}. Se aplica cuando terminen las tareas en curso:${threads ? `<ul class="ag-desktop-threads">${threads}</ul>` : ''}`;
+        const switchButtons = !server ? '' : desktop?.state === 'blocked' ? '<button class="btn-primary" data-switch-wait>Esperar y cambiar</button><button class="btn-secondary" data-switch-force>Frenar hilos y cambiar</button><button class="btn-secondary" data-switch-cancel>No cambiar</button>'
+          : desktop?.state === 'pending' ? '<button class="btn-secondary" data-switch-force>Frenar hilos y cambiar</button><button class="btn-secondary" data-switch-cancel>Cancelar cambio</button>'
+          : desktop?.state === 'error' ? `${desktop.requestedId && desktop.requestedId !== data.active ? '<button class="btn-primary" data-switch-retry>Reintentar</button>' : '<button class="btn-secondary" data-account-server>Aplicar cuenta al servidor y app por SSH</button>'}<button class="btn-secondary" data-switch-cancel>Descartar</button>` : '';
         host.innerHTML = `
           <div class="ag-accounts-heading"><strong>Cuentas guardadas</strong><div class="ag-usage-heading"><button class="btn-action" data-usage-refresh>${icon('refresh-cw')} Actualizar cuotas</button><button class="btn-action" data-account-add>${icon('plus')} Agregar cuenta</button></div></div>
           <p class="listener-note">${server ? 'La cuenta seleccionada se usa en el servidor, en la terminal y en la app conectada por SSH. Los pedidos ya enviados conservan su consumo original.' : `La predeterminada se usa al abrir ${agent === 'codex' ? 'Codex' : 'Claude'} en la terminal. Las sesiones abiertas conservan su cuenta.`}</p>
-          ${agent === 'codex' ? `<div class="ag-desktop-account" role="status"><p>${server ? desktopStatus : 'Este selector todavía sólo controla la terminal. La app de escritorio por SSH puede seguir usando otra cuenta.'}</p>${!server || desktop?.state === 'error' ? '<button class="btn-secondary" data-account-server>Aplicar cuenta al servidor y app por SSH</button>' : ''}</div>` : ''}
+          ${agent === 'codex' ? `<div class="ag-desktop-account" role="${desktop?.state === 'blocked' || desktop?.state === 'error' ? 'alert' : 'status'}"><p>${server ? desktopStatus : 'Este selector todavía sólo controla la terminal. La app de escritorio por SSH puede seguir usando otra cuenta.'}</p>${!server ? '<button class="btn-secondary" data-account-server>Aplicar cuenta al servidor y app por SSH</button>' : switchButtons}</div>` : ''}
           <div class="ag-account-list">${data.profiles.map(p => `
             <div class="ag-account-row ${p.active ? 'ag-account-active' : ''}" data-account-id="${esc(p.id)}">
               <div class="ag-account-identity"><span class="health-dot ${p.connected ? 'health-ok' : 'health-bad'}"></span><div><strong>${esc(p.label)}</strong>${p.active ? '<span class="badge badge-other">Predeterminada</span>' : ''}<small>${esc(p.email || p.method || (p.loginBusy ? 'Login en curso…' : 'Sin conectar'))}</small></div></div>
@@ -110,6 +118,15 @@
           const active = data.profiles.find(p => p.active)?.label;
           if (!(await confirmDialog('Aplicar cuenta al servidor', `Se cambia la cuenta que usan el servidor y la app de escritorio conectada por SSH${active ? ` a "${active}"` : ''}. Las tareas en curso pueden demorar el cambio.`, 'Aplicar'))) return;
           mutate('enable-server', {}, e.currentTarget);
+        });
+        const target = () => desktop?.requestedId || data.active;
+        host.querySelector('[data-switch-wait]')?.addEventListener('click', e => mutate('activate', { id: target(), mode: 'wait' }, e.currentTarget));
+        host.querySelector('[data-switch-retry]')?.addEventListener('click', e => mutate('activate', { id: target(), mode: 'safe' }, e.currentTarget));
+        host.querySelector('[data-switch-cancel]')?.addEventListener('click', e => mutate('cancel-switch', {}, e.currentTarget));
+        host.querySelector('[data-switch-force]')?.addEventListener('click', async e => {
+          const count = desktop?.threads?.length;
+          if (!(await confirmDialog('Frenar hilos y cambiar', `Se interrumpen ${count ? `los ${count} hilos en curso` : 'las tareas en curso'} de la app por SSH para cambiar a "${labelOf(target())}". Lo que estaban haciendo se corta; los chats quedan guardados y se pueden retomar.`, 'Frenar y cambiar'))) return;
+          mutate('activate', { id: target(), mode: 'force' }, e.currentTarget);
         });
         host.querySelector('[data-account-shell-copy]')?.addEventListener('click', () => AxonTerminalTools.copy('. "$HOME/.config/axon/agent-accounts-shell.sh"'));
         host.querySelectorAll('[data-account-id]').forEach(row => {

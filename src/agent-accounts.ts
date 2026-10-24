@@ -65,10 +65,11 @@ export function registerAgentAccounts(app: Hono, home: () => Promise<string>, ch
     const b = await readBody(c); only(b, ['label']);
     return run(c, { action: 'create', agent: c.req.param('agent'), label: b.label });
   });
-  for (const action of ['activate', 'rename', 'install', 'enable-server', 'delete']) {
+  for (const action of ['activate', 'rename', 'install', 'enable-server', 'cancel-switch', 'delete']) {
     app.post(`/api/agent-accounts/:agent/${action}`, async c => {
-      const b = await readBody(c); only(b, action === 'rename' ? ['id', 'label'] : ['activate', 'delete'].includes(action) ? ['id'] : []);
-      return run(c, { action, agent: c.req.param('agent'), id: b.id, label: b.label });
+      const b = await readBody(c);
+      only(b, action === 'rename' ? ['id', 'label'] : action === 'activate' ? ['id', 'mode'] : action === 'enable-server' ? ['mode'] : action === 'delete' ? ['id'] : []);
+      return run(c, { action, agent: c.req.param('agent'), id: b.id, label: b.label, mode: b.mode });
     });
   }
   app.post('/api/agent-accounts/:agent/login', async c => {

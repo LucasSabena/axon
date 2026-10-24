@@ -93,7 +93,24 @@ class Desktop:
             cursor = result.get('nextCursor')
             if not cursor: return False
 
-    async def stop_direct_server(self):
+    async def blockers(self):
+        """Loaded threads that are running (or in an unknown state), for the UI."""
+        found, cursor, examined = [], None, 0
+        while True:
+            params = {'limit': 100}
+            if cursor: params['cursor'] = cursor
+            result = await self.rpc('thread/loaded/list', params)
+            for ident in result['data']:
+                thread = (await self.rpc('thread/read', {'threadId': ident, 'includeTurns': False}))['thread']
+                if thread.get('status', {}).get('type') not in ['idle', 'notLoaded', 'systemError']:
+                    title = ' '.join((thread.get('name') or thread.get('preview') or '').split())
+                    found.append({'id': ident, 'title': title[:80]})
+                examined += 1
+                if examined >= 2000 or len(found) >= 20: return found
+            cursor = result.get('nextCursor')
+            if not cursor: return found
+
+    async def stop_direct_server(self, force=False):
         """Gracefully adopt the SSH-created server, never a PID guessed by name.
 
         Unix peer credentials identify the engine answering our verified RPCs.
@@ -104,9 +121,12 @@ class Desktop:
         args = (proc / 'cmdline').read_bytes().decode(errors='replace').split('\0')
         env = dict(x.split('=', 1) for x in (proc / 'environ').read_bytes().decode(errors='replace').split('\0') if '=' in x)
         actual_home = Path(env.get('CODEX_HOME') or str(Path(env.get('HOME', '/')) / '.codex'))
-        if proc.stat().st_uid != os.getuid() or Path(os.readlink(proc / 'exe')).name != 'codex' or 'app-server' not in args or '--listen' not in args or actual_home != self.home / '.codex':
+        # A Codex update replaces the binary under a running server; Linux then
+        # reports its exe as '<path> (deleted)'. Same program, still ours.
+        exe_name = Path(os.readlink(proc / 'exe').removesuffix(' (deleted)')).name
+        if proc.stat().st_uid != os.getuid() or exe_name != 'codex' or 'app-server' not in args or '--listen' not in args or actual_home != self.home / '.codex':
             raise RuntimeError('No se pudo validar el proceso de Codex abierto por SSH')
-        if await self.busy(): return False
+        if not force and await self.busy(): return False
         signal.pidfd_send_signal(self.peer_fd, signal.SIGTERM)
         import select
         for _ in range(200):
@@ -124,6 +144,11 @@ def selected(store):
     account_id = (d.get('tokens') or {}).get('account_id')
     if not account_id: raise RuntimeError('La cuenta seleccionada no tiene una identidad de ChatGPT verificable')
     return ident, account_id, store.identity('codex', ident)['email']
+
+
+def switch_mode(store):
+    mode = (store.load()['agents']['codex'].get('switch') or {}).get('mode')
+    return mode if mode in ['safe', 'wait', 'force'] else 'safe'
 
 
 def daemon_features(home):
@@ -154,23 +179,32 @@ async def reconcile(store, atomic, *, once=False, restart=None, desktop_factory=
         atomic(store.root / 'desktop-status.json', json.dumps({'state': state, 'selectedId': ident, 'updatedAt': int(time.time()), **extra}) + '\n')
     while True:
         ident, expected, email = selected(store)
+        mode = switch_mode(store)
         try:
             async with desktop_factory(store.home) as desktop:
                 account = await desktop.account()
                 if account['accountId'] == expected:
                     with store.lock():
                         if selected(store)[0] != ident: continue
+                        store.settle_locked(ident)
                         report('ready', ident, email=account['email'], verified=True)
                     return
-                if await desktop.busy():
-                    report('pending', ident, email=account['email'], verified=False, reason='active-turns')
-                    if once: return
-                    await asyncio.sleep(2)
-                    continue
+                # 'force' stops running threads; 'wait' polls until idle; the
+                # default refuses, restores the previous account and reports why.
+                if mode != 'force' and await desktop.busy():
+                    threads = await desktop.blockers()
+                    if mode == 'wait':
+                        report('pending', ident, requestedId=ident, email=account['email'], verified=False, reason='active-turns', threads=threads)
+                        if once: return
+                        await asyncio.sleep(2)
+                        continue
+                    previous = store.settle(ident, revert=True)
+                    report('blocked', previous or ident, requestedId=ident, email=account['email'], verified=False, reason='active-turns', threads=threads)
+                    return
                 # Keep a concurrent account click from racing the restart.
                 with store.lock():
                     if selected(store)[0] != ident: continue
-                    if await desktop.busy(): continue
+                    if mode != 'force' and await desktop.busy(): continue
                     report('restarting', ident, email=account['email'], verified=False)
                     if restart:
                         await restart()
@@ -198,7 +232,7 @@ async def reconcile(store, atomic, *, once=False, restart=None, desktop_factory=
                         if result.returncode:
                             # SSH starts a direct app-server that the daemon
                             # lifecycle deliberately refuses to administer.
-                            if not await desktop.stop_direct_server(): continue
+                            if not await desktop.stop_direct_server(force=mode == 'force'): continue
                         store.point_server_auth(ident)
                         result = await asyncio.to_thread(subprocess.run, cmd + ['restart'], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
                         # The desktop may reconnect itself during adoption.
@@ -212,6 +246,7 @@ async def reconcile(store, atomic, *, once=False, restart=None, desktop_factory=
                         if account['accountId'] == expected:
                             with store.lock():
                                 if selected(store)[0] != ident: break
+                                store.settle_locked(ident)
                                 report('ready', ident, email=account['email'], verified=True)
                             return
                         break
@@ -222,10 +257,14 @@ async def reconcile(store, atomic, *, once=False, restart=None, desktop_factory=
             with store.lock():
                 if selected(store)[0] != ident: continue
                 store.point_server_auth(ident)
+                store.settle_locked(ident)
             report('offline', ident, email=email, verified=False)
             return
-        except (OSError, TimeoutError, RuntimeError, ValueError, TypeError, websockets.WebSocketException):
-            report('error', ident, verified=False, reason='verification-failed')
+        except (OSError, TimeoutError, RuntimeError, ValueError, TypeError, subprocess.SubprocessError, websockets.WebSocketException) as e:
+            # Nothing was applied unless the credential link already moved.
+            previous = store.settle(ident, revert=True)
+            extra = {'detail': str(e)} if isinstance(e, RuntimeError) and str(e) else {}
+            report('error', previous or ident, requestedId=ident, verified=False, reason='verification-failed', **extra)
             return
 
 
