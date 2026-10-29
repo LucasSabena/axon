@@ -7,6 +7,7 @@ import { HOST_USER, hostExec, hostSpawn, hostToContainer } from './host';
 import { runJob, runningJobs, type JobStep } from './jobs';
 import {softwareIcons,type IconInfo} from './software-icons';
 import {bodyLimit} from 'hono/body-limit';
+import {softwareFolder,softwareRisk,type SoftwareRisk} from './software-guide';
 
 export interface SoftwareSource {
   id:string; manager:string; scope:string; user:string; root?:string; available:boolean; complete:boolean;
@@ -17,11 +18,13 @@ export interface SoftwareInstallation {
   architecture?:string; name:string; version:string|null; description?:string; kind:string; sourceId?:string;
   executables:string[]; executablePath?:string; applicationId?:string; integrationId?:string; desktopFile?:string;
   iconFile?:string; iconSource?:string; iconUrl?:string; origin?:string; policy?:{minutes:number;excludes:string[]};
-  iconName?:string;iconInfo?:IconInfo;sourceName?:string;homepage?:string;projectName?:string;
+  iconName?:string;iconInfo?:IconInfo;sourceName?:string;homepage?:string;projectName?:string;categories?:string[];folder?:string;risk?:SoftwareRisk;
   canUpdate:boolean; updateState:string; reason:string; ignored?:boolean; targetVersion?:string; targetCommit?:string; targetRevision?:string;
 }
 export interface SoftwareSnapshot {ok:true; installations:SoftwareInstallation[]; sources:SoftwareSource[]; checkedAt:number; user:string; home:string; canAdministerSystem:boolean; checking?:boolean; loading?:boolean; revision?:number; error?:string}
 export interface SoftwareTransaction {manager:string;scope:string;user:string;root:string;items:SoftwareInstallation[];argv:string[];effects:string;simulation:{complete:boolean;changes:{packageName:string;targetVersion:string}[];removals:string[]}}
+export interface RemovalLeftover {path:string;label:string;size:number;partial:boolean;days:number;shared:boolean;selected:boolean;note:string}
+export interface RemovalPreview {id:string;name:string;manager:string;scope:string;user:string;root:string;version:string|null;packageName:string;removes:string[];leftovers:RemovalLeftover[];commands:string[][];blockers:string[];notes:string[];canExecute:boolean;digest:string}
 export interface SoftwarePlan {ok:true;id?:string;createdAt:number;expiresAt?:number;transactions:SoftwareTransaction[]}
 type Progress = (source:SoftwareSource, rows:SoftwareInstallation[])=>void;
 type Runner = (req:Record<string,unknown>, progress?:Progress)=>Promise<any>;
@@ -139,6 +142,7 @@ export class SoftwareService {
   private revision=0;
   private lastError?:string;
   private plans=new Map<string,{plan:SoftwarePlan;config:SoftwareConfig}>();
+  private removals=new Map<string,{preview:RemovalPreview;createdAt:number;config:SoftwareConfig}>();
   constructor(private run:Runner=nativeSoftwareRunner,private config=softwareConfig,private integrationLoader=integrations,private metadata=registryMetadata,private saveConfig:typeof writeSoftwareConfig=writeSoftwareConfig){}
   invalidate(){this.generation++;this.flight=undefined;this.updates=undefined;this.checked=0;this.lastError=undefined;/* Retain the last snapshot on read failure. */}
   refreshIcons(){if(this.snapshot){softwareIcons.learnNative(this.snapshot.installations);for(const row of this.snapshot.installations){row.iconInfo=softwareIcons.describe(row);row.iconUrl='/api/software/icons/'+encodeURIComponent(row.id)+'?v='+row.iconInfo.version;}}}
@@ -209,6 +213,7 @@ export class SoftwareService {
     for(const row of rows){
       row.iconInfo=softwareIcons.describe(row);
       row.iconUrl='/api/software/icons/'+encodeURIComponent(row.id)+'?v='+row.iconInfo.version;
+      row.folder=softwareFolder(row);row.risk=softwareRisk(row);
       if(cfg.ignored?.includes(row.id)){row.canUpdate=false;row.updateState='held';row.ignored=true;row.reason='Retenido en la configuración local de AXON';}
     }
   }
@@ -230,7 +235,8 @@ export class SoftwareService {
       for(const row of rows){
         const old=oldRows.get(row.id);
         // Update-only scans do not repeat desktop/icon discovery.
-        if(old)for(const key of ['name','description','applicationId','desktopFile','iconFile','iconSource','iconName','iconInfo','iconUrl'] as const)if(old[key]!==undefined)(row as any)[key]=old[key];
+        if(old)for(const key of ['name','description','applicationId','desktopFile','iconFile','iconSource','iconName','iconInfo','iconUrl','categories','kind'] as const)if(old[key]!==undefined)(row as any)[key]=old[key];
+        row.folder=softwareFolder(row);row.risk=softwareRisk(row);
         if(failed){row.canUpdate=false;row.updateState='error';row.reason=source.error||'No se pudo comprobar esta fuente';}
         if(!['pnpm','bun'].includes(row.manager)||failed||['held','unmanaged'].includes(row.updateState))continue;
         if(!tasks.has(row.id))tasks.set(row.id,(async()=>{
@@ -290,6 +296,31 @@ export class SoftwareService {
     while(this.plans.size>100)this.plans.delete(this.plans.keys().next().value!);
     return plan;
   }
+  // Uninstall: the host previews what goes away (package, orphaned
+  // dependencies, leftover folders); execute re-checks that same preview.
+  async removalPreview(id:string){
+    const known=this.snapshot||await this.get(),row=known.installations.find(p=>p.id===id);
+    if(!row)throw new Error('Instalación desconocida');
+    const cfg=await this.config(),user=row.scope==='user'?row.user:HOST_USER;
+    const value=await this.run({action:'removal-preview',user,settings:cfg.contexts?.[user]||{},item:{id:row.id,manager:row.manager}});
+    const preview=value.preview as RemovalPreview,reviewId=randomUUID();
+    this.removals.set(reviewId,{preview,createdAt:Date.now(),config:cfg});
+    for(const [key,saved] of this.removals)if(Date.now()-saved.createdAt>600000)this.removals.delete(key);
+    while(this.removals.size>50)this.removals.delete(this.removals.keys().next().value!);
+    return {...preview,reviewId,expiresAt:Date.now()+600000};
+  }
+  async remove(reviewId:string,leftovers:unknown){
+    const saved=this.removals.get(reviewId);if(!saved||Date.now()-saved.createdAt>600000)throw new Error('La revisión venció; abrí la desinstalación de nuevo');
+    if(!saved.preview.canExecute)throw new Error(saved.preview.blockers[0]||'Esta instalación no se puede desinstalar desde AXON');
+    if(!Array.isArray(leftovers)||leftovers.some(p=>typeof p!=='string'))throw new Error('Lista de restos inválida');
+    const allowed=new Set(saved.preview.leftovers.map(f=>f.path));
+    if((leftovers as string[]).some(p=>!allowed.has(p)))throw new Error('Se pidió borrar una carpeta que no estaba en la revisión');
+    if(JSON.stringify(await this.config())!==JSON.stringify(saved.config))throw new Error('La configuración cambió; revisá la desinstalación de nuevo');
+    const p=saved.preview,user=p.scope==='user'?p.user:HOST_USER;
+    const cmd=await softwareCommand({action:'remove',user,settings:saved.config.contexts?.[user]||{},preview:p,createdAt:saved.createdAt,leftovers:[...new Set(leftovers as string[])]});
+    const job=runSoftwareJob('Desinstalar '+p.name,[{label:'Desinstalar '+p.name+(leftovers.length?' y limpiar restos':''),cmd,displayCommand:p.commands.map(c=>c.join(' ')).join(' && '),user:'root',group:'software:'+p.manager+':'+p.user}]);
+    this.removals.delete(reviewId);this.invalidate();return job;
+  }
   async execute(id:string) {
     const saved=this.plans.get(id);if(!saved||saved.plan.expiresAt!<Date.now())throw new Error('El plan venció o no existe; generá uno nuevo');
     if(JSON.stringify(await this.config())!==JSON.stringify(saved.config))throw new Error('La configuración cambió; generá un plan nuevo');
@@ -339,6 +370,8 @@ export function registerSoftwareRoutes(app:Hono, service=software) {
   app.get('/api/software',async c=>{c.header('Cache-Control','private, no-store');softwareIcons.autoRefresh();try{return c.json(service.status(c.req.query('fresh')==='1'));}catch(e:any){return c.json({ok:false,error:e.message},503);}});
   app.post('/api/software/plan',async c=>{try{const body=await c.req.json();return c.json({ok:true,plan:await service.plan(body.ids)});}catch(e:any){return c.json({ok:false,error:e.message},409);}});
   app.put('/api/software/:id/ignore',async c=>{try{const body=await c.req.json().catch(()=>null);if(typeof body?.ignored!=='boolean')throw new Error('Indicá ignored:true o ignored:false');const row=await service.setIgnored(c.req.param('id'),body.ignored);return c.json({ok:true,ignored:body.ignored,updateState:row?.updateState});}catch(e:any){return c.json({ok:false,error:e.message},409);}});
+  app.post('/api/software/:id/removal-preview',async c=>{try{return c.json({ok:true,preview:await service.removalPreview(c.req.param('id'))});}catch(e:any){return c.json({ok:false,error:e.message},409);}});
+  app.post('/api/software/remove',async c=>{try{const body=await c.req.json();if(typeof body?.reviewId!=='string')throw new Error('Falta la revisión');return c.json({ok:true,job:await service.remove(body.reviewId,body.leftovers??[])});}catch(e:any){return c.json({ok:false,error:e.message},409);}});
   app.post('/api/software/execute',async c=>{try{const body=await c.req.json();return c.json({ok:true,job:await service.execute(body.planId)});}catch(e:any){return c.json({ok:false,error:e.message},409);}});
   app.post('/api/software/refresh-indices',async c=>{try{const snapshot=await service.get();if(!snapshot.canAdministerSystem||!snapshot.sources.some(s=>s.manager==='apt'&&s.available))throw new Error('No hay índices APT gestionables en este host');const cmd=await softwareCommand({action:'refresh',user:HOST_USER});return c.json({ok:true,job:runSoftwareJob('Actualizar índices APT',[{label:'Consultar repositorios sin instalar paquetes',cmd,user:'root',group:'software:apt'}])});}catch(e:any){return c.json({ok:false,error:e.message},409);}});
   app.get('/api/software/icons/:id',async c=>{const id=c.req.param('id'),row=service.cachedRow(id)||(await service.get()).installations.find(p=>p.id===id);return row?softwareIcon(row):c.json({ok:false,error:'Instalación desconocida'},404);});

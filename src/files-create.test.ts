@@ -86,3 +86,24 @@ test('server editing rejects stale content and never overwrites an arriving file
   }
   expect((await post('/api/files/write',{path:file,content:'arriving',revision:'missing'})).status).toBe(409);expect(['one','two']).toContain(await readFile(file,'utf8'));
 });
+
+test('HTML asset gateway serves passive resources, rejects executable content and rechecks roots', async () => {
+  await mkdir(dir + '/diseño con espacios');
+  const file = dir + '/diseño con espacios/estilo.css';
+  await writeFile(file, 'h1{color:red}');
+  const url = (p: string) => '/api/files/html-assets' + p.split('/').map(encodeURIComponent).join('/');
+  const response = await app.request(url(file));
+  expect(response.status).toBe(200); expect(await response.text()).toBe('h1{color:red}');
+  expect(response.headers.get('Content-Type')).toBe('text/css');
+  expect(response.headers.get('Content-Security-Policy')).toContain("script-src 'none'");
+  expect(response.headers.get('X-Content-Type-Options')).toBe('nosniff');
+  for (const name of ['page.html', 'script.js', 'config.json', '.env']) {
+    await writeFile(dir + '/' + name, 'private');
+    expect((await app.request(url(dir + '/' + name))).status).toBe(415);
+  }
+  await symlink('/proc/cpuinfo', dir + '/escape.css');
+  expect((await app.request(url(dir + '/escape.css'))).status).toBe(403);
+  expect((await app.request('/api/files/html-assets/proc/forbidden.css')).status).toBe(403);
+  expect((await app.request(url(dir + '/missing.css'))).status).toBe(404);
+  expect((await app.request('/api/files/html-assets/%ZZ.css')).status).toBe(400);
+});

@@ -103,6 +103,23 @@ describe('native software discovery and update contract',()=>{
   const r=await app.request('/api/software/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd:'touch /host/file',planId:'forged'})});expect(r.status).toBe(409);
  });
 });
+describe('uninstall review',()=>{
+ const preview={id:'native-unlisted',name:'Unlisted tool',manager:'pnpm',scope:'user',user:'any-user',root:'/srv/home/custom/global',version:'1.0.0',packageName:'unlisted-tool',removes:['unlisted-tool'],leftovers:[{path:'/srv/home/custom/.cache/unlisted-tool',label:'Caché',size:10,partial:false,days:90,shared:false,selected:true,note:''}],commands:[['pnpm','remove','-g','unlisted-tool']],blockers:[],notes:[],canExecute:true,digest:'x'};
+ test('the host preview is kept server-side and leftovers outside it are refused',async()=>{
+  const requests:any[]=[];const service=new SoftwareService(async req=>{requests.push(req);return req.action==='removal-preview'?{ok:true,preview}:snapshot([row()]);},async()=>({}),async()=>[],metadata),app=new Hono();registerSoftwareRoutes(app,service);
+  await service.settled();
+  const r=await (await app.request('/api/software/native-unlisted/removal-preview',{method:'POST'})).json();
+  expect(r.preview.leftovers[0].path).toContain('.cache');expect(requests.at(-1).item).toEqual({id:'native-unlisted',manager:'pnpm'});
+  const forged=await app.request('/api/software/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reviewId:r.preview.reviewId,leftovers:['/srv/home/custom/.ssh']})});
+  expect(forged.status).toBe(409);expect((await forged.json()).error).toContain('revisión');
+  expect((await app.request('/api/software/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reviewId:'invented'})})).status).toBe(409);
+ });
+ test('a blocked preview never starts a job',async()=>{
+  const service=new SoftwareService(async req=>req.action==='removal-preview'?{ok:true,preview:{...preview,canExecute:false,blockers:['Es parte del sistema']}}:snapshot([row()]),async()=>({}),async()=>[],metadata);
+  await service.settled();const p=await service.removalPreview('native-unlisted');
+  await expect(service.remove(p.reviewId,[])).rejects.toThrow('Es parte del sistema');
+ });
+});
 describe('pnpm native publication policies',()=>{
  const data={'dist-tags':{latest:'2.1.0'},time:{'2.0.0':'2026-10-01T00:00:00Z','2.1.0':'2026-10-06T12:00:00Z','3.0.0':'2026-10-01T00:00:00Z'}},now=Date.parse('2026-10-06T13:00:00Z');
  test('minimumReleaseAge chooses an eligible version at or below the latest tag',()=>expect(registryCandidate(data,{packageName:'tool',version:'1.0.0',policy:{minutes:1440,excludes:[]}},now)).toBe('2.0.0'));

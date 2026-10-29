@@ -27,6 +27,8 @@ import { documentResponse } from './document-preview';
 
 const WRITE_USER: 'user' | 'root' = 'user';
 
+const HTML_ASSET_EXTS = new Set('css png jpg jpeg gif svg webp ico bmp avif woff woff2 ttf otf mp4 webm mp3 wav ogg'.split(' '));
+
 const MAX_READ_BYTES = 512 * 1024; // /api/files/read truncates past this
 
 // Roots a normalized path must live under. $HOME is resolved lazily.
@@ -435,6 +437,34 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
     const r = await resolveAllowed(c.req.query('path'));
     if (!r.path) return c.json({ ok: false, error: r.error }, (r.status ?? 403) as 403);
     return documentResponse(r.path, c.req.raw, '/api/files/document?path=' + encodeURIComponent(r.path));
+  });
+
+  // Passive resources for sandboxed HTML. A path-shaped URL preserves relative
+  // references inside CSS (url(), @import) without serving executable HTML/JS.
+  app.get('/api/files/html-assets/*', async (c) => {
+    let input: string;
+    try { input = decodeURIComponent(new URL(c.req.url).pathname.slice('/api/files/html-assets'.length)); }
+    catch { return c.json({ ok: false, error: 'Ruta inválida' }, 400); }
+    const r = await resolveAllowed(input);
+    if (!r.path) return c.json({ ok: false, error: r.error }, (r.status ?? 403) as 403);
+    const ext = path.extname(r.path).slice(1).toLowerCase();
+    if (!HTML_ASSET_EXTS.has(ext)) {
+      return c.json({ ok: false, error: 'Recurso no permitido en la vista HTML' }, 415);
+    }
+    try {
+      const cp = hostToContainer(r.path);
+      const st = await withTimeout(stat(cp), LIST_TIMEOUT_MS, null);
+      if (!st) return c.json({ ok: false, error: 'El archivo no responde' }, 504);
+      if (!st.isFile()) return c.json({ ok: false, error: 'No es un archivo regular' }, 400);
+      return new Response(Readable.toWeb(createReadStream(cp)) as unknown as ReadableStream, { headers: {
+        'Content-Type': guessMime(r.path), 'Content-Length': String(st.size),
+        'Content-Security-Policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'; script-src 'none'",
+        'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store',
+        'Access-Control-Allow-Origin': '*', 'Referrer-Policy': 'no-referrer',
+      } });
+    } catch (e: any) {
+      return c.json({ ok: false, error: 'No se pudo leer el recurso' }, e?.code === 'EACCES' ? 403 : 404);
+    }
   });
 
   // ---------- Preview (inline stream + Range + format conversion) ----------

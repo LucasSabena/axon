@@ -15,10 +15,10 @@
     const tab = $('#tab-ops');
     if (!tab || root()) return;
     const section = document.createElement('div'); section.id = 'optimizer';
-    section.innerHTML = `<p class="opt-intro">Entendé qué está consumiendo recursos y apagá lo que no necesitás ahora.</p>
+    section.innerHTML = `<p class="opt-intro">Apps de Docker: ves qué consume cada una y podés apagar las que no necesitás ahora.</p>
       <div id="opt-status" class="opt-status" role="status">Midiendo el servidor…</div>
       <div id="opt-summary" class="opt-summary"></div>
-      <div class="opt-section-head"><div><h3>Qué podés hacer</h3><p>Las bases locales verificadas pueden apagarse después de 2 minutos sin uso. Si hay actividad o dudas, quedan encendidas.</p></div><button id="opt-plan" class="btn-primary">${icon('sparkles')} Optimizar</button></div>
+      <div class="opt-section-head"><div><h3>Qué podés hacer</h3><p>Las bases locales verificadas pueden apagarse después de 2 minutos sin uso. Si hay actividad o dudas, quedan encendidas.</p></div><button id="opt-plan" class="btn-primary">${icon('power')} Revisar y apagar</button></div>
       <label class="opt-clean"><input type="checkbox" id="opt-clean"> También limpiar caché de compilación vieja <span>Archivos regenerables de Docker, sin uso desde hace 7 días. La próxima compilación puede tardar más.</span></label>
       <p id="opt-op-result" class="opt-result" role="status"></p>
       <div id="opt-receipts"></div>
@@ -28,10 +28,14 @@
       <details class="opt-host" open><summary>También corre fuera de Docker <span id="opt-process-count"></span></summary><p>Estos programas también consumen recursos. La memoria es aproximada y puede incluir memoria compartida. No se apagan automáticamente.</p><div id="opt-processes"></div></details>
       <div class="opt-section-head"><div><h3>Qué pasó recientemente</h3><p>Muestras cada 30 segundos, incluso con el panel cerrado. Se conservan hasta 24 horas; acá ves las últimas 120 muestras.</p></div><a href="/metricas" class="btn-secondary">Historial de recursos ${icon('arrow-up-right')}</a></div><div id="opt-history"></div>
       <details class="opt-help"><summary>CPU, memoria y disco: qué significa cada uno</summary><p><b>CPU:</b> trabajo que hace el procesador. Un porcentaje alto sostenido puede demorar otras tareas. Todos los consumos de esta vista usan la capacidad total del servidor como referencia.</p><p><b>Memoria:</b> espacio para programas abiertos. Linux usa memoria libre como caché y la recupera cuando hace falta. Vaciar esa caché no soluciona una aplicación que consume CPU.</p><p><b>Disco:</b> espacio para guardar archivos. Limpiar archivos recupera espacio; no implica que baje la CPU. La espera por disco se muestra aparte.</p><p><b>Optimizar:</b> revisa las aplicaciones autorizadas y vuelve a comprobar su uso antes de apagar cada una. Una conexión abierta, actividad reciente o una comprobación incompleta impiden la parada. Las autorizadas están limitadas a sus bases locales verificadas. Las demás necesitan una comprobación de uso confiable; si falta, quedan encendidas. Podés volver a encender lo que se apagó.</p></details>`;
-    tab.querySelector('.section-header').after(section);
-    const advanced = document.createElement('details'); advanced.className = 'opt-advanced';
-    advanced.innerHTML = '<summary>Otros controles del servidor</summary>';
-    advanced.append(tab.querySelector('#ops-grid')); tab.append(advanced);
+    const slot = $('#hp-containers');
+    if (slot) slot.append(section); else tab.querySelector('.section-header').after(section);
+    const grid = tab.querySelector('#ops-grid');
+    if (grid && !grid.closest('#health')) {
+      const advanced = document.createElement('details'); advanced.className = 'opt-advanced';
+      advanced.innerHTML = '<summary>Otros controles del servidor</summary>';
+      advanced.append(grid); tab.append(advanced);
+    }
     const original = loaders.ops;
     loaders.ops = () => { load(); original?.(); };
     $('#ops-refresh').addEventListener('click', load);

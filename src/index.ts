@@ -101,6 +101,7 @@ import { registerSessionRoutes, recordSession, sessionIdForToken, sessionIdFromR
 import { registerOnboardingPublic, registerOnboardingRoutes } from './onboarding';
 import { registerOpsRoutes } from './ops';
 import { registerOptimizerRoutes } from './optimizer';
+import { registerHealthRoutes } from './health';
 import { registerDockerOpsRoutes } from './docker-ops';
 import {MigrationRetirement} from './migration-retirement';
 import {HomepageMigration} from './homepage-migration';
@@ -1877,6 +1878,7 @@ registerUsbRoutes(app, maintenanceQaRoot ? fixtureUsbRunner() : undefined);
 registerOnboardingRoutes(app, onboardingDeps);
 registerOpsRoutes(app);
 registerOptimizerRoutes(app, async () => config, () => composeOpsGuard());
+registerHealthRoutes(app, path.dirname(process.env.CONFIG_PATH || '/app/data/config.json'));
 // Locks are retained by design for interrupted releases pending reconcile —
 // mutating mid-release could invalidate a pending rollback — so the block
 // still applies, but the message must reflect the actual state. A 'running'

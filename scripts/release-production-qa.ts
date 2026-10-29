@@ -24,7 +24,7 @@ try{
     await page.reload();await page.waitForFunction(()=>(window as any).AxonNavigation?.ready);
     checks.push('Existing authenticated browser and service worker cache reload after deployment');
   }
-  const health=await get('/api/health');assert(health.version==='1.5.1','Unexpected production version');
+  const health=await get('/api/health');assert(health.version==='1.6.0','Unexpected production version');
   if(process.env.AXON_EXPECTED_REVISION)assert(health.revision===process.env.AXON_EXPECTED_REVISION,'Unexpected revision');
   for(const path of ['/api/files/volumes','/api/file-catalog','/api/sessions','/api/software','/api/compose'])await get(path);
   checks.push('Public HTTPS and authenticated disks/catalog/sessions/software/compose endpoints');

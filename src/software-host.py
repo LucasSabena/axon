@@ -246,6 +246,13 @@ def scan(req):
                 for line in command(["flatpak", "remote-ls", flag, "--updates", "--columns=ref:full,commit:full,origin:full"], userctx, timeout=45).splitlines():
                     f = line.split("\t")
                     if len(f) == 3: candidates[(f[0], f[2])] = f[1]
+                # Flatpak 1.16 shortens the commit column even with :full; the
+                # executor pins --commit=, so resolve the full hash per ref.
+                for key, commit in list(candidates.items()):
+                    if re.fullmatch(r"[a-f0-9]{64}", commit): continue
+                    try: full = command(["flatpak", "remote-info", flag, "--show-commit", key[1], key[0]], userctx, timeout=20).strip()
+                    except RuntimeError: continue
+                    if re.fullmatch(r"[a-f0-9]{64}", full) and full.startswith(commit): candidates[key] = full
                 for row in items:
                     row["targetCommit"] = candidates.get((row["packageName"], row["origin"]), candidates.get((row["packageName"].split("/", 1)[1], row["origin"])))
                     row["updateState"] = "available" if row["targetCommit"] else "current"
@@ -253,6 +260,8 @@ def scan(req):
                     row["canUpdate"] = bool(row["targetCommit"]) and not masked
                     if masked: row["updateState"] = "held"
                     row["reason"] = "Retenido mediante flatpak mask" if masked else ""
+                    if row["canUpdate"] and not re.fullmatch(r"[a-f0-9]{64}", row["targetCommit"]):
+                        row.update(canUpdate=False, updateState="error", reason="Flatpak no informó la versión exacta de la actualización; reintentá Comprobar")
             return items
         read("flatpak", scope, userctx, location, bool(tool("flatpak", userctx)), flatpak)
 
@@ -583,7 +592,10 @@ def enrich(rows, ctx, settings, sources):
             row = record("manual", "user" if filename.startswith(data + "/") else "system", ctx if filename.startswith(data + "/") else None, str(pathlib.Path(filename).parent), file, None, kind="application", updateState="unmanaged", reason="Acceso de escritorio detectado; origen de instalación no comprobado", applicationId=appid)
             rows.append(row)
         if row:
-            if not row.get("desktopFile"): row.update(name=name, applicationId=appid, desktopFile=filename, description=meta.get("Comment", row.get("description", "")), kind="application")
+            # A visible launcher beats a hidden helper (code-url-handler.desktop sorts before code.desktop).
+            hidden = meta.get("NoDisplay") == "true"
+            if not row.get("desktopFile") or row.get("desktopHidden") and not hidden: row.update(name=name, applicationId=appid, desktopFile=filename, desktopHidden=hidden, description=meta.get("Comment", row.get("description", "")), kind="application")
+            if not row.get("categories"): row["categories"] = [c for c in meta.get("Categories", "").split(";") if re.fullmatch(r"[A-Za-z0-9-]{1,40}", c)][:12]
             if row["manager"] != "flatpak":
                 try:
                     args = shlex.split(meta.get("TryExec") or meta.get("Exec", ""))
@@ -615,6 +627,7 @@ def enrich(rows, ctx, settings, sources):
                 matched = list({p["id"]: p for p in byappid.get(appid, []) + [bypackage[(manager, pkg)] for manager in ["apt", "dnf", "pacman"] for pkg in packages if (manager, pkg) in bypackage]}.values())
                 for row in matched:
                     row.update(applicationId=appid, name=component.findtext("name") or row["name"], description=component.findtext("summary") or row.get("description", ""))
+                    if not row.get("categories"): row["categories"] = [c.text for c in component.findall("categories/category") if c.text and re.fullmatch(r"[A-Za-z0-9-]{1,40}", c.text)][:12]
                     for icon in component.findall("icon"):
                         if row.get("iconFile"): break
                         candidate = icon.text or ""
@@ -637,6 +650,8 @@ def main():
     elif req["action"] == "plan": result = plan(req)
     elif req["action"] == "execute": result = execute(req)
     elif req["action"] == "refresh": result = refresh(req)
+    elif req["action"] == "removal-preview": result = removal_preview(req)
+    elif req["action"] == "remove": result = remove(req)
     elif req["action"] == "recipe": result = recipe(req)
     elif req["action"] == "icon": result = catalog_icon(req)
     elif req["action"] == "install-global": result = install_global(req)
@@ -671,8 +686,14 @@ def build_transaction(items):
         tx["effects"] = "El plan APT incluye todos los cambios de dependencias de su simulación · Los servicios en ejecución que usen estos paquetes se reinician al finalizar"
     elif manager in ["pnpm", "bun"]:
         if any(not row.get("targetVersion") or not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?", row["targetVersion"]) for row in items): raise ValueError("Candidato pnpm inválido")
-        tx["argv"] = ([manager, "--dir", first["root"], "add", "-g"] if manager == "pnpm" else [manager, "add", "-g"]) + [row["packageName"] + "@" + row["targetVersion"] for row in items]
-        tx["effects"] = "Versiones exactas de los paquetes seleccionados; el gestor puede actualizar sus dependencias"
+        if manager == "pnpm" and first["packageName"] == "pnpm":
+            # pnpm refuses `add -g pnpm` (ERR_PNPM_GLOBAL_PNPM_INSTALL); it updates itself.
+            if len(items) != 1: raise ValueError("pnpm se actualiza en su propia transacción")
+            tx["argv"] = ["pnpm", "self-update", first["targetVersion"]]
+            tx["effects"] = "pnpm se actualiza a sí mismo a la versión exacta; los paquetes globales no cambian"
+        else:
+            tx["argv"] = ([manager, "--dir", first["root"], "add", "-g"] if manager == "pnpm" else [manager, "add", "-g"]) + [row["packageName"] + "@" + row["targetVersion"] for row in items]
+            tx["effects"] = "Versiones exactas de los paquetes seleccionados; el gestor puede actualizar sus dependencias"
     elif manager == "flatpak":
         if len(items) != 1 or not re.fullmatch(r"[a-f0-9]{64}", first.get("targetCommit", "")): raise ValueError("Commit Flatpak inválido")
         tx["argv"] = ["flatpak", "update", first.get("selector", "--" + first["scope"]), "--noninteractive", "--no-related", "--no-deps", "-y", "--commit=" + first["targetCommit"], first["packageName"]]
@@ -713,7 +734,8 @@ def plan(req):
         items.append(row)
     groups = {}
     for row in items:
-        key = (row["manager"], row["scope"], row["user"], row["root"], row["id"] if row["manager"] in ["flatpak", "snap"] or local_hook(req, row) else "")
+        own = row["manager"] in ["flatpak", "snap"] or local_hook(req, row) or row["manager"] == "pnpm" and row["packageName"] == "pnpm"
+        key = (row["manager"], row["scope"], row["user"], row["root"], row["id"] if own else "")
         groups.setdefault(key, []).append(row)
     transactions = [build_transaction(group) for group in groups.values()]
     for tx in transactions:
@@ -855,6 +877,200 @@ def execute(req):
                         print("Aviso: " + p["name"] + " sigue abierta con la versión anterior; reiniciarla para usar la nueva.", flush=True)
             print("Instalaciones verificadas en el registro del gestor", flush=True)
         restart_services([p["packageName"] for tx in transactions if tx["manager"] == "apt" for p in tx["items"]])
+        return {"ok": True, "verified": True}
+    finally:
+        for fd in handles: os.close(fd)
+
+
+# --- Uninstall: a reviewed preview, then the same preview re-checked before acting.
+REMOVABLE = {"apt", "snap", "flatpak", "pnpm", "bun", "pipx", "uv", "cargo"}
+# Packages the host (and AXON itself) needs to keep running or be reachable.
+PROTECTED = re.compile(r"^(?:apt|dpkg|sudo|bash|dash|coreutils|util-linux|systemd(?:-.*)?|libc6|libc-bin|login|passwd|python3(?:\.\d+)?(?:-minimal)?|openssh-server|openssh-client|docker(?:-ce|-ce-cli|\.io)?|containerd(?:\.io)?|linux-(?:image|headers|modules|generic|firmware).*|grub.*|shim-signed|network-manager|netplan.io|ubuntu-(?:minimal|standard|desktop.*)|snapd|flatpak|cloudflared|tailscale)$")
+SNAP_PROTECTED = {"snapd", "bare", "core", "core18", "core20", "core22", "core24", "core26"}
+LEFTOVER_BASES = [(".config", "Configuración"), (".cache", "Caché"), (".local/share", "Datos"), (".local/state", "Estado"), ("", "Carpeta oculta")]
+# Never offered as leftovers even if a name happens to match.
+KEEP = {"", ".", "..", ".ssh", ".gnupg", ".local", ".config", ".cache", ".pki", ".mozilla", "trash", "applications", "icons", "fonts", "keyrings", "systemd", "autostart", "flatpak", "pnpm", "node", "npm", "bin", "lib", "share", "state", "dconf", "gtk-3.0", "gtk-4.0", "pulse", "pipewire"}
+
+
+def leftover_names(row):
+    names = {row["packageName"].split(":")[0].split("/")[-1]}
+    if row["manager"] == "flatpak": names = {row.get("applicationId", "")}
+    if row.get("applicationId"):
+        names.add(row["applicationId"]); names.add(row["applicationId"].split(".")[-1])
+    names.update(row.get("executables") or [])
+    if row["manager"] == "apt" and row.get("sourceName"): names.add(row["sourceName"])
+    if row.get("name") and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._-]{1,40}", row["name"]): names.add(row["name"])
+    return {n.lower() for n in names if n and len(n) >= 3 and n.lower() not in KEEP}
+
+
+def tree_size(path, budget=200000):
+    total, seen, stack = 0, 0, [path]
+    while stack and seen < budget:
+        current = stack.pop()
+        try:
+            info = os.lstat(current); seen += 1
+            total += info.st_blocks * 512
+            if stat.S_ISDIR(info.st_mode):
+                with os.scandir(current) as entries: stack.extend(e.path for e in entries)
+        except OSError: continue
+    return total, seen >= budget
+
+
+def leftovers(row, rows, ctx):
+    """Exact (case-insensitive) name matches under the user's XDG and dot dirs.
+    Caches are preselected; config/data only when not touched in 30 days."""
+    names = leftover_names(row)
+    others = set()
+    for other in rows:
+        if other["id"] != row["id"] and other["manager"] != "metadata": others |= leftover_names(other)
+    home = pathlib.Path(ctx["home"]); found = []; now = time.time()
+    for base, label in LEFTOVER_BASES:
+        folder = home / base if base else home
+        try: entries = list(os.scandir(folder))
+        except OSError: continue
+        for entry in entries:
+            name = entry.name.lower()
+            key = name[1:] if not base and name.startswith(".") else name if base else None
+            if key is None or key in KEEP or name in KEEP or key not in names: continue
+            if not base and not name.startswith("."): continue
+            try:
+                info = entry.stat(follow_symlinks=False)
+                if info.st_uid != ctx["uid"] or stat.S_ISLNK(info.st_mode): continue
+            except OSError: continue
+            size, partial = tree_size(entry.path)
+            days = int((now - info.st_mtime) // 86400)
+            shared = key in others
+            cache = base == ".cache"
+            found.append({"path": entry.path, "label": label, "size": size, "partial": partial, "days": days, "shared": shared,
+                          "selected": not shared and (cache or days >= 30),
+                          "note": "Lo usa otro programa instalado" if shared else "" if cache or days >= 30 else "Usado hace %d días: puede tener tu configuración" % days})
+    if row["manager"] == "snap":
+        folder = home / "snap" / row["packageName"]
+        if folder.is_dir() and not folder.is_symlink():
+            size, partial = tree_size(str(folder)); found.append({"path": str(folder), "label": "Datos de Snap", "size": size, "partial": partial, "days": 0, "shared": False, "selected": True, "note": ""})
+    return found
+
+
+def removal_command(row):
+    name = row["packageName"]
+    if not PACKAGE.fullmatch(name): raise ValueError("Identificador de paquete inválido")
+    manager = row["manager"]
+    if manager == "apt": return [["apt-get", "purge", "--autoremove", "-y", "--", name]]
+    if manager == "snap": return [["snap", "remove", "--purge", name]]
+    if manager == "flatpak":
+        flag = row.get("selector", "--" + row["scope"])
+        return [["flatpak", "uninstall", flag, "--noninteractive", "-y", "--delete-data", name], ["flatpak", "uninstall", flag, "--noninteractive", "-y", "--unused"]]
+    if manager == "pnpm": return [["pnpm", "remove", "-g", name]]
+    if manager == "bun": return [["bun", "remove", "-g", name]]
+    if manager == "pipx": return [["pipx", "uninstall", name]]
+    if manager == "uv": return [["uv", "tool", "uninstall", name]]
+    if manager == "cargo": return [["cargo", "uninstall", name]]
+    raise ValueError("AXON no sabe desinstalar programas de este origen")
+
+
+def removal_preview(req):
+    expected = req["item"]
+    # Full scan: leftovers shared with any other installed program stay unselected.
+    snapshot = scan({**req, "updates": False})
+    rows = snapshot["installations"]
+    row = next((p for p in rows if p["id"] == expected["id"]), None)
+    if not row: raise ValueError("La instalación ya no aparece; volvé a cargar Programas")
+    ctx = context(row["user"] if row["scope"] == "user" else req["user"], req.get("settings"))
+    blockers, removes, notes = [], [], []
+    base = row["packageName"].split(":")[0]
+    if row["manager"] not in REMOVABLE:
+        blockers.append("Este programa no se instaló con un gestor que AXON conozca, así que no se puede quitar de forma segura desde acá.")
+    elif row["scope"] == "system" and os.getuid() != 0:
+        blockers.append("Desinstalar programas del sistema requiere permisos de administración del host.")
+    if row["manager"] == "apt":
+        if PROTECTED.match(base): blockers.append(base + " es parte del sistema, de AXON o de cómo entrás al servidor; no se desinstala desde acá.")
+        try:
+            simulated = command(["apt-get", "-s", "purge", "--autoremove", "--", row["packageName"]], timeout=60)
+            removes = [line.split()[1] for line in simulated.splitlines() if line.startswith(("Remv ", "Purg "))]
+        except RuntimeError as e: blockers.append("APT no pudo simular la desinstalación: " + str(e)[-300:])
+        if removes:
+            info = command(["dpkg-query", "-W", "-f=${binary:Package}\t${Essential}\t${Priority}\n", "--"] + removes, accepted=(0, 1))
+            critical = [f[0] for line in info.splitlines() if len(f := line.split("\t")) == 3 and (f[1] == "yes" or f[2] in ("required", "important"))]
+            critical += [p for p in removes if PROTECTED.match(p.split(":")[0]) and p not in critical]
+            critical = [p for p in critical if p.split(":")[0] != base or not PROTECTED.match(base)]
+            if critical: blockers.append("Se llevaría paquetes imprescindibles del sistema: " + ", ".join(critical[:8]))
+            if len(removes) > 60: blockers.append("La desinstalación arrastra %d paquetes; es demasiado para hacerla sin revisar a mano." % len(removes))
+        notes.append("Se borran también los archivos de configuración del sistema (purge) y las dependencias que ya nadie usa (autoremove).")
+    elif row["manager"] == "snap":
+        if base in SNAP_PROTECTED: blockers.append(base + " es una base que necesitan otros snaps; no se desinstala.")
+        removes = [base]
+    elif row["manager"] == "flatpak":
+        if row.get("kind") == "runtime": blockers.append("Es un componente compartido de Flatpak. Se quita solo cuando ninguna app lo usa, al desinstalar esa app.")
+        removes = [row["packageName"]]
+        notes.append("También se quitan los componentes de Flatpak que ninguna otra app use (flatpak uninstall --unused).")
+    elif row["manager"] in ("pnpm", "bun"):
+        if base == row["manager"]: blockers.append(base + " no se desinstala a sí mismo desde AXON.")
+        removes = [row["packageName"]]
+    elif row["manager"] in REMOVABLE: removes = [row["packageName"]]
+    commands = [] if blockers else removal_command(row)
+    found = leftovers(row, rows, ctx) if row["manager"] in REMOVABLE else []
+    preview = {"id": row["id"], "name": row["name"], "manager": row["manager"], "scope": row["scope"], "user": row["user"], "root": row["root"], "version": row["version"], "packageName": row["packageName"],
+               "removes": removes, "leftovers": found, "commands": commands, "blockers": blockers, "notes": notes,
+               "canExecute": not blockers}
+    preview["digest"] = hashlib.sha256(json.dumps([row["id"], row["version"], removes, commands, [f["path"] for f in found]], separators=(",", ":")).encode()).hexdigest()
+    return {"ok": True, "preview": preview}
+
+
+def trash(path, ctx):
+    """Freedesktop trash in the owner's home: same filesystem, restorable from Archivos."""
+    home = pathlib.Path(ctx["home"])
+    files, info = home / ".local/share/Trash/files", home / ".local/share/Trash/info"
+    for folder in [home / ".local", home / ".local/share", home / ".local/share/Trash", files, info]:
+        if not folder.exists():
+            folder.mkdir(mode=0o700)
+            os.chown(folder, ctx["uid"], -1)
+    source = pathlib.Path(path); name = source.name; counter = 1
+    while (files / name).exists() or (info / (name + ".trashinfo")).exists():
+        counter += 1; name = source.name + "." + str(counter)
+    record_file = info / (name + ".trashinfo")
+    fd = os.open(record_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        from urllib.parse import quote
+        os.write(fd, ("[Trash Info]\nPath=" + quote(str(source)) + "\nDeletionDate=" + time.strftime("%Y-%m-%dT%H:%M:%S") + "\n").encode())
+    finally: os.close(fd)
+    os.chown(record_file, ctx["uid"], -1)
+    try: os.rename(source, files / name)
+    except OSError:
+        record_file.unlink(); raise
+
+
+def remove(req):
+    approved = req["preview"]
+    if time.time() * 1000 - req["createdAt"] > 600000: raise ValueError("La revisión venció; abrí la desinstalación de nuevo")
+    # Same lock key as updates of this manager/prefix (see transaction_key).
+    handles = acquire([":".join([approved["manager"], approved["scope"], approved["user"], approved["root"]])])
+    try:
+        print("Comprobando que nada cambió desde la revisión…", flush=True)
+        current = removal_preview({**req, "item": {"id": approved["id"], "manager": approved["manager"]}})["preview"]
+        if current["digest"] != approved["digest"] or not current["canExecute"]: raise ValueError("La instalación o lo que se iba a borrar cambió. No se desinstaló nada; revisá de nuevo.")
+        chosen = [p for p in req.get("leftovers", []) if p in {f["path"] for f in current["leftovers"]}]
+        if len(chosen) != len(req.get("leftovers", [])): raise ValueError("Se pidió borrar una carpeta que no estaba en la revisión")
+        ctx = context(approved["user"], req.get("settings")) if approved["scope"] == "user" else None
+        owner = context(approved["user"] if approved["scope"] == "user" else req["user"], req.get("settings"))
+        for argv in current["commands"]:
+            argv = argv[:]
+            if ctx:
+                executable = tool(argv[0], ctx)
+                if not executable: raise ValueError("El gestor dejó de estar disponible")
+                argv[0] = executable
+            print("Ejecutando: " + " ".join(argv), flush=True)
+            command(argv, ctx, timeout=1800, stream=True, inherited=handles)
+        print("Verificando que el programa ya no esté instalado…", flush=True)
+        remaining = scan({**req, "updates": False, "managers": [approved["manager"]], "light": True})["installations"]
+        if any(p["id"] == approved["id"] for p in remaining): raise RuntimeError("El gestor terminó pero el programa sigue instalado")
+        moved = 0
+        for path in chosen:
+            if not os.path.lexists(path): continue
+            try:
+                trash(path, owner); moved += 1
+                print("A la papelera: " + path, flush=True)
+            except OSError as e: print("Aviso: no se pudo mover " + path + ": " + str(e), flush=True)
+        print("Listo: %s desinstalado%s." % (approved["name"], "; " + ("1 carpeta" if moved == 1 else "%d carpetas" % moved) + " de restos en la papelera" if moved else ""), flush=True)
         return {"ok": True, "verified": True}
     finally:
         for fd in handles: os.close(fd)

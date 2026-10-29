@@ -43,6 +43,18 @@ class NativeContract(unittest.TestCase):
         self.assertEqual(host.build_transaction([row])["argv"],["pnpm","--dir","/custom/prefix","add","-g","@scope/tool@2.0.0"])
         with self.assertRaises(ValueError):host.build_transaction([{**row,"packageName":"tool; touch /tmp/anything"}])
 
+    def test_pnpm_updates_itself_with_self_update_in_its_own_transaction(self):
+        ctx={"uid":42,"user":"any"};prefix="/custom/prefix"
+        own=host.record("pnpm","user",ctx,prefix,"pnpm","12.9.1",targetVersion="12.14.0",canUpdate=True)
+        other=host.record("pnpm","user",ctx,prefix,"tool","1.0.0",targetVersion="2.0.0",canUpdate=True)
+        self.assertEqual(host.build_transaction([own])["argv"],["pnpm","self-update","12.14.0"])
+        with self.assertRaises(ValueError):host.build_transaction([own,other])
+        src={"id":"pnpm-src","complete":True}
+        rows=[{**own,"sourceId":"pnpm-src"},{**other,"sourceId":"pnpm-src"}]
+        with patch.object(host,"scan",return_value={"installations":rows,"sources":[src]}):
+            txs=host.plan({"user":"any","items":rows})["transactions"]
+        self.assertEqual(sorted(tx["argv"][1] for tx in txs),["--dir","self-update"])
+
     def test_flatpak_scope_origin_mask_and_full_commit_are_preserved(self):
         ctx={"uid":42,"user":"any","home":"/srv/home","env":{}}
         commit="a"*64
@@ -55,6 +67,62 @@ class NativeContract(unittest.TestCase):
             rows=host.scan({"user":"any","updates":True,"managers":["flatpak"]})["installations"]
         system,user=rows;self.assertNotEqual(system["id"],user["id"]);self.assertEqual(system["updateState"],"held");self.assertFalse(system["canUpdate"]);self.assertTrue(user["canUpdate"])
         self.assertEqual(user["targetCommit"],commit);tx=host.build_transaction([user]);self.assertIn("--user",tx["argv"]);self.assertIn("--commit="+commit,tx["argv"]);self.assertIn("--no-deps",tx["argv"])
+
+    def test_flatpak_short_commit_is_resolved_to_the_full_hash(self):
+        ctx={"uid":42,"user":"any","home":"/srv/home","env":{}}
+        commit="c8dc11565887"+"b"*52
+        def command(args,*unused,**kwargs):
+            if args[1]=="list":return "runtime/org.unknown.Platform/x86_64/25.08\t1.0\tflathub\n" if "--runtime" in args and "--user" in args else ""
+            if args[1]=="mask":return ""
+            if args[1]=="remote-ls":return "runtime/org.unknown.Platform/x86_64/25.08\tc8dc11565887\tflathub\n" if "--user" in args else ""
+            if args[1]=="remote-info":return commit+"\n"
+            raise AssertionError(args)
+        with patch.object(host,"context",return_value=ctx),patch.object(host,"tool",side_effect=lambda name,*_:"/bin/flatpak" if name=="flatpak" else None),patch.object(host,"command",side_effect=command),patch.object(host,"enrich"),patch.object(host,"local_executables"),patch.object(host.os,"getuid",return_value=0):
+            row,=host.scan({"user":"any","updates":True,"managers":["flatpak"]})["installations"]
+        self.assertTrue(row["canUpdate"]);self.assertEqual(row["targetCommit"],commit);self.assertIn("--commit="+commit,host.build_transaction([row])["argv"])
+
+    def test_leftovers_preselect_caches_and_old_data_but_not_recent_or_shared_config(self):
+        with tempfile.TemporaryDirectory() as home:
+            uid=os.getuid();ctx={"uid":uid,"user":"any","home":home,"env":{}}
+            for folder in [".cache/tool",".config/tool",".local/share/tool",".config/shared",".ssh",".tool","Documents/tool"]: os.makedirs(home+"/"+folder)
+            old=0;os.utime(home+"/.local/share/tool",(old,old))
+            row=host.record("pnpm","user",ctx,"/p","tool","1.0",executables=["shared"])
+            other=host.record("apt","system",None,"/","shared","1.0")
+            found={f["path"][len(home)+1:]:f for f in host.leftovers(row,[row,other],ctx)}
+        self.assertEqual(set(found),{".cache/tool",".config/tool",".local/share/tool",".config/shared",".tool"})
+        self.assertTrue(found[".cache/tool"]["selected"]);self.assertTrue(found[".local/share/tool"]["selected"])
+        self.assertFalse(found[".config/tool"]["selected"]);self.assertIn("días",found[".config/tool"]["note"])
+        self.assertFalse(found[".config/shared"]["selected"]);self.assertTrue(found[".config/shared"]["shared"])
+
+    def test_removal_preview_blocks_protected_and_essential_apt_packages(self):
+        row=host.record("apt","system",None,"/","bash","5.2")
+        def command(args,*unused,**kwargs):
+            if args[:2]==["apt-get","-s"]:return "Purg bash [5.2]\nRemv gdm3 [50]\n"
+            if args[0]=="dpkg-query":return "bash\tyes\trequired\ngdm3\tno\toptional\n"
+            raise AssertionError(args)
+        with patch.object(host,"scan",return_value={"installations":[row]}),patch.object(host,"command",side_effect=command),patch.object(host,"context",return_value={"uid":0,"user":"root","home":"/nonexistent","env":{}}),patch.object(host.os,"getuid",return_value=0):
+            preview=host.removal_preview({"user":"root","item":{"id":row["id"]}})["preview"]
+        self.assertFalse(preview["canExecute"]);self.assertEqual(preview["commands"],[]);self.assertTrue(any("bash" in b for b in preview["blockers"]))
+
+    def test_remove_rechecks_the_preview_runs_the_manager_and_trashes_only_chosen_leftovers(self):
+        with tempfile.TemporaryDirectory() as home:
+            uid=os.getuid();ctx={"uid":uid,"user":"any","home":home,"env":{"PATH":"/bin"}}
+            os.makedirs(home+"/.cache/tool");os.makedirs(home+"/.config/tool")
+            row=host.record("pnpm","user",ctx,"/p","tool","1.0")
+            ran=[];state={"installed":True}
+            def scan(req): return {"installations":[row] if state["installed"] else []}
+            def command(argv,*unused,**kwargs): ran.append(argv);state["installed"]=False;return ""
+            with patch.object(host,"scan",side_effect=scan),patch.object(host,"context",return_value=ctx),patch.object(host,"tool",return_value="/bin/pnpm"),patch.object(host,"command",side_effect=command),patch.object(host,"acquire",return_value=[]),patch.object(host.os,"chown"):
+                preview=host.removal_preview({"user":"any","item":{"id":row["id"]}})["preview"]
+                state["installed"]=True
+                forged={"user":"any","preview":preview,"createdAt":host.time.time()*1000,"leftovers":[home+"/.ssh"]}
+                with self.assertRaisesRegex(ValueError,"revisión"):host.remove(forged)
+                self.assertEqual(ran,[])
+                host.remove({**forged,"leftovers":[home+"/.cache/tool"]})
+            self.assertEqual(ran,[["/bin/pnpm","remove","-g","tool"]])
+            self.assertFalse(os.path.exists(home+"/.cache/tool"));self.assertTrue(os.path.isdir(home+"/.config/tool"))
+            self.assertTrue(os.path.isdir(home+"/.local/share/Trash/files/tool"))
+            self.assertIn("Path="+home+"/.cache/tool",open(home+"/.local/share/Trash/info/tool.trashinfo").read())
 
     def test_uncatalogued_local_executable_is_discovered_without_running_it(self):
         with tempfile.TemporaryDirectory() as tmp:

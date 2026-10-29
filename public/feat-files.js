@@ -1162,6 +1162,11 @@
         name, path: p, sourceUrl: previewUrl(p), textUrl: '/api/files/read?path=' + encodeURIComponent(p), documentUrl: '/api/files/document?path=' + encodeURIComponent(p),
         downloadUrl: '/api/files/download?path=' + encodeURIComponent(p),
       });
+    } else if (htmlFile(name)) {
+      api(`/api/files/read?path=${encodeURIComponent(p)}`, { signal: AbortSignal.timeout(20_000) })
+        .then(data => {
+          if (!stale()) documentPreview = mountHtml(body, { ...data, path: p });
+        }).catch(err => { if (!stale()) renderPrevFallback(err.message || 'No se pudo leer el HTML'); });
     } else if (kind === 'text') {
       api(`/api/files/read?path=${encodeURIComponent(p)}`, { signal: AbortSignal.timeout(20_000) })
         .then((data) => {
@@ -1280,11 +1285,41 @@
   let editorTruncated = false, editorBinary = false;
   let documentMode = 'edit';
   const markdownFile = p => window.AxonDocumentViewer?.isMarkdown(p);
+  const htmlFile = p => /\.html?$/i.test(p || '');
+  const visualFile = p => markdownFile(p) || htmlFile(p);
+
+  // A script-disabled sandbox and a policy placed before untrusted markup keep HTML
+  // previews passive. Relative styles/images use an authenticated asset gateway.
+  function mountHtml(container, options) {
+    const root = document.createElement('div'); root.className = 'fm-html-view'; root.tabIndex = 0;
+    const note = document.createElement('p'); note.className = 'fm-pv-note';
+    note.textContent = options.binary ? 'Archivo binario o codificación distinta de UTF-8 — abrilo en el editor.'
+      : options.truncated ? 'HTML truncado (>512 KB) — la vista puede estar incompleta.'
+      : (options.note || 'Vista previa') + ' · HTML estático; scripts desactivados';
+    root.append(note); container.replaceChildren(root);
+    if (!options.binary) {
+      const frame = document.createElement('iframe');
+      // Keep cookies available for local assets; scripts remain forbidden by
+      // both sandbox and CSP. Never add allow-scripts to this frame.
+      frame.className = 'fm-html-frame'; frame.title = 'Vista previa de ' + options.path.split('/').pop();
+      frame.setAttribute('sandbox', 'allow-same-origin'); frame.referrerPolicy = 'no-referrer';
+      const doc = new DOMParser().parseFromString(options.content || '', 'text/html');
+      doc.querySelectorAll('base, meta[http-equiv], script, iframe, frame, object, embed').forEach(node => node.remove());
+      const base = doc.createElement('base');
+      base.href = location.origin + '/api/files/html-assets' + parentOf(options.path).split('/').map(encodeURIComponent).join('/') + '/';
+      const policy = doc.createElement('meta'); policy.httpEquiv = 'Content-Security-Policy';
+      policy.content = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline' http: https:; img-src http: https: data:; font-src http: https: data:; media-src http: https: data:; connect-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri " + location.origin;
+      doc.head.prepend(policy, base);
+      frame.srcdoc = '<!doctype html>' + doc.documentElement.outerHTML;
+      root.append(frame);
+    }
+    return { destroy() { root.remove(); } };
+  }
   function setDocumentMode(mode, updateRoute = true, focus = true) {
-    const markdown = markdownFile(S.editingPath);
-    documentMode = markdown && mode === 'read' ? 'read' : 'edit';
+    const visual = visualFile(S.editingPath);
+    documentMode = visual && mode === 'read' ? 'read' : 'edit';
     const reading = documentMode === 'read';
-    el('fm-document-modes').classList.toggle('hidden', !markdown);
+    el('fm-document-modes').classList.toggle('hidden', !visual);
     for (const [id, selected] of [['fm-document-read', reading], ['fm-document-edit', !reading]]) {
       el(id).classList.toggle('active', selected); el(id).setAttribute('aria-pressed', String(selected));
     }
@@ -1292,15 +1327,15 @@
     el('fm-editor-preview').classList.toggle('hidden', !reading);
     editorPreview?.destroy(); editorPreview = null;
     if (reading) {
-      editorPreview = window.AxonDocumentViewer.mount(el('fm-editor-preview'), {
+      editorPreview = (htmlFile(S.editingPath) ? mountHtml : window.AxonDocumentViewer.mount)(el('fm-editor-preview'), {
         name: S.editingPath.split('/').pop(), path: S.editingPath,
         content: el('fm-editor-text').value, truncated: editorTruncated, binary: editorBinary,
         note: isDirty() ? 'Vista de tus cambios sin guardar' : 'Vista de lectura',
         downloadUrl: '/api/files/download?path=' + encodeURIComponent(S.editingPath),
       });
-      if (focus) el('fm-editor-preview').querySelector('.axon-doc').focus();
+      if (focus) el('fm-editor-preview').querySelector('.axon-doc, .fm-html-view')?.focus();
     } else if (focus) el('fm-editor-text').focus();
-    el('fm-editor-help').textContent = markdown
+    el('fm-editor-help').textContent = visual
       ? 'Visualizador ↔ Editor: Ctrl/Cmd+E · Ctrl/Cmd+S guarda · Esc vuelve a la lista'
       : 'Ctrl/Cmd+S guarda · Tab indenta (Shift+Tab quita) · Esc vuelve a la lista';
     if (updateRoute) window.AxonNavigation?.update('files', fileParams());
@@ -1309,7 +1344,7 @@
   el('fm-document-edit').addEventListener('click', () => setDocumentMode('edit'));
   document.addEventListener('keydown', e => {
     if (!sec.classList.contains('active') || !S.editingPath || document.querySelector('.modal:not(.hidden)')) return;
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e' && markdownFile(S.editingPath)) {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e' && visualFile(S.editingPath)) {
       e.preventDefault(); setDocumentMode(documentMode === 'read' ? 'edit' : 'read');
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's' && documentMode === 'read') {
       e.preventDefault(); el('fm-save-btn').click();
@@ -1892,7 +1927,7 @@
   function openEntry(name, type) {
     if (type === 'dir') return navigate(join(S.cwd, name));
     const p = join(S.cwd, name);
-    if (markdownFile(name)) return openEditor(p, false, 'read');
+    if (visualFile(name)) return openEditor(p, false, 'read');
     const L = window.AxonLibrary;
     if (L && ['image', 'raw', 'video', 'audio', 'pdf', 'vector', 'design'].includes(L.kindOf(p)) && L.peek(p)) return L.view([p]);
     if (kindFor(name) === 'text') openEditor(p);
@@ -4235,7 +4270,7 @@
     if(snapshot?.focus && S.cursor) sec.querySelector(`[data-name="${CSS.escape(S.cursor)}"]`)?.focus({preventScroll:true});
     if(params.item && !params.item.includes('/') && available.has(params.item)) {
       S.cursor=params.item;
-      if(params.edit==='1' || markdownFile(params.item)) await openEditor(join(S.cwd,params.item),true,params.edit==='1' ? 'edit' : 'read'); else openPreview(params.item,true);
+      if(params.edit==='1' || visualFile(params.item)) await openEditor(join(S.cwd,params.item),true,params.edit==='1' ? 'edit' : 'read'); else openPreview(params.item,true);
     }
     if(params.action==='upload') { el('fm-file-input').click(); }
     window.AxonNavigation.update('files',fileParams());

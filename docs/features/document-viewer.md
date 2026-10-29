@@ -35,6 +35,25 @@ pasan por la API de vista previa autenticada; los enlaces a archivos abren
 Archivos. La lectura se limita a 512 KB y avisa si está truncada. Un documento
 binario o con UTF-8 inválido no se interpreta como Markdown.
 
+## HTML en Archivos
+
+Los `.html` y `.htm` abren el **Visualizador** de forma predeterminada. Los botones
+**Visualizador / Editor** y `Ctrl/Cmd+E` permiten alternar y previsualizar el borrador
+sin guardarlo. **Vista previa** (Espacio) también muestra el diseño.
+
+La vista conserva el HTML y CSS del documento, sin aplicar el tema de AXON dentro
+de la página. Las imágenes, hojas de estilo (incluidos `@import` y `url()` relativos)
+y fuentes locales se sirven por una ruta autenticada con la misma autorización de
+Archivos. Los enlaces relativos se resuelven desde la carpeta del HTML; los recursos
+con rutas absolutas de un sitio web requieren ese sitio para resolverlas.
+
+Es una previsualización estática: el iframe no permite scripts, formularios,
+popups ni navegación del panel superior. Una política CSP adicional bloquea código
+y conexiones, y se eliminan scripts, frames y redirecciones declaradas en el HTML.
+Las aplicaciones que generan su contenido con JavaScript necesitan su servidor web.
+El límite de lectura sigue siendo 512 KB, con aviso cuando se trunca; los archivos
+binarios o con codificación inválida no se renderizan ni se pueden sobrescribir.
+
 ## Procesamiento y protección
 
 - PDF.js y sus fuentes/decodificadores se distribuyen localmente, desde la
