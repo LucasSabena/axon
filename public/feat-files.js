@@ -32,6 +32,7 @@
       <div class="fm-cmdbar" role="toolbar" aria-label="Acciones de la carpeta">
         <button id="fm-create-btn" class="fm-cmd fm-cmd-primary" popovertarget="fm-create-menu" aria-haspopup="menu">${icon('plus')}<span>Nuevo</span>${icon('chevron-down')}</button>
         <button id="fm-upload-btn" class="fm-cmd" title="Subir archivos (Ctrl+U)">${icon('upload')}<span>Subir</span></button>
+        <button id="fm-receive-btn" class="fm-cmd" title="Crear un link para que otra persona te suba archivos a esta carpeta">${icon('inbox')}<span>Recibir</span></button>
         <span class="fm-cmd-sep" aria-hidden="true"></span>
         <button id="fm-sort-btn" class="fm-cmd" aria-haspopup="menu" title="Ordenar">${icon('arrow-up-down')}<span id="fm-sort-label">Nombre</span>${icon('chevron-down')}</button>
         <button id="fm-view-btn" class="fm-cmd" aria-haspopup="menu" title="Tamaño de íconos, densidad y elementos visibles">${icon('layout-template')}<span>Vista</span>${icon('chevron-down')}</button>
@@ -156,6 +157,7 @@
     <div class="fm-selbar hidden" id="fm-selbar" role="toolbar" aria-label="Acciones de la selección">
       <span class="fm-sel-info"><b id="fm-sel-count"></b><small id="fm-sel-size"></small></span>
       <button id="fm-sel-share" class="btn-primary" title="Crear un link para compartir (los archivos seleccionados)">${icon('share-2')}<span>Compartir</span></button>
+      <button id="fm-sel-receive" class="btn-secondary hidden" title="Crear un link para que otra persona suba archivos a la carpeta seleccionada">${icon('inbox')}<span>Recibir</span></button>
       <button id="fm-sel-dl" class="btn-secondary" title="Descargar">${icon('download')}<span>Descargar</span></button>
       <button id="fm-sel-copy" class="btn-secondary" title="Copiar (Ctrl+C)">${icon('copy')}<span>Copiar</span></button>
       <button id="fm-sel-move" class="btn-secondary" title="Cortar para mover (Ctrl+X)">${icon('scissors')}<span>Cortar</span></button>
@@ -498,6 +500,7 @@
         }
       } else {
         acts = `<div class="fm-acts">
+          ${e.type === 'dir' && window.AxonLibrary ? `<button class="fm-act" data-act="uplink" aria-label="Recibir archivos en ${esc(e.name)}" title="Compartir para recibir archivos">${icon('inbox')}</button>` : ''}
           ${e.type !== 'dir' && window.AxonLibrary ? `<button class="fm-act" data-act="share" aria-label="Compartir ${esc(e.name)}" title="Compartir link">${icon('share-2')}</button>` : ''}
           <button class="fm-act" data-act="organize" aria-label="Organizar ${esc(e.name)}" title="Colores, etiquetas y marcas">${icon('tags')}</button>
           ${e.type !== 'dir' ? `<button class="fm-act" data-act="download" aria-label="Descargar ${esc(e.name)}" title="Descargar">${icon('download')}</button>` : `<button class="fm-act" data-act="zipdl" aria-label="Descargar ${esc(e.name)} como zip" title="Descargar como .zip">${icon('archive')}</button>`}
@@ -1729,6 +1732,8 @@
       downloadZip(p);
     } else if (act === 'share') {
       window.AxonLibrary?.share([p]);
+    } else if (act === 'uplink') {
+      window.AxonLibrary?.uploadLink(p, name);
     } else if (act === 'organize') { AxonFileCatalog.edit([p]);
     } else if (act === 'rename') {
       const nn = await fmPrompt('Renombrar', `Nuevo nombre para «${name}»`, name, true);
@@ -1768,8 +1773,10 @@
     el('fm-sel-size').textContent = bytes ? fmtSize(bytes) : '';
     const trash = inTrash(S.cwd);
     const files = chosen.filter((e) => e.type !== 'dir');
+    const dirs = chosen.filter((e) => e.type === 'dir');
     // Sharing and the media tools are library features: files only, never inside the trash.
     el('fm-sel-share').classList.toggle('hidden', trash || !window.AxonLibrary || !files.length);
+    el('fm-sel-receive').classList.toggle('hidden', trash || !window.AxonLibrary || dirs.length !== 1 || chosen.length !== 1);
     for (const id of ['fm-sel-copy', 'fm-sel-move', 'fm-sel-organize', 'fm-sel-dl']) el(id).classList.toggle('hidden', trash);
     el('fm-sel-del').title = trash ? 'Borrado definitivo — no se puede deshacer' : 'Enviar a la papelera (Supr)';
     el('fm-sel-del').querySelector('span').textContent = trash ? 'Borrar' : 'Eliminar';
@@ -2769,6 +2776,7 @@
       }
       if (isDir && typeof openTermCmd === 'function') open.push({ icon: 'terminal', label: 'Abrir terminal acá', run: () => openTermCmd(`cd ${quote(p)}`) });
       if (isDir) open.push({ icon: 'file-plus', label: 'Nuevo archivo en esta carpeta', disabled: readOnly, run: () => createFile(p) });
+      if (isDir && L) open.push({ icon: 'inbox', label: 'Compartir para recibir archivos…', run: () => L.uploadLink(p, name) });
       if (hit) open.push({ icon: 'folder-search', label: 'Abrir carpeta contenedora', run: () => { exitSearch(); navigate(base).then((ok) => { if (ok !== false) selectName(name); }); } });
     }
     open.push(isDir || dirs
@@ -3659,6 +3667,10 @@
     window.AxonNavigation?.update('files', fileParams());
   });
   el('fm-sel-share').addEventListener('click', () => window.AxonLibrary?.share(selPaths().filter((p) => S.entries.find((e) => join(S.cwd, e.name) === p)?.type !== 'dir')));
+  el('fm-sel-receive').addEventListener('click', () => {
+    const chosen = [...S.sel].map((name) => S.entries.find((e) => e.name === name)).filter(Boolean);
+    if (chosen.length === 1 && chosen[0].type === 'dir') window.AxonLibrary?.uploadLink(join(S.cwd, chosen[0].name), chosen[0].name);
+  });
   el('fm-sel-more').addEventListener('click', () => {
     const name = [...S.sel][0] || S.cursor;
     const ent = S.entries.find((x) => x.name === name);
@@ -3718,6 +3730,10 @@
   });
 
   el('fm-upload-btn').addEventListener('click', () => el('fm-file-input').click());
+  el('fm-receive-btn').addEventListener('click', () => {
+    if (inTrash(S.cwd)) return;
+    window.AxonLibrary?.uploadLink(S.cwd, S.cwd.split('/').filter(Boolean).pop() || 'Subida de archivos');
+  });
   el('fm-upload-dir-btn').addEventListener('click', () => el('fm-dir-input').click());
 
   // ---------- Upload (shared by file pickers and drag & drop) ----------

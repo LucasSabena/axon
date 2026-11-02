@@ -354,7 +354,7 @@
       L.shareBase = d.shareBase;
       L.scannedAt = d.scannedAt;
       L.revision = d.revision;L.metadataRevision=d.metadataRevision;
-      L.sharesCount = d.shares;
+      L.sharesCount = (d.shares || 0) + (d.uploadLinks || 0);
       for (const id of [...L.sel]) if (!L.byId.has(id)) L.sel.delete(id);
       const nc = $('#nav-count-library');
       if (nc) nc.textContent = d.items.length ? d.items.length.toLocaleString('es-AR') : '';
@@ -1740,6 +1740,136 @@
     ];
   }
 
+  // ---------- Upload-only folder links ----------
+
+  function uploadLinkModal(folder, suggestedTitle) {
+    if (!folder) return toast('Elegí una carpeta', 'warn');
+    let ttl = Number(localStorage.getItem('lib-ttl') || 7 * 86400);
+    let maxBytes = 0;
+    const defTitle = suggestedTitle || baseOf(folder) || 'Subida de archivos';
+    openModal(`
+      <h3>${icon('inbox')} Recibir archivos en una carpeta</h3>
+      <p class="lib-muted">${icon('folder')} ${esc(prettyPath(folder))}</p>
+      <div class="lib-muted"><span>Quien abra el link solo va a ver un lugar para subir archivos. <b>No puede ver, reproducir ni descargar lo que ya hay en la carpeta.</b></span></div>
+      <label>Título que verá quien abra el link<input type="text" id="lul-title" value="${esc(defTitle)}"></label>
+      <label>Mensaje <small class="lt-hint">(opcional, aparece arriba del área de subida)</small><textarea id="lul-msg" rows="2" placeholder="Ej: Pasame el video original por acá, gracias."></textarea></label>
+      <div class="lib-field-l">Disponible por</div>
+      <div class="lib-pills" id="lul-ttl">${TTLS.map((t) => `<button class="chip${t.s === ttl ? ' active' : ''}" data-s="${t.s}">${t.label}</button>`).join('')}</div>
+      <div class="lib-field-l">Límite total de subida</div>
+      <div class="lib-pills" id="lul-max">
+        <button class="chip active" data-b="0">Sin límite</button>
+        <button class="chip" data-b="${2 * 1024 ** 3}">2 GB</button>
+        <button class="chip" data-b="${10 * 1024 ** 3}">10 GB</button>
+        <button class="chip" data-b="${50 * 1024 ** 3}">50 GB</button>
+      </div>
+      <label class="lib-toggle"><input type="checkbox" id="lul-pw-on"><span>Proteger con contraseña</span></label>
+      <input type="text" id="lul-pw" class="filter-input lib-wide hidden" placeholder="Contraseña" autocomplete="off">
+      <label class="lib-toggle"><input type="checkbox" id="lul-notify" checked><span>Avisarme cuando lleguen archivos</span></label>
+      <div class="modal-actions"><button class="btn-secondary" data-close>Cancelar</button><button class="btn-primary" id="lul-ok">${icon('link')} Crear link</button></div>`, 'lib-share-modal');
+    $$('#lul-ttl .chip').forEach((b) => b.addEventListener('click', () => {
+      ttl = Number(b.dataset.s);
+      $$('#lul-ttl .chip').forEach((x) => x.classList.toggle('active', x === b));
+    }));
+    $$('#lul-max .chip').forEach((b) => b.addEventListener('click', () => {
+      maxBytes = Number(b.dataset.b) || 0;
+      $$('#lul-max .chip').forEach((x) => x.classList.toggle('active', x === b));
+    }));
+    $('#lul-pw-on').addEventListener('change', (e) => {
+      $('#lul-pw').classList.toggle('hidden', !e.target.checked);
+      if (e.target.checked) $('#lul-pw').focus();
+    });
+    $('#lul-ok').addEventListener('click', async () => {
+      const pw = $('#lul-pw-on').checked ? $('#lul-pw').value : '';
+      if ($('#lul-pw-on').checked && !pw) return $('#lul-pw').focus();
+      $('#lul-ok').disabled = true;
+      try {
+        const r = await api('/api/library/upload-links', {
+          method: 'POST',
+          body: { folder, title: $('#lul-title').value, msg: $('#lul-msg').value, ttl, maxBytes, password: pw, notifyActivity: $('#lul-notify').checked },
+        });
+        L.sharesCount++;
+        renderSide();
+        uploadLinkResult(r.link, pw);
+      } catch (err) {
+        $('#lul-ok').disabled = false;
+        errToast(err);
+      }
+    });
+  }
+
+  function uploadLinkResult(l, pw) {
+    openModal(`
+      <h3>${icon('check-circle-2')} Link para recibir archivos</h3>
+      <div class="lib-link-box"><input type="text" readonly value="${esc(l.url)}" id="lulr-url"><button class="btn-primary" id="lulr-copy">${icon('copy')} Copiar</button></div>
+      <div class="lib-share-done">
+        <div class="lib-qr">${qrSvg(l.url)}</div>
+        <div class="lib-share-facts">
+          <p>${icon('inbox')} Solo pueden <b>subir archivos</b> — no ven el contenido de la carpeta</p>
+          <p>${icon('clock')} ${esc(expiresIn(l.expires))}${l.expires ? ` · hasta ${esc(fmtDateTime(l.expires))}` : ''}</p>
+          <p>${icon('hard-drive')} ${l.maxBytes ? `Hasta ${fmtSize(l.maxBytes)} en total` : 'Sin límite de tamaño total'}</p>
+          ${pw ? `<p>${icon('lock')} Con contraseña — mandala por separado</p>` : ''}
+          <div class="lib-share-btns">
+            ${navigator.share ? `<button class="btn-primary" id="lulr-native">${icon('share')} Compartir…</button>` : ''}
+            ${shareTargets(l).map((t) => `<a class="btn-secondary" href="${esc(t.href)}" target="_blank" rel="noopener noreferrer">${icon(t.ic)} ${t.l}</a>`).join('')}
+            <a class="btn-secondary" href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">${icon('external-link')} Abrir</a>
+          </div>
+        </div>
+      </div>
+      <div class="modal-actions"><button class="btn-secondary" id="lulr-all">${icon('link')} Ver todos los links</button><button class="btn-primary" data-close>Listo</button></div>`);
+    $('#lulr-url').addEventListener('focus', (e) => e.target.select());
+    $('#lulr-copy').addEventListener('click', () => copyText(l.url));
+    $('#lulr-native')?.addEventListener('click', () => navigator.share({ title: l.title, text: l.msg || l.title, url: l.url }).catch(() => {}));
+    $('#lulr-all').addEventListener('click', () => { closeModal(); closeViewer(); setView({ type: 'shares' }); });
+    copyText(l.url);
+  }
+
+  function editUploadLink(l, after) {
+    let ttl = -1;
+    openModal(`
+      <h3>${icon('pencil')} Editar link para recibir archivos</h3>
+      <p class="lib-muted">${icon('folder')} ${esc(prettyPath(l.folder))}</p>
+      <label>Título<input type="text" id="lue-title" value="${esc(l.title)}"></label>
+      <label>Mensaje<textarea id="lue-msg" rows="2">${esc(l.msg || '')}</textarea></label>
+      <div class="lib-field-l">Vencimiento <small class="lt-hint">· ${esc(expiresIn(l.expires))}</small></div>
+      <div class="lib-pills" id="lue-ttl"><button class="chip active" data-s="-1">Sin cambios</button>${TTLS.map((t) => `<button class="chip" data-s="${t.s}">${t.s ? `${t.label} desde hoy` : t.label}</button>`).join('')}</div>
+      <label class="lib-toggle"><input type="checkbox" id="lue-active"${l.active !== false ? ' checked' : ''}><span>Link activo <small>(si lo apagás, deja de aceptar subidas)</small></span></label>
+      <label class="lib-toggle"><input type="checkbox" id="lue-notify"${l.notifyActivity !== false ? ' checked' : ''}><span>Avisarme cuando lleguen archivos</span></label>
+      <label class="lib-toggle"><input type="checkbox" id="lue-pw-on"${l.hasPassword ? ' checked' : ''}><span>Contraseña${l.hasPassword ? ' <small>(dejá el campo vacío para mantener la actual)</small>' : ''}</span></label>
+      <input type="text" id="lue-pw" class="filter-input lib-wide${l.hasPassword ? '' : ' hidden'}" placeholder="${l.hasPassword ? 'Nueva contraseña' : 'Contraseña'}" autocomplete="off">
+      <div class="modal-actions"><button class="btn-secondary" data-close>Cancelar</button><button class="btn-primary" id="lue-ok">${icon('save')} Guardar</button></div>`);
+    $$('#lue-ttl .chip').forEach((b) => b.addEventListener('click', () => { ttl = Number(b.dataset.s); $$('#lue-ttl .chip').forEach((x) => x.classList.toggle('active', x === b)); }));
+    $('#lue-pw-on').addEventListener('change', (e) => $('#lue-pw').classList.toggle('hidden', !e.target.checked));
+    $('#lue-ok').addEventListener('click', async () => {
+      const body = { title: $('#lue-title').value, msg: $('#lue-msg').value, active: $('#lue-active').checked, notifyActivity: $('#lue-notify').checked };
+      if (ttl >= 0) body.ttl = ttl || null;
+      if (!$('#lue-pw-on').checked && l.hasPassword) body.password = null;
+      else if ($('#lue-pw-on').checked && $('#lue-pw').value) body.password = $('#lue-pw').value;
+      else if ($('#lue-pw-on').checked && !l.hasPassword) return $('#lue-pw').focus();
+      try {
+        await api(`/api/library/upload-links/${l.id}`, { method: 'PATCH', body });
+        closeModal();
+        toast('Link actualizado', 'ok', '', 2000);
+        after?.();
+      } catch (err) { errToast(err); }
+    });
+  }
+
+  function showUploadLinkActivity(l) {
+    openModal(`<h3>${icon('inbox')} ${esc(l.title)}</h3>
+      <p class="lib-muted">${l.filesReceived} archivo${l.filesReceived === 1 ? '' : 's'} recibido${l.filesReceived === 1 ? '' : 's'} · ${fmtSize(l.uploadedBytes)} · ${l.views} visita${l.views === 1 ? '' : 's'} · ${l.visitors || 0} visitante${(l.visitors || 0) === 1 ? '' : 's'} anónimo${(l.visitors || 0) === 1 ? '' : 's'}${l.visitorsCapped ? '+' : ''}</p>
+      <label class="lib-toggle"><input type="checkbox" id="lua-notify"${l.notifyActivity !== false ? ' checked' : ''}><span>Recibir notificaciones de este link</span></label>
+      <h4>Últimos archivos recibidos</h4>
+      <ul class="share-files-list">${(l.recentUploads || []).map((u) => `<li><b>${esc(u.n)}</b><small>${fmtSize(u.s)} · ${esc(fmtDateTime(u.t))}</small></li>`).join('') || '<li><small>Todavía no llegó ningún archivo.</small></li>'}</ul>
+      <h4>Últimas visitas</h4>
+      <p class="lib-muted">Cada visitante se identifica con un código anónimo; no se guarda su IP.</p>
+      <div class="share-activity-list">${(l.recentActivity || []).filter((e) => e.kind === 'view').map((e) => `<div><b>Visita</b><span>${esc(e.client)}</span><small>${esc(fmtDateTime(e.t))} · ${esc(e.visitor)}</small></div>`).join('') || '<p>Todavía no hay visitas.</p>'}</div>
+      <div class="modal-actions"><button class="btn-secondary" data-close>Cerrar</button></div>`, 'lib-activity-modal');
+    $('#lua-notify').addEventListener('change', async (e) => {
+      try { await api(`/api/library/upload-links/${l.id}`, { method: 'PATCH', body: { notifyActivity: e.target.checked } }); l.notifyActivity = e.target.checked; }
+      catch (err) { e.target.checked = !e.target.checked; errToast(err); }
+    });
+  }
+
   function shareResult(s, pw) {
     openModal(`
       <h3>${icon('check-circle-2')} Link listo</h3>
@@ -1848,24 +1978,56 @@
     $('#lib-crumbs').innerHTML = `<span class="lib-crumb-title">Links compartidos</span><span class="lib-crumb-sp"></span>
       <button class="lib-crumb-act" id="lib-sh-clean">${icon('trash')} Borrar vencidos</button><span class="lib-status" id="lib-status"></span>`;
     $('#lib-sh-clean').addEventListener('click', async () => {
-      if(!await confirmDialog('Borrar links vencidos','Se borra su historial de actividad. Los archivos se conservan.','Borrar vencidos'))return;
-      const r = await api('/api/library/shares/cleanup', { method: 'POST' }).catch(errToast);
-      if (r) toast(`${r.removed} links vencidos eliminados`, 'ok', '', 2500);
+      if (!await confirmDialog('Borrar links vencidos', 'Se borra su historial de actividad. Los archivos recibidos y compartidos se conservan.', 'Borrar vencidos')) return;
+      const [r, u] = await Promise.all([
+        api('/api/library/shares/cleanup', { method: 'POST' }).catch((err) => { errToast(err); return null; }),
+        api('/api/library/upload-links/cleanup', { method: 'POST' }).catch((err) => { errToast(err); return null; }),
+      ]);
+      if (r || u) toast(`${(r?.removed || 0) + (u?.removed || 0)} links vencidos eliminados`, 'ok', '', 2500);
       renderShares();
     });
     updateBulk();
     const body = $('#lib-body');
     body.className = 'lib-body';
-    let d;
-    try { d = await api('/api/library/shares'); } catch (err) { return errToast(err); }
-    L.sharesCount = d.shares.filter((s) => s.alive).length;
-    $('#lib-sub').textContent = `${L.sharesCount} activos · ${d.shares.length} en total`;
-    if (!d.shares.length) {
-      body.innerHTML = `<div class="lib-empty">${icon('link')}<p>Todavía no compartiste nada.<br>Abrí un archivo o seleccioná varios y tocá <b>Compartir</b>.</p></div>`;
+    let d, u;
+    try { [d, u] = await Promise.all([api('/api/library/shares'), api('/api/library/upload-links')]); }
+    catch (err) { return errToast(err); }
+    const links = d.shares || [];
+    const uploads = u.links || [];
+    L.sharesCount = links.filter((s) => s.alive).length + uploads.filter((l) => l.alive).length;
+    $('#lib-sub').textContent = `${L.sharesCount} activos · ${links.length + uploads.length} en total`;
+    if (!links.length && !uploads.length) {
+      body.innerHTML = `<div class="lib-empty">${icon('link')}<p>Todavía no compartiste nada.<br>Abrí un archivo y tocá <b>Compartir</b>, o elegí una carpeta en Archivos y usá <b>Recibir</b> para que otros te suban archivos.</p></div>`;
       refreshIcons();
       return;
     }
-    body.innerHTML = `<div class="lib-shares">${d.shares.map((s) => {
+    const upCards = !uploads.length ? '' : `<h4 class="lib-links-h">${icon('inbox')} Para recibir archivos <small>solo subida</small></h4>
+      <div class="lib-shares">${uploads.map((l) => `
+        <div class="lib-share up${l.alive ? '' : ' dead'}" data-uid="${l.id}">
+          <div class="lib-share-th n1"><span class="lib-up-th">${icon('inbox')}</span></div>
+          <div class="lib-share-main">
+            <b>${esc(l.title)} <span class="lib-up-tag">recibe archivos</span></b>
+            <small>${icon('folder')} ${esc(l.folderName)} · ${l.filesReceived} archivo${l.filesReceived === 1 ? '' : 's'} · ${fmtSize(l.uploadedBytes)}${l.recentUploads?.[0] ? ` · último: ${esc(l.recentUploads[0].n)} · ${esc(fmtDateTime(l.recentUploads[0].t))}` : ''}</small>
+            <div class="lib-share-meta">
+              <span class="${l.alive ? 'ok' : 'bad'}">${icon('clock')} ${l.active === false ? 'Pausado' : esc(expiresIn(l.expires))}</span>
+              <span title="Archivos recibidos">${icon('inbox')} ${l.filesReceived}</span><span title="Visitas">${icon('eye')} ${l.views}</span>
+              ${l.hasPassword ? `<span title="Con contraseña">${icon('lock')}</span>` : ''}
+              ${l.maxBytes ? `<span title="Límite total">${icon('hard-drive')} ${fmtSize(l.maxBytes)}</span>` : ''}
+            </div>
+            <small class="lib-share-url">${esc(l.url)}</small>
+          </div>
+          <div class="lib-share-acts">
+            <button class="btn-secondary" data-a="copy" title="Copiar link">${icon('copy')}</button>
+            <button class="btn-secondary" data-a="qr" title="QR y compartir">${icon('qr-code')}</button>
+            <a class="btn-secondary" href="${esc(l.url)}" target="_blank" rel="noopener noreferrer" title="Abrir">${icon('external-link')}</a>
+            <button class="btn-secondary" data-a="activity" title="Archivos recibidos y actividad">${icon('chart-no-axes-combined')}</button>
+            <button class="btn-secondary" data-a="edit" title="Editar">${icon('pencil')}</button>
+            <button class="btn-secondary" data-a="pause" title="${l.active === false ? 'Reactivar' : 'Pausar'}">${icon(l.active === false ? 'play' : 'pause')}</button>
+            <button class="btn-danger" data-a="del" title="Eliminar link">${icon('trash-2')}</button>
+          </div>
+        </div>`).join('')}</div>`;
+    const shareCards = !links.length ? '' : `<h4 class="lib-links-h">${icon('share-2')} Compartidos por mí</h4>
+      <div class="lib-shares">${links.map((s) => {
       const thumbs = s.ids.slice(0, 4).map((id) => L.byId.get(id)).filter(Boolean);
       return `<div class="lib-share${s.alive ? '' : ' dead'}" data-sid="${s.id}">
         <div class="lib-share-th n${thumbs.length}">${thumbs.map((it) => (it.th === -1 ? `<span class="lib-ext k-${it.k}"><b>${esc(it.e.toUpperCase())}</b></span>` : `<img loading="lazy" src="${thumbUrl(it)}" alt="" data-k="${it.k}" data-e="${esc(it.e)}">`)).join('') || icon('file')}</div>
@@ -1892,8 +2054,31 @@
         </div>
       </div>`;
     }).join('')}</div>`;
-    body.querySelectorAll('.lib-share').forEach((row) => {
-      const s = d.shares.find((x) => x.id === row.dataset.sid);
+    body.innerHTML = upCards + shareCards;
+    body.querySelectorAll('.lib-share[data-uid]').forEach((row) => {
+      const l = uploads.find((x) => x.id === row.dataset.uid);
+      row.querySelectorAll('[data-a]').forEach((b) => b.addEventListener('click', async () => {
+        const a = b.dataset.a;
+        try {
+          if (a === 'copy') return copyText(l.url);
+          if (a === 'qr') return uploadLinkResult(l, '');
+          if (a === 'activity') return showUploadLinkActivity(l);
+          if (a === 'edit') return editUploadLink(l, renderShares);
+          if (a === 'pause') {
+            const r = await api(`/api/library/upload-links/${l.id}`, { method: 'PATCH', body: { active: l.active === false } });
+            toast(r.link.active ? 'Link reactivado' : 'Link pausado — ya no acepta subidas', 'ok', '', 2500);
+          }
+          if (a === 'del') {
+            if (!(await confirmDialog('Eliminar link', `"${l.title}" deja de aceptar subidas. Los archivos ya recibidos se conservan.`))) return;
+            await api(`/api/library/upload-links/${l.id}`, { method: 'DELETE' });
+          }
+          renderShares();
+          renderSide();
+        } catch (err) { errToast(err); }
+      }));
+    });
+    body.querySelectorAll('.lib-share[data-sid]').forEach((row) => {
+      const s = links.find((x) => x.id === row.dataset.sid);
       row.querySelectorAll('[data-a]').forEach((b) => b.addEventListener('click', async () => {
         const a = b.dataset.a;
         try {
@@ -1903,15 +2088,15 @@
           if (a === 'edit') return editShare(s, renderShares);
           if (a === 'ext') await api(`/api/library/shares/${s.id}`, { method: 'PATCH', body: { extend: 7 * 86400 } });
           if (a === 'del') {
-            if (!(await confirmDialog('Eliminar link', `"${s.title}" deja de estar disponible en Axon. Los archivos se conservan.${s.cdn?' También se invalidan sus copias de CDN.':''}`))) return;
-            const result=await api(`/api/library/shares/${s.id}`, { method: 'DELETE' });if(result.warning)toast(result.warning,'error','',12000);
+            if (!(await confirmDialog('Eliminar link', `"${s.title}" deja de estar disponible en Axon. Los archivos se conservan.${s.cdn ? ' También se invalidan sus copias de CDN.' : ''}`))) return;
+            const result = await api(`/api/library/shares/${s.id}`, { method: 'DELETE' }); if (result.warning) toast(result.warning, 'error', '', 12000);
           }
           renderShares();
           renderSide();
         } catch (err) { errToast(err); }
       }));
     });
-    if (d.shares.some((s) => s.preparing)) setTimeout(() => { if (L.view.type === 'shares' && tabActive()) renderShares(); }, 8000);
+    if (links.some((s) => s.preparing)) setTimeout(() => { if (L.view.type === 'shares' && tabActive()) renderShares(); }, 8000);
     refreshIcons();
   }
 
@@ -2951,6 +3136,7 @@
     },
     resolve: resolvePaths,
     share: withItems('crear un link para compartir', (items) => openShareModal(items.map((it) => it.id))),
+    uploadLink: (folder, title) => uploadLinkModal(folder, title),
     addToShare: withItems('agregar archivos a un link', (items) => addToShare(items.map((it) => it.id))),
     tools: withItems('optimizar o convertir', (items, tab) => { const ok = items.filter(canTool); if (!ok.length) return toast('Estos archivos no se pueden optimizar', 'warn', '', 3000); return openTools(ok.map((it) => it.id), tab); }),
     transcribe: withItems('transcribir', (items) => { const ok = items.filter(canTranscribe); if (!ok.length) return toast('Elegí videos o audios para transcribir', 'warn', '', 3000); return openTranscribe(ok.map((it) => it.id)); }),

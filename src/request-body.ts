@@ -4,6 +4,9 @@ import type { MiddlewareHandler } from 'hono';
 export function requestBodyLimit(pathname: string, method: string): number | null {
   if (['GET', 'HEAD', 'OPTIONS'].includes(method)) return null;
   if (method === 'PUT' && /^\/api\/(?:files\/upload\/[^/]+|library\/upload\/[^/]+|v1\/cloud\/uploads\/[^/]+)$/.test(pathname)) return null;
+  // Public upload links stream blocks outside /api so they bypass cookie auth.
+  if (method === 'PUT' && /^\/u\/[^/]+\/up\/[^/]+$/.test(pathname)) return null;
+  if (/^\/u\//.test(pathname)) return 16384;
   if (/^\/api\/software\/icons\/[^/]+\/upload$/.test(pathname)) return 2 * 1024 * 1024 + 65536;
   if (pathname.startsWith('/api/v1/')) return 16384;
   if (pathname === '/pair' || /^\/s\//.test(pathname) ||

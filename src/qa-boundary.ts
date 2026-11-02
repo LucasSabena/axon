@@ -24,7 +24,9 @@ export function registerQaBoundary(app:Hono,root:string|null){
    const fixtureTrash=/^\/api\/storage\/trash\/(restore|migration-plans(?:\/[^/]+\/(?:execute|recover))?)$/.test(p);
    const fixtureCatalog=p==='/api/file-catalog'||p==='/api/fans'||p==='/api/usb';
    const fixtureSessions=/^\/api\/sessions\/(revoke-others|[^/]+(?:\/revoke)?)$/.test(p);
-   const fixtureLibrary=/^\/api\/library\/(favorite|shares|collections|rescan|settings|resolve)$/.test(p);
+   const fixtureLibrary=/^\/api\/library\/(favorite|shares|collections|rescan|settings|resolve|upload-links(?:\/cleanup|\/[^/]+)?)$/.test(p);
+   // Upload-only folder links write into a folder under the owned QA fixture.
+   const fixtureUploadLink=/^\/u\/[^/]+\/(?:unlock|up(?:\/init|\/[^/]+(?:\/finish)?)?)$/.test(p);
    // Conversion only stages root-validated fixture bytes in a private cache.
    const fixtureDocuments=/^\/api\/(files\/document|library\/document\/[^/]+)$/.test(p);
    const fixtureProject=/^\/api\/projects$/.test(p);
@@ -38,7 +40,7 @@ export function registerQaBoundary(app:Hono,root:string|null){
    // Onboarding and credential routes only write files inside the QA data dir.
    const fixtureDisks=/^\/api\/storage\/disks\/(visibility|plans(?:\/[^/]+\/execute)?)$/.test(p);
    const fixtureOnboarding=/^\/api\/(onboarding\/(setup|complete|dismiss|check|reset)|auth\/(password|totp\/(setup|enable|disable)))$/.test(p);
-   if(!safe&&!fixtureSessions&&!fixtureCatalog&&!fixtureTrash&&!fixtureTransfer&&!fixtureFile&&!fixtureLibrary&&!fixtureDocuments&&!fixtureAccounts&&!fixturePlatform&&!fixtureProject&&!fixtureAgentDoc&&!fixtureSoftwareIcons&&!fixtureOnboarding&&!fixtureDisks)return c.json({ok:false,error:'QA: mutación de host bloqueada por el servidor; usá pruebas con fixtures inyectadas'},403);
+   if(!safe&&!fixtureSessions&&!fixtureCatalog&&!fixtureTrash&&!fixtureTransfer&&!fixtureFile&&!fixtureLibrary&&!fixtureUploadLink&&!fixtureDocuments&&!fixtureAccounts&&!fixturePlatform&&!fixtureProject&&!fixtureAgentDoc&&!fixtureSoftwareIcons&&!fixtureOnboarding&&!fixtureDisks)return c.json({ok:false,error:'QA: mutación de host bloqueada por el servidor; usá pruebas con fixtures inyectadas'},403);
   }
   await next();
  });

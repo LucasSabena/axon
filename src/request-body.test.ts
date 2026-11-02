@@ -31,6 +31,12 @@ test('public shares and pairing have small limits; chunked uploads remain stream
   expect(sameBody).toBe(true); expect([...new Uint8Array(await response.arrayBuffer())]).toEqual([1, 2, 3]);
   for (const route of ['/api/files/upload/id', '/api/library/upload/id', '/api/v1/cloud/uploads/id']) expect(requestBodyLimit(route, 'PUT')).toBeNull();
   expect(requestBodyLimit('/api/library/upload/init', 'POST')).toBe(8 * 1024 * 1024);
+  // Public upload links stream blocks without /api cookie auth; their
+  // control endpoints stay small so an anonymous JSON body can't buffer RAM.
+  expect(requestBodyLimit('/u/token/up/uid', 'PUT')).toBeNull();
+  expect(requestBodyLimit('/u/token/up/init', 'POST')).toBe(16384);
+  expect(requestBodyLimit('/u/token/unlock', 'POST')).toBe(16384);
+  expect(requestBodyLimit('/u/token/up/uid/finish', 'POST')).toBe(16384);
 });
 
 test('interrupted bodies fail visibly without invoking a mutation', async () => {

@@ -384,6 +384,14 @@ body.lib-noscroll { overflow: hidden; }
 .lib-share-acts { display: flex; gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
 .lib-share-acts a { text-decoration: none; }
 .lib-share-acts .lucide-icon { width: 15px; height: 15px; }
+.lib-links-h { display: flex; align-items: center; gap: 8px; margin: 18px 0 10px; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-faint); font-weight: 650; }
+.lib-links-h:first-child { margin-top: 4px; }
+.lib-links-h .lucide-icon { width: 15px; height: 15px; color: var(--accent); }
+.lib-links-h small { text-transform: none; letter-spacing: 0; font-weight: 500; opacity: 0.75; }
+.lib-share.up { border-color: color-mix(in srgb, var(--accent) 28%, var(--border)); }
+.lib-up-th { display: grid; place-items: center; width: 100%; height: 100%; background: color-mix(in srgb, var(--accent) 10%, var(--bg-canvas)); color: var(--accent); }
+.lib-up-th .lucide-icon { width: 28px; height: 28px; }
+.lib-up-tag { display: inline-block; vertical-align: 1px; margin-left: 6px; padding: 1px 7px; border-radius: 99px; font-size: 0.62rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent); background: color-mix(in srgb, var(--accent) 13%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
 
 /* ---------- Responsive ---------- */
 @media (max-width: 1100px) {

@@ -76,6 +76,39 @@ interface Share {
   cdn?: boolean;          // let Cloudflare's edge cache previews/files (default on)
 }
 
+interface ReceivedUpload { n: string; s: number; t: number }
+
+interface UploadEvent {
+  t: number;
+  kind: 'view' | 'upload';
+  visitor: string;
+  client: string;
+  name?: string;
+  size?: number;
+}
+
+// A folder others can only write to. The token is the capability; the public
+// page never lists, previews or downloads what already lives in the folder.
+interface UploadLink {
+  id: string;
+  title: string;
+  folder: string;
+  created: number;
+  expires: number | null;
+  maxBytes: number;       // 0 = sin límite
+  pass?: string;          // Bun.password hash
+  views: number;
+  filesReceived: number;
+  uploadedBytes: number;
+  lastAccess?: number;
+  msg?: string;
+  notifyActivity?: boolean;
+  active?: boolean;       // false = link pausado (no acepta visitas ni subidas)
+  uploads?: ReceivedUpload[];   // últimos archivos recibidos (máx. 200)
+  activity?: UploadEvent[];
+  visitors?: string[];
+}
+
 interface LibState {
   roots: string[];
   uploadRoot: string;
@@ -83,6 +116,7 @@ interface LibState {
   favorites: string[];    // paths
   collections: Collection[];
   shares: Share[];
+  uploadLinks: UploadLink[];
   extras?: string[];      // individual files outside the roots that were shared or opened from Archivos
 }
 
@@ -178,7 +212,7 @@ function fail(c: Context, status: number, error: string, extra?: Record<string, 
 
 let home = HOST_USER === 'root' ? '/root' : `/home/${HOST_USER}`;
 let cacheHost = `${home}/.cache/axon-library`;
-let state: LibState = { roots: [], uploadRoot: '', shareBase: '', favorites: [], collections: [], shares: [] };
+let state: LibState = { roots: [], uploadRoot: '', shareBase: '', favorites: [], collections: [], shares: [], uploadLinks: [] };
 const items = new Map<string, Item>();       // id → item
 const byPath = new Map<string, string>();    // path → id
 let scannedAt = 0;
@@ -270,6 +304,7 @@ async function init(): Promise<void> {
     const s = JSON.parse(await readFile(STATE_FILE, 'utf-8'));
     state = { ...state, ...s };
   } catch { /* first run */ }
+  if (!Array.isArray(state.uploadLinks)) state.uploadLinks = [];
   if (!state.uploadRoot) state.uploadRoot = `${home}/Biblioteca`;
   if (!state.roots.length) {
     const candidates = ['Biblioteca', 'Pictures', 'Imágenes', 'Videos', 'Vídeos', 'Music', 'Música', 'Documents', 'Documentos', 'Downloads', 'Descargas', 'Desktop', 'Escritorio'];
@@ -282,6 +317,11 @@ async function init(): Promise<void> {
     `mkdir -p ${shq(state.uploadRoot)} ${shq(cacheHost + '/thumbs')} ${shq(cacheHost + '/views')} ${shq(cacheHost + '/web')}`,
     { user: 'user', timeoutMs: 15_000 }
   );
+  // In-memory upload sessions don't survive a restart: remove only stale
+  // partials from upload links, never any real file in the shared folder.
+  for (const l of state.uploadLinks) {
+    void hostExec(`find ${shq(l.folder)} -maxdepth 1 -type f -name '.axon-upload.*.part' -mmin +1440 -delete`, { user: 'user', timeoutMs: 15_000 }).catch(() => {});
+  }
 
   try {
     const raw = JSON.parse(await readFile(INDEX_FILE, 'utf-8'));
@@ -1110,8 +1150,12 @@ function shareBase(c: Context): string {
 
 const shareUrl = (c: Context, s: Share) => `${shareBase(c)}/s/${s.id}`;
 
+function accessToken(id: string, pass?: string): string {
+  return createHmac('sha256', SECRET).update(`${id}:${pass || ''}`).digest('base64url').slice(0, 32);
+}
+
 function unlockToken(s: Share): string {
-  return createHmac('sha256', SECRET).update(`${s.id}:${s.pass || ''}`).digest('base64url').slice(0, 32);
+  return accessToken(s.id, s.pass);
 }
 
 function isUnlocked(c: Context, s: Share): boolean {
@@ -1121,6 +1165,141 @@ function isUnlocked(c: Context, s: Share): boolean {
   const a = Buffer.from(m[1]);
   const b = Buffer.from(unlockToken(s));
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+// ---------- Upload-only folder links ----------
+
+function uploadLinkAlive(l: UploadLink): boolean {
+  return l.active !== false && (l.expires === null || l.expires > Date.now());
+}
+
+const uploadLinkUrl = (c: Context, l: UploadLink) => `${shareBase(c)}/u/${l.id}`;
+
+function isUploadUnlocked(c: Context, l: UploadLink): boolean {
+  if (!l.pass) return true;
+  const m = (c.req.header('cookie') || '').match(new RegExp(`(?:^|;\\s*)axu_${l.id}=([^;]+)`));
+  if (!m) return false;
+  const a = Buffer.from(m[1]);
+  const b = Buffer.from(accessToken(l.id, l.pass));
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function clientOf(agent: string): string {
+  return /Firefox/i.test(agent) ? 'Firefox' : /Edg(?:e|A|iOS)/i.test(agent) ? 'Edge' : /Chrome|CriOS/i.test(agent) ? 'Chrome' : /Safari/i.test(agent) ? 'Safari' : 'Otro cliente';
+}
+
+function uploadVisitor(c: Context, l: UploadLink): { visitor: string; client: string } {
+  const ip = requestIp(c);
+  const agent = c.req.header('user-agent') || '';
+  return { visitor: createHmac('sha256', SECRET).update(`u:${l.id}:${ip}:${agent}`).digest('hex').slice(0, 12), client: clientOf(agent) };
+}
+
+function trackUploadLink(l: UploadLink, event: UploadEvent): boolean {
+  const history = l.activity ||= [];
+  const duplicate = history.some((e) => e.visitor === event.visitor && e.kind === event.kind && e.name === event.name && event.t - e.t < (event.kind === 'view' ? 300_000 : 30_000));
+  if (duplicate) return false;
+  if (event.kind === 'view') l.views++;
+  l.lastAccess = event.t;
+  const visitors = l.visitors ||= [];
+  if (!visitors.includes(event.visitor) && visitors.length < 2000) visitors.push(event.visitor);
+  history.push(event);
+  if (history.length > 100) history.splice(0, history.length - 100);
+  return true;
+}
+
+function uploadLinkActivity(c: Context, l: UploadLink, kind: UploadEvent['kind'], name?: string, size?: number) {
+  const { visitor, client } = uploadVisitor(c, l);
+  if (!trackUploadLink(l, { t: Date.now(), kind, visitor, client, ...(name ? { name } : {}), ...(size !== undefined ? { size } : {}) })) return;
+  saveState(false);
+  if (l.notifyActivity === false) return;
+  if (kind === 'view') {
+    recordEvent('file', `Visita al link de subida: ${l.title}`, client, { section: 'library', params: { type: 'uploads' } });
+    void notify(`Visita al link de subida: ${l.title}`, client);
+  } else {
+    const label = name || 'Archivo';
+    recordEvent('file', `Archivo recibido: ${label}`, fmtSize(size || 0), { section: 'library', params: { type: 'uploads' } });
+    void notify(`Archivo recibido: ${label}`, `${fmtSize(size || 0)} · ${l.title}`);
+  }
+}
+
+function uploadLinkSummary(c: Context, l: UploadLink) {
+  const uploads = (l.uploads || []).slice(-20).reverse();
+  return {
+    id: l.id,
+    title: l.title,
+    url: uploadLinkUrl(c, l),
+    folder: l.folder,
+    folderName: path.posix.basename(l.folder) || l.folder,
+    created: l.created,
+    expires: l.expires,
+    alive: uploadLinkAlive(l),
+    active: l.active !== false,
+    hasPassword: !!l.pass,
+    msg: l.msg || '',
+    notifyActivity: l.notifyActivity !== false,
+    maxBytes: l.maxBytes || 0,
+    filesReceived: l.filesReceived,
+    uploadedBytes: l.uploadedBytes,
+    views: l.views,
+    visitors: l.visitors?.length || 0,
+    visitorsCapped: (l.visitors?.length || 0) >= 2000,
+    lastAccess: l.lastAccess,
+    recentUploads: uploads,
+    recentActivity: (l.activity || []).slice(-100).reverse(),
+  };
+}
+
+interface GuestUpload {
+  id: string;
+  linkId: string;
+  dir: string;
+  name: string;
+  part: string;
+  size: number;
+  received: number;
+  t: number;
+  cancelled?: boolean;
+  completed?: boolean;
+  finalName?: string;
+  operation?: Promise<void>;
+}
+
+const guestUploads = new Map<string, GuestUpload>();
+const guestLocks = new Map<string, Promise<void>>();
+
+// Public names come straight from a browser: no separators, no control
+// characters and no empty/dot-only results. Collisions are resolved on finish.
+function cleanUploadName(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  const name = raw.trim();
+  if (!name || name === '.' || name === '..' || name.length > 255) return '';
+  if (/[/\\\0-\x1f\x7f]/.test(name)) return '';
+  if (Buffer.byteLength(name, 'utf8') > 255) return '';
+  return name;
+}
+
+async function withGuestLock<T>(uid: string, fn: () => Promise<T>): Promise<T> {
+  const prev = guestLocks.get(uid);
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  guestLocks.set(uid, gate);
+  await prev?.catch(() => {});
+  try { return await fn(); }
+  finally {
+    release();
+    if (guestLocks.get(uid) === gate) guestLocks.delete(uid);
+  }
+}
+
+async function dropGuestUploads(linkId: string): Promise<void> {
+  for (const [id, u] of [...guestUploads]) {
+    if (u.linkId !== linkId) continue;
+    u.cancelled = true;
+    await withGuestLock(id, async () => {
+      guestUploads.delete(id);
+      await hostExec(`rm -f -- ${shq(u.part)}`, { user: 'user', timeoutMs: 15_000 });
+    }).catch(() => {});
+  }
 }
 
 interface ShareFile { i: number; p: string; n: string; e: string; k: Kind; s: number; it?: Item }
@@ -1342,6 +1521,61 @@ input[type=password]{width:100%;background:var(--bg);border:1px solid var(--bd);
 }
 `;
 
+const UPLOAD_CSS = `
+.up-wrap{max-width:760px;margin:0 auto;padding:18px 16px 80px}
+.up-top{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:2px 0 22px}
+.up-brand{display:flex;align-items:center;gap:9px;font-weight:600;letter-spacing:.02em;color:var(--dim);font-size:13px;text-decoration:none}
+.up-brand img{width:22px;height:22px}
+.up-card{background:var(--panel);border:1px solid var(--bd);border-radius:20px;padding:clamp(20px,4vw,34px);box-shadow:0 24px 60px rgba(0,0,0,.28)}
+.up-badge{width:54px;height:54px;border-radius:16px;display:grid;place-items:center;background:linear-gradient(145deg,rgba(25,219,239,.18),rgba(25,219,239,.06));border:1px solid rgba(25,219,239,.35);color:var(--ac);margin-bottom:16px}
+.up-badge svg{width:28px;height:28px}
+.up-card h1{font-size:clamp(22px,4vw,31px);line-height:1.15;letter-spacing:-.02em;margin:0 0 6px;word-break:break-word}
+.up-card .sub{color:var(--dim);font-size:15px;margin:0}
+.up-facts{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0 0}
+.up-fact{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--dim);background:var(--el);border:1px solid var(--bd);border-radius:99px;padding:5px 11px}
+.up-fact svg{width:13px;height:13px}
+.up-drop{margin:22px 0 0;border:2px dashed rgba(120,150,180,.32);border-radius:16px;padding:34px 20px;text-align:center;cursor:pointer;background:rgba(10,16,24,.45);transition:border-color .15s,background .15s,transform .15s;outline:none}
+.up-drop:hover,.up-drop:focus-visible{border-color:var(--ac);background:rgba(25,219,239,.05)}
+.up-drop.drag{border-color:var(--ac);background:rgba(25,219,239,.09);transform:scale(.995)}
+.up-drop .up-ic{width:46px;height:46px;margin:0 auto 12px;border-radius:14px;background:var(--el);display:grid;place-items:center;color:var(--ac)}
+.up-drop .up-ic svg{width:24px;height:24px}
+.up-drop b{display:block;font-size:16px;margin-bottom:3px}
+.up-drop span{display:block;color:var(--dim);font-size:13px;margin-bottom:16px}
+.up-drop .btn{min-height:42px}
+.up-drop.busy{opacity:.6;pointer-events:none}
+.up-status{margin:20px 0 0;font-size:13.5px;color:var(--dim);min-height:20px}
+.up-global{margin:10px 0 0;height:7px;border-radius:99px;background:var(--el);overflow:hidden}
+.up-global i{display:block;height:100%;width:0;background:linear-gradient(90deg,#19dbef,#61f4d1);transition:width .2s}
+.up-list{display:flex;flex-direction:column;gap:8px;margin:18px 0 0}
+.up-row{position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px 12px;align-items:center;padding:11px 13px;background:var(--el);border:1px solid var(--bd);border-radius:12px;overflow:hidden}
+.up-row .up-name{font-size:14px;font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.up-row .up-size{font-size:12.5px;color:var(--dim);white-space:nowrap}
+.up-row .up-x{background:none;border:0;color:var(--dim);cursor:pointer;padding:4px;min-width:30px;min-height:30px;border-radius:8px}
+.up-row .up-x:hover{background:rgba(255,255,255,.06);color:var(--tx)}
+.up-row .up-x svg{width:15px;height:15px}
+.up-row .up-bar{grid-column:1/-1;height:5px;border-radius:99px;background:rgba(120,150,180,.14);overflow:hidden}
+.up-row .up-bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,#19dbef,#61f4d1);transition:width .18s}
+.up-row.done{border-color:rgba(74,222,128,.42)}
+.up-row.done .up-bar i{background:#4ade80}
+.up-row.done .up-size{color:#4ade80}
+.up-row.err{border-color:rgba(248,113,113,.5)}
+.up-row.err .up-bar i{background:#f87171}
+.up-error{display:flex;align-items:center;gap:10px;justify-content:space-between;flex-wrap:wrap;padding:8px 12px;margin-top:-2px;background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.35);border-radius:10px;font-size:12.5px;color:#fca5a5}
+.up-error button{background:rgba(248,113,113,.16);border:1px solid rgba(248,113,113,.4);color:#fecaca;border-radius:8px;padding:5px 10px;font:inherit;font-weight:600;cursor:pointer}
+.up-error button:hover{background:rgba(248,113,113,.26)}
+.up-row.cancelled{opacity:.55}
+.up-done{display:none;margin:20px 0 0;padding:16px 18px;border:1px solid rgba(74,222,128,.45);background:rgba(74,222,128,.08);border-radius:14px}
+.up-done.on{display:flex;gap:14px;align-items:flex-start}
+.up-done .up-check{flex-shrink:0;width:34px;height:34px;border-radius:99px;background:rgba(74,222,128,.16);display:grid;place-items:center;color:#4ade80}
+.up-done .up-check svg{width:19px;height:19px}
+.up-done b{display:block;font-size:15px;margin-bottom:2px}
+.up-done p{margin:0;color:var(--dim);font-size:13px}
+.up-note{margin:18px 0 0;padding-top:16px;border-top:1px solid var(--bd);color:var(--dim);font-size:12.5px;line-height:1.55}
+.up-note b{color:var(--tx);font-weight:600}
+.up-foot{margin-top:22px;text-align:center;color:var(--dim);font-size:11.5px;opacity:.7}
+@media(max-width:560px){.up-wrap{padding:10px 9px 60px}.up-card{padding:20px 16px;border-radius:16px}.up-drop{padding:26px 14px}.up-row{grid-template-columns:minmax(0,1fr) auto;padding:10px 11px}.up-row .up-x{grid-column:2;grid-row:1}.up-row .up-size{grid-column:1/-1}.up-badge{width:48px;height:48px}}
+`;
+
 const SVG = (d: string) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
 const DL_SVG = SVG('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>');
 const ICONS = {
@@ -1371,6 +1605,279 @@ function passwordPage(c: Context, s: Share, error = ''): Response {
 <h1 style="font-size:20px">🔒 ${esc(s.title)}</h1><p class="sub">Este contenido está protegido con contraseña.</p>
 <input type="password" name="password" placeholder="Contraseña" autofocus autocomplete="current-password" required>
 ${error ? `<p class="err">${esc(error)}</p>` : ''}<button class="btn" style="width:100%">Ver contenido</button></form></div>`), error ? 401 : 200);
+}
+
+function uploadPasswordPage(c: Context, l: UploadLink, error = ''): Response {
+  return c.html(pageShell('Subida protegida', `<div class="center"><form class="card" method="post" action="/u/${l.id}/unlock">
+<h1 style="font-size:20px">🔒 ${esc(l.title)}</h1><p class="sub">Esta carpeta de subida está protegida con contraseña.</p>
+<input type="password" name="password" placeholder="Contraseña" autofocus autocomplete="current-password" required>
+${error ? `<p class="err">${esc(error)}</p>` : ''}<button class="btn" style="width:100%">Continuar</button></form></div>`), error ? 401 : 200, { 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' });
+}
+
+const UP_ICONS = {
+  cloud: SVG('<path d="M4 14.9A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 2.5 8.2"/><path d="M12 12v9"/><path d="m8 17 4-4 4 4"/>'),
+  clock: SVG('<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/>'),
+  lock: SVG('<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>'),
+  gauge: SVG('<path d="M12 21a9 9 0 1 1 9-9"/><path d="M12 12v6"/><path d="m16 10 2-2"/>'),
+  check: SVG('<path d="M20 6 9 17l-5-5"/>'),
+  x: SVG('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'),
+};
+
+function uploadPage(c: Context, l: UploadLink): Response {
+  const expTxt = l.expires ? `Link disponible hasta el ${fmtDate(l.expires)}` : 'Link sin vencimiento';
+  const limitTxt = l.maxBytes > 0 ? `Hasta ${fmtSize(l.maxBytes)} en total` : 'Sin límite de tamaño total';
+  const head = `${l.pass ? '' : '<meta name="referrer" content="no-referrer">'}<style>${UPLOAD_CSS}</style>`;
+  const body = `<div class="up-wrap">
+  <header class="up-top">
+    <a class="up-brand" href="/"><img src="/marca/favicon.svg" alt="">AXON</a>
+    <span class="up-fact">${UP_ICONS.lock} Subida privada</span>
+  </header>
+  <main class="up-card">
+    <div class="up-badge">${UP_ICONS.cloud}</div>
+    <h1>${esc(l.title)}</h1>
+    <p class="sub">Subí tus archivos a esta carpeta. No hace falta cuenta ni instalar nada.</p>
+    ${l.msg ? `<div class="msg">${esc(l.msg)}</div>` : ''}
+    <div class="up-facts">
+      <span class="up-fact">${UP_ICONS.clock} ${esc(expTxt)}</span>
+      <span class="up-fact">${UP_ICONS.gauge} ${esc(limitTxt)}</span>
+      ${l.pass ? `<span class="up-fact">${UP_ICONS.lock} Con contraseña</span>` : ''}
+    </div>
+    <div class="up-drop" id="up-drop" role="button" tabindex="0" aria-label="Elegir archivos para subir">
+      <div class="up-ic">${UP_ICONS.cloud}</div>
+      <b>Arrastrá tus archivos acá</b>
+      <span>o tocá para elegirlos desde tu dispositivo</span>
+      <button type="button" class="btn" id="up-pick">Elegir archivos</button>
+      <input type="file" id="up-file" multiple hidden>
+    </div>
+    <div class="up-global" aria-hidden="true"><i id="up-global-bar"></i></div>
+    <div class="up-status" id="up-status" role="status" aria-live="polite"></div>
+    <div class="up-list" id="up-list"></div>
+    <div class="up-done" id="up-done" role="status">
+      <span class="up-check">${UP_ICONS.check}</span>
+      <div><b id="up-done-title">¡Listo!</b><p id="up-done-text">Los archivos se subieron correctamente.</p></div>
+    </div>
+    <p class="up-note"><b>Importante:</b> desde este link solo se pueden subir archivos. No se puede ver, reproducir ni descargar lo que ya está en la carpeta.</p>
+  </main>
+  <p class="up-foot">AXON · Subida directa al servidor</p>
+</div>
+<script>
+(() => {
+  'use strict';
+  const ID = ${JSON.stringify(l.id)};
+  const drop = document.getElementById('up-drop');
+  const input = document.getElementById('up-file');
+  const pick = document.getElementById('up-pick');
+  const list = document.getElementById('up-list');
+  const statusEl = document.getElementById('up-status');
+  const globalBar = document.getElementById('up-global-bar');
+  const doneBox = document.getElementById('up-done');
+  const doneTitle = document.getElementById('up-done-title');
+  const doneText = document.getElementById('up-done-text');
+  const jobs = [];
+  let active = 0, finished = 0, failed = 0, totals = 0, sending = false;
+
+  const fmt = (b) => {
+    if (b < 1024) return b + ' B';
+    const units = ['KB','MB','GB','TB'];
+    let v = b, i = -1;
+    do { v /= 1024; i++; } while (v >= 1024 && i < units.length - 1);
+    return (v < 10 ? v.toFixed(1) : Math.round(v)) + ' ' + units[i];
+  };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  async function post(path, body) {
+    const res = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}), credentials: 'same-origin' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) throw new Error(data.error || 'No se pudo completar la operación (' + res.status + ')');
+    return data;
+  }
+
+  function refresh() {
+    globalBar.parentElement.style.display = jobs.length ? 'block' : 'none';
+    statusEl.style.display = jobs.length ? 'block' : 'none';
+    const total = Math.max(totals, 1);
+    const sent = jobs.reduce((a, j) => a + (j.done ? j.bytes : j.sent), 0);
+    const pct = Math.min(100, Math.round((sent / total) * 100));
+    globalBar.style.width = pct + '%';
+    const running = jobs.filter((j) => !j.done && !j.cancelled && !j.error).length;
+    if (running) statusEl.textContent = jobs.length + (jobs.length === 1 ? ' archivo' : ' archivos') + ' · ' + pct + '% · ' + fmt(sent) + ' de ' + fmt(totals);
+    else if (failed) statusEl.textContent = failed + (failed === 1 ? ' archivo con error' : ' archivos con error') + '. Podés reintentarlos o subir otros.';
+    else if (finished) statusEl.textContent = finished + (finished === 1 ? ' archivo subido' : ' archivos subidos') + ' correctamente.';
+    if (finished && !running) {
+      doneBox.classList.add('on');
+      doneTitle.textContent = '¡Listo! Se ' + (finished === 1 ? 'subió 1 archivo' : 'subieron ' + finished + ' archivos') + '.';
+      doneText.textContent = 'Ya están guardados en la carpeta. Podés subir más archivos cuando quieras.';
+    }
+  }
+
+  function setBusy() {
+    drop.classList.toggle('busy', jobs.some((j) => !j.done && !j.cancelled && !j.error));
+  }
+
+  function makeRow(file) {
+    const row = document.createElement('div');
+    row.className = 'up-row';
+    const name = document.createElement('span'); name.className = 'up-name'; name.textContent = file.name; name.title = file.name;
+    const size = document.createElement('span'); size.className = 'up-size'; size.textContent = fmt(file.size);
+    const bar = document.createElement('div'); bar.className = 'up-bar';
+    const fill = document.createElement('i'); bar.appendChild(fill);
+    const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'up-x'; cancel.title = 'Cancelar'; cancel.setAttribute('aria-label', 'Cancelar ' + file.name); cancel.innerHTML = ${JSON.stringify(UP_ICONS.x)};
+    row.append(name, size, cancel, bar);
+    list.appendChild(row);
+    return { row, size, fill, cancel };
+  }
+
+  function enqueue(files) {
+    const picked = [...files].filter((f) => f && typeof f.size === 'number');
+    if (!picked.length) return;
+    doneBox.classList.remove('on');
+    failed = 0;
+    for (const file of picked) {
+      const ui = makeRow(file);
+      const job = { file, bytes: file.size, sent: 0, done: false, error: false, cancelled: false, uid: null, ctrl: null, ...ui };
+      jobs.push(job);
+      totals += file.size;
+      ui.cancel.addEventListener('click', () => cancelJob(job));
+    }
+    refresh(); setBusy(); pump();
+  }
+
+  function cancelJob(job) {
+    if (job.done) return;
+    job.cancelled = true;
+    job.ctrl?.abort();
+    if (job.uid) fetch('/u/' + ID + '/up/' + encodeURIComponent(job.uid), { method: 'DELETE', credentials: 'same-origin' }).catch(() => {});
+    job.row.classList.add('cancelled');
+    job.size.textContent = 'Cancelado';
+    job.cancel.remove();
+    refresh();
+  }
+
+  function retryButton(job, message) {
+    if (job.errorBox) return;
+    const box = document.createElement('div'); box.className = 'up-error';
+    const msg = document.createElement('span'); msg.textContent = message;
+    const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'ib'; retry.textContent = 'Reintentar';
+    retry.addEventListener('click', () => {
+      if (job.uid) fetch('/u/' + ID + '/up/' + encodeURIComponent(job.uid), { method: 'DELETE', credentials: 'same-origin' }).catch(() => {});
+      box.remove(); job.errorBox = null; job.error = false; job.cancelled = false; job.sent = 0; job.uid = null; job.ctrl = null; job.started = false;
+      job.row.classList.remove('err', 'cancelled');
+      job.size.textContent = fmt(job.bytes);
+      failed = Math.max(0, failed - 1); refresh(); setBusy(); pump();
+    });
+    box.append(msg, retry);
+    job.row.after(box);
+    job.errorBox = box;
+  }
+
+  async function upload(job) {
+    job.ctrl = new AbortController();
+    let init;
+    for (let attempt = 0; ; attempt++) {
+      try { init = await post('/u/' + ID + '/up/init', { name: job.file.name, size: job.file.size }); break; }
+      catch (err) {
+        if (attempt >= 4 || job.cancelled) throw err;
+        job.size.textContent = 'Reintentando…';
+        await sleep(700 * Math.pow(2, attempt));
+      }
+    }
+    job.uid = init.id;
+    const chunk = init.chunkSize || 16 * 1024 * 1024;
+    let offset = 0;
+    const started = Date.now();
+    while (offset < job.file.size) {
+      if (job.cancelled) return;
+      const blob = job.file.slice(offset, Math.min(job.file.size, offset + chunk));
+      let attempt = 0;
+      for (;;) {
+        try {
+          const res = await fetch('/u/' + ID + '/up/' + encodeURIComponent(job.uid) + '?offset=' + offset, { method: 'PUT', body: blob, credentials: 'same-origin', signal: job.ctrl.signal });
+          const data = await res.json().catch(() => ({}));
+          if (res.ok && data.ok) { offset = data.received; break; }
+          if (res.status === 409 && Number.isInteger(data.received)) { offset = data.received; break; }
+          if ([400, 401, 403, 404, 410, 413, 507].includes(res.status)) throw new Error(data.error || 'La subida fue rechazada');
+          throw new Error(data.error || 'Error de red (' + res.status + ')');
+        } catch (err) {
+          if (job.cancelled || err.name === 'AbortError') return;
+          attempt++;
+          if (attempt >= 6) throw err;
+          job.size.textContent = 'Reintentando ' + attempt + '/6…';
+          await sleep(Math.min(8000, 700 * Math.pow(2, attempt)));
+        }
+      }
+      job.sent = offset;
+      job.fill.style.width = (job.file.size ? Math.min(100, (offset / job.file.size) * 100) : 100) + '%';
+      const rate = offset / Math.max(1, (Date.now() - started) / 1000);
+      const left = rate > 0 ? Math.max(0, Math.round((job.file.size - offset) / rate)) : 0;
+      job.size.textContent = job.file.size ? Math.round((offset / job.file.size) * 100) + '% · ' + fmt(rate) + '/s' + (offset < job.file.size ? ' · faltan ' + (left < 60 ? Math.max(1, left) + 's' : Math.ceil(left / 60) + 'min') : '') : '0 B';
+      refresh();
+    }
+    if (job.cancelled) return;
+    let done;
+    for (let attempt = 0; ; attempt++) {
+      try { done = await post('/u/' + ID + '/up/' + encodeURIComponent(job.uid) + '/finish'); break; }
+      catch (err) {
+        if (attempt >= 4 || job.cancelled) throw err;
+        await sleep(700 * Math.pow(2, attempt));
+      }
+    }
+    job.done = true;
+    job.sent = job.bytes;
+    job.fill.style.width = '100%';
+    job.size.textContent = '✓ ' + fmt(job.bytes) + (done.name && done.name !== job.file.name ? ' · guardado como ' + done.name : '');
+    job.row.classList.add('done');
+    job.cancel.remove();
+    finished++;
+    refresh();
+  }
+
+  function pump() {
+    while (active < 2) {
+      const job = jobs.find((j) => !j.done && !j.cancelled && !j.error && !j.started);
+      if (!job) break;
+      job.started = true;
+      active++;
+      upload(job).catch((err) => {
+        if (job.cancelled) return;
+        job.error = true;
+        failed++;
+        job.row.classList.add('err');
+        if (job.size) job.size.textContent = 'Error';
+        retryButton(job, err && err.message ? err.message : 'No se pudo subir el archivo');
+      }).finally(() => {
+        active--;
+        setBusy();
+        refresh();
+        pump();
+      });
+    }
+  }
+
+  function pickFiles() { if (!drop.classList.contains('busy')) input.click(); }
+  pick.addEventListener('click', (e) => { e.stopPropagation(); pickFiles(); });
+  drop.addEventListener('click', pickFiles);
+  drop.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pickFiles(); } });
+  input.addEventListener('change', () => { enqueue(input.files); input.value = ''; });
+
+  let dragDepth = 0;
+  for (const ev of ['dragenter', 'dragover']) drop.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); if (ev === 'dragenter') dragDepth++; drop.classList.add('drag'); });
+  drop.addEventListener('dragleave', (e) => { e.preventDefault(); dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) drop.classList.remove('drag'); });
+  drop.addEventListener('drop', (e) => {
+    e.preventDefault(); e.stopPropagation(); dragDepth = 0; drop.classList.remove('drag');
+    if (drop.classList.contains('busy')) return;
+    enqueue(e.dataTransfer && e.dataTransfer.files ? e.dataTransfer.files : []);
+  });
+  document.addEventListener('dragover', (e) => { if (e.target !== drop) e.preventDefault(); });
+  document.addEventListener('drop', (e) => { if (!drop.contains(e.target)) e.preventDefault(); });
+
+  window.addEventListener('beforeunload', (e) => {
+    if (jobs.some((j) => !j.done && !j.cancelled && !j.error)) { e.preventDefault(); e.returnValue = ''; }
+  });
+
+  refresh();
+})();
+</script>`;
+  return c.html(pageShell(l.title, body, head), 200, { 'X-Robots-Tag': 'noindex', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
 }
 
 function fileDesc(f: ShareFile): string {
@@ -1596,7 +2103,7 @@ export const libraryHostGuard: MiddlewareHandler = async (c, next) => {
   const forwarded = loopbackPeer(c) ? (c.req.header('x-forwarded-host') || '').split(',')[0].trim().toLowerCase() : '';
   if (!shareHost || (host !== shareHost && forwarded !== shareHost)) return next();
   const p = c.req.path;
-  if (p.startsWith('/s/') || p === '/marca/favicon.svg' || p === '/robots.txt') {
+  if (p.startsWith('/s/') || p.startsWith('/u/') || p === '/marca/favicon.svg' || p === '/robots.txt') {
     if (p === '/robots.txt') return c.text('User-agent: *\nDisallow: /\n');
     return next();
   }
@@ -1830,6 +2337,14 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers,catalog
         hostExec(`rm -f ${shq(u.part)}`, { user: 'user', timeoutMs: 5000 }).catch(() => {});
       }
     }
+    for (const [k, u] of guestUploads) {
+      // Completed sessions stay briefly for an idempotent finish retry; stale
+      // interrupted parts are removed so a lost tab can't leave hidden junk.
+      if (now - u.t > 24 * 3600_000) {
+        guestUploads.delete(k);
+        hostExec(`rm -f -- ${shq(u.part)}`, { user: 'user', timeoutMs: 5000 }).catch(() => {});
+      }
+    }
   }, 10 * 60_000).unref();
 
   const ctx: LibCtx = {
@@ -1892,6 +2407,7 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers,catalog
         ids: col.paths.map((p) => byPath.get(p)).filter(Boolean),
       })),
       shares: state.shares.filter(shareAlive).length,
+      uploadLinks: state.uploadLinks.filter(uploadLinkAlive).length,
     });
   });
 
@@ -2426,6 +2942,99 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers,catalog
     return c.json({ ok: true, removed: dead.length });
   });
 
+  // ---- Upload-only folder links (authed management) ----
+  const findUploadLink = (id: string | undefined) => /^[A-Za-z0-9_-]{8,40}$/.test(id || '') ? state.uploadLinks.find((x) => x.id === id) : undefined;
+
+  app.get('/api/library/upload-links', (c) => {
+    return c.json({ ok: true, links: state.uploadLinks.slice().sort((a, b) => b.created - a.created).map((l) => uploadLinkSummary(c, l)) });
+  });
+
+  app.post('/api/library/upload-links', async (c) => {
+    await ensureReady();
+    const b = await c.req.json<{ folder?: string; title?: string; ttl?: number; maxBytes?: number; password?: string; msg?: string; notifyActivity?: boolean }>().catch(() => ({} as never));
+    const input = String(b.folder || '').trim();
+    if (!input) return fail(c, 400, 'Elegí una carpeta para recibir archivos');
+    let folder: string;
+    try { folder = await resolveHostPath(input, { directory: true }); }
+    catch (e) { return fail(c, 400, (e as Error).message || 'La carpeta no está disponible'); }
+    // Never expose system/config locations for anonymous writes, even if the
+    // admin picked them by mistake in Archivos.
+    if (folder === '/' || /^\/(?:proc|sys|dev|boot|etc|bin|sbin|lib|lib64|usr)(?:\/|$)/.test(folder) ||
+        /(?:^|\/)\.(?:ssh|gnupg|aws|config)(?:\/|$)/.test(folder)) {
+      return fail(c, 400, 'Esa carpeta está protegida. Elegí una carpeta de trabajo o de datos.');
+    }
+    const writable = await hostExec(`test -d ${shq(folder)} && test -w ${shq(folder)} && test -x ${shq(folder)}`, { user: 'user', timeoutMs: 10_000 });
+    if (!writable.ok) return fail(c, 400, 'La carpeta no existe o tu usuario no tiene permiso para escribir en ella');
+    const ttl = Number(b.ttl);
+    const maxBytes = Number(b.maxBytes) || 0;
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > 10 * 1024 ** 4) return fail(c, 400, 'Límite de tamaño inválido');
+    const l: UploadLink = {
+      id: randomBytes(16).toString('base64url'),
+      title: String(b.title || '').trim().slice(0, 120) || path.posix.basename(folder) || 'Subida de archivos',
+      folder,
+      created: Date.now(),
+      expires: ttl > 0 ? Date.now() + Math.min(ttl, 366 * 86400) * 1000 : null,
+      maxBytes,
+      views: 0,
+      filesReceived: 0,
+      uploadedBytes: 0,
+      notifyActivity: b.notifyActivity !== false,
+      active: true,
+    };
+    const msg = String(b.msg || '').trim().slice(0, 1000);
+    if (msg) l.msg = msg;
+    if (b.password && String(b.password).length) l.pass = await Bun.password.hash(String(b.password));
+    state.uploadLinks.push(l);
+    saveState();
+    return c.json({ ok: true, link: uploadLinkSummary(c, l) });
+  });
+
+  app.patch('/api/library/upload-links/:lid', async (c) => {
+    const l = findUploadLink(c.req.param('lid'));
+    if (!l) return fail(c, 404, 'Link no encontrado');
+    const b = await c.req.json<{
+      title?: string; msg?: string; ttl?: number | null; extend?: number; maxBytes?: number;
+      password?: string | null; active?: boolean; notifyActivity?: boolean;
+    }>().catch(() => ({} as never));
+    if (typeof b.notifyActivity === 'boolean') l.notifyActivity = b.notifyActivity;
+    if (typeof b.title === 'string' && b.title.trim()) l.title = b.title.trim().slice(0, 120);
+    if (typeof b.msg === 'string') { const m = b.msg.trim().slice(0, 1000); if (m) l.msg = m; else delete l.msg; }
+    if (b.ttl === null || b.ttl === 0) l.expires = null;
+    else if (typeof b.ttl === 'number' && b.ttl > 0) l.expires = Date.now() + Math.min(b.ttl, 366 * 86400) * 1000;
+    if (typeof b.extend === 'number' && b.extend > 0) l.expires = Math.max(Date.now(), l.expires ?? Date.now()) + b.extend * 1000;
+    if (typeof b.maxBytes === 'number') {
+      if (!Number.isSafeInteger(b.maxBytes) || b.maxBytes < 0 || b.maxBytes > 10 * 1024 ** 4) return fail(c, 400, 'Límite de tamaño inválido');
+      if (b.maxBytes > 0 && b.maxBytes < l.uploadedBytes) return fail(c, 400, 'El límite no puede ser menor a lo que ya se recibió');
+      l.maxBytes = b.maxBytes;
+    }
+    if (b.password === null || b.password === '') delete l.pass;
+    else if (typeof b.password === 'string' && b.password.length) l.pass = await Bun.password.hash(b.password);
+    if (typeof b.active === 'boolean') {
+      l.active = b.active;
+      if (!b.active) void dropGuestUploads(l.id);
+    }
+    saveState();
+    return c.json({ ok: true, link: uploadLinkSummary(c, l) });
+  });
+
+  app.delete('/api/library/upload-links/:lid', async (c) => {
+    const l = findUploadLink(c.req.param('lid'));
+    if (!l) return c.json({ ok: false });
+    state.uploadLinks = state.uploadLinks.filter((x) => x !== l);
+    saveState();
+    await dropGuestUploads(l.id);
+    return c.json({ ok: true });
+  });
+
+  app.post('/api/library/upload-links/cleanup', (c) => {
+    const now = Date.now();
+    const dead = state.uploadLinks.filter((l) => l.expires !== null && l.expires <= now);
+    state.uploadLinks = state.uploadLinks.filter((l) => !(l.expires !== null && l.expires <= now));
+    if (dead.length) saveState();
+    for (const l of dead) void dropGuestUploads(l.id);
+    return c.json({ ok: true, removed: dead.length });
+  });
+
   // ---- Public share pages (no cookie) ----
   const getShare = async (c: Context): Promise<Share | Response> => {
     await ensureReady();
@@ -2593,5 +3202,176 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers,catalog
     shareActivity(c,s,'zip',`${paths.length} archivos`);
     const name = sanitizeName(s.title) || 'compartido';
     return zipResponse(paths, `${name}${pick ? ` (${paths.length})` : ''}.zip`);
+  });
+
+  // ---- Public upload-only folder pages (no cookie) ----
+  // The token is the capability. These pages deliberately expose nothing
+  // about the folder: no listing, no previews, no download routes.
+  const getUploadLink = async (c: Context): Promise<UploadLink | Response> => {
+    await ensureReady();
+    const l = findUploadLink(c.req.param('lid'));
+    if (!l) return messagePage(c, 404, 'Link no encontrado', 'Este link no existe o fue eliminado.');
+    if (!uploadLinkAlive(l)) {
+      if (l.active === false) return messagePage(c, 410, 'Este link está pausado', 'Pedile a quien te lo compartió que lo reactive.');
+      return messagePage(c, 410, 'Este link venció', 'Pedile a quien te lo compartió que genere uno nuevo.');
+    }
+    return l;
+  };
+
+  const uploadGuard = async (c: Context): Promise<{ l: UploadLink; u: GuestUpload } | Response> => {
+    const l = await getUploadLink(c);
+    if (l instanceof Response) return l;
+    if (!isUploadUnlocked(c, l)) return c.json({ ok: false, error: 'Este link está protegido con contraseña' }, 401);
+    const u = guestUploads.get(c.req.param('uid') || '');
+    if (!u || u.linkId !== l.id || u.cancelled) return c.json({ ok: false, error: 'Subida no encontrada o cancelada' }, 404);
+    return { l, u };
+  };
+
+  app.get('/u/:lid', async (c) => {
+    const l = await getUploadLink(c);
+    if (l instanceof Response) return l;
+    if (!isUploadUnlocked(c, l)) return uploadPasswordPage(c, l);
+    uploadLinkActivity(c, l, 'view');
+    return uploadPage(c, l);
+  });
+
+  app.post('/u/:lid/unlock', async (c) => {
+    const l = await getUploadLink(c);
+    if (l instanceof Response) return l;
+    if (!l.pass) return c.redirect(`/u/${l.id}`);
+    const ip = requestIp(c);
+    const key = `u:${ip}:${l.id}`;
+    const now = Date.now();
+    const fails = (unlockFails.get(key) || []).filter((t) => t > now - 10 * 60_000);
+    if (fails.length >= 8) return uploadPasswordPage(c, l, 'Demasiados intentos. Esperá unos minutos.');
+    const form = await c.req.parseBody().catch(() => ({} as Record<string, unknown>));
+    const ok = await Bun.password.verify(String(form.password || ''), l.pass).catch(() => false);
+    if (!ok) {
+      fails.push(now);
+      unlockFails.set(key, fails);
+      if (unlockFails.size > 5000) unlockFails.clear();
+      return uploadPasswordPage(c, l, 'Contraseña incorrecta');
+    }
+    unlockFails.delete(key);
+    const secure = ((loopbackPeer(c) && ((c.req.header('x-forwarded-proto') || '').includes('https') || (c.req.header('cf-visitor') || '').includes('https'))) || new URL(c.req.url).protocol === 'https:') ? '; Secure' : '';
+    c.header('set-cookie', `axu_${l.id}=${accessToken(l.id, l.pass)}; Path=/u/${l.id}; HttpOnly; SameSite=Lax; Max-Age=${7 * 86400}${secure}`);
+    return c.redirect(`/u/${l.id}`, 303);
+  });
+
+  app.post('/u/:lid/up/init', async (c) => {
+    const l = await getUploadLink(c);
+    if (l instanceof Response) return l;
+    if (!isUploadUnlocked(c, l)) return c.json({ ok: false, error: 'Este link está protegido con contraseña' }, 401);
+    const b = await c.req.json<{ name?: string; size?: number }>().catch(() => ({} as { name?: string; size?: number }));
+    const name = cleanUploadName(b.name);
+    const size = Number(b.size);
+    if (!name) return c.json({ ok: false, error: 'Nombre de archivo inválido' }, 400);
+    if (name.startsWith('.')) return c.json({ ok: false, error: 'El nombre no puede empezar con punto' }, 400);
+    if (!Number.isSafeInteger(size) || size < 0) return c.json({ ok: false, error: 'Tamaño inválido' }, 400);
+    if (guestUploads.size >= 200) return c.json({ ok: false, error: 'Hay demasiadas subidas en curso; esperá unos minutos' }, 429);
+    const forLink = [...guestUploads.values()].filter((u) => u.linkId === l.id && !u.cancelled && !u.completed);
+    if (forLink.length >= 20) return c.json({ ok: false, error: 'Hay demasiadas subidas en curso en este link; esperá a que terminen' }, 429);
+    if (l.maxBytes > 0) {
+      const reserved = forLink.reduce((a, u) => a + Math.max(0, u.size - u.received), 0);
+      if (l.uploadedBytes + reserved + size > l.maxBytes) {
+        return c.json({ ok: false, error: `Este link permite hasta ${fmtSize(l.maxBytes)} en total` }, 413);
+      }
+    }
+    const df = await hostExec(`df -B1 --output=avail -- ${shq(l.folder)}`, { user: 'user', timeoutMs: 10_000 });
+    const available = Number(df.stdout.trim().split('\n').pop());
+    if (df.ok && Number.isFinite(available) && size > Math.max(0, available - 64 * 1024 * 1024)) {
+      return c.json({ ok: false, error: 'No hay espacio suficiente en el servidor' }, 507);
+    }
+    const id = randomBytes(12).toString('base64url');
+    const part = `${l.folder}/.axon-upload.${id}.part`;
+    const created = await hostExec(`: > ${shq(part)}`, { user: 'user', timeoutMs: 10_000 });
+    if (!created.ok) return c.json({ ok: false, error: 'No se pudo iniciar la subida', detail: created.stderr }, 500);
+    guestUploads.set(id, { id, linkId: l.id, dir: l.folder, name, part, size, received: 0, t: Date.now() });
+    return c.json({ ok: true, id, chunkSize: 16 * 1024 * 1024 }, 200, { 'Cache-Control': 'no-store' });
+  });
+
+  app.get('/u/:lid/up/:uid', async (c) => {
+    const r = await uploadGuard(c);
+    if (r instanceof Response) return r;
+    const { u } = r;
+    return c.json({ ok: true, received: u.received, size: u.size, name: u.name, completed: !!u.completed }, 200, { 'Cache-Control': 'no-store' });
+  });
+
+  app.put('/u/:lid/up/:uid', async (c) => {
+    const r = await uploadGuard(c);
+    if (r instanceof Response) return r;
+    const { l, u } = r;
+    const offset = Number(c.req.query('offset'));
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      await c.req.raw.body?.cancel().catch(() => {});
+      return c.json({ ok: false, error: 'Offset inválido' }, 400);
+    }
+    return withGuestLock(u.id, async () => {
+      const current = guestUploads.get(u.id);
+      if (!current || current.cancelled || current.linkId !== l.id) return c.json({ ok: false, error: 'Subida cancelada' }, 410);
+      if (current.completed) return c.json({ ok: false, error: 'Subida completa', received: current.received }, 409);
+      if (!uploadLinkAlive(l)) return c.json({ ok: false, error: 'El link ya no recibe archivos' }, 410);
+      const st = await stat(hostToContainer(current.part)).catch(() => null);
+      if (!st) return c.json({ ok: false, error: 'El archivo parcial desapareció' }, 410);
+      const have = st.size;
+      if (have !== current.received) return c.json({ ok: false, error: 'El archivo parcial cambió; reiniciá la subida' }, 409);
+      if (offset !== have) {
+        await c.req.raw.body?.cancel().catch(() => {});
+        return c.json({ ok: false, error: 'offset', received: have }, 409);
+      }
+      if (!c.req.raw.body) return c.json({ ok: false, error: 'Bloque vacío' }, 400);
+      try {
+        const bytes = await appendUploadBlock(current.part, c.req.raw.body, Math.min(16 * 1024 * 1024, current.size - have));
+        current.received = have + bytes;
+        current.t = Date.now();
+        return c.json({ ok: true, received: current.received });
+      } catch {
+        const rollback = await hostExec(`truncate -s ${have} -- ${shq(current.part)}`, { user: 'user', timeoutMs: 10_000 });
+        if (!rollback.ok) current.cancelled = true;
+        return c.json({ ok: false, error: 'Falló la escritura del bloque', received: have }, 500);
+      }
+    });
+  });
+
+  app.post('/u/:lid/up/:uid/finish', async (c) => {
+    const r = await uploadGuard(c);
+    if (r instanceof Response) return r;
+    const { l, u } = r;
+    return withGuestLock(u.id, async () => {
+      const current = guestUploads.get(u.id);
+      if (!current || current.cancelled || current.linkId !== l.id) return c.json({ ok: false, error: 'Subida cancelada' }, 410);
+      if (current.completed) return c.json({ ok: true, name: current.finalName || current.name, size: current.size });
+      const st = await stat(hostToContainer(current.part)).catch(() => null);
+      if (!st || st.size !== current.size) return c.json({ ok: false, error: `Subida incompleta (${st?.size ?? 0} de ${current.size} bytes)` }, 400);
+      const name = await freeName(current.dir, current.name);
+      const dest = `${current.dir}/${name}`;
+      const moved = await hostExec(`mv -nT -- ${shq(current.part)} ${shq(dest)}; [ ! -e ${shq(current.part)} ]`, { user: 'user', timeoutMs: 30_000 });
+      if (!moved.ok) return c.json({ ok: false, error: 'No se pudo guardar el archivo (¿ya existía?)' }, 409);
+      current.completed = true;
+      current.finalName = name;
+      current.received = current.size;
+      current.t = Date.now();
+      l.filesReceived++;
+      l.uploadedBytes += current.size;
+      const uploads = l.uploads ||= [];
+      uploads.push({ n: name, s: current.size, t: current.t });
+      if (uploads.length > 200) uploads.splice(0, uploads.length - 200);
+      saveState();
+      uploadLinkActivity(c, l, 'upload', name, current.size);
+      return c.json({ ok: true, name, size: current.size });
+    });
+  });
+
+  app.delete('/u/:lid/up/:uid', async (c) => {
+    const l = await getUploadLink(c);
+    if (l instanceof Response) return l;
+    const u = guestUploads.get(c.req.param('uid') || '');
+    if (!u || u.linkId !== l.id) return c.json({ ok: true });
+    u.cancelled = true;
+    await withGuestLock(u.id, async () => {
+      guestUploads.delete(u.id);
+      await hostExec(`rm -f -- ${shq(u.part)}`, { user: 'user', timeoutMs: 15_000 });
+    }).catch(() => {});
+    return c.json({ ok: true });
   });
 }
