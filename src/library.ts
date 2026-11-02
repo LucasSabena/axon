@@ -1170,7 +1170,7 @@ function isUnlocked(c: Context, s: Share): boolean {
 // ---------- Upload-only folder links ----------
 
 function uploadLinkAlive(l: UploadLink): boolean {
-  return l.active !== false && (l.expires === null || l.expires > Date.now());
+  return l.active !== false && (l.expires == null || l.expires > Date.now());
 }
 
 const uploadLinkUrl = (c: Context, l: UploadLink) => `${shareBase(c)}/u/${l.id}`;
@@ -1198,7 +1198,7 @@ function trackUploadLink(l: UploadLink, event: UploadEvent): boolean {
   const history = l.activity ||= [];
   const duplicate = history.some((e) => e.visitor === event.visitor && e.kind === event.kind && e.name === event.name && event.t - e.t < (event.kind === 'view' ? 300_000 : 30_000));
   if (duplicate) return false;
-  if (event.kind === 'view') l.views++;
+  if (event.kind === 'view') l.views = (l.views || 0) + 1;
   l.lastAccess = event.t;
   const visitors = l.visitors ||= [];
   if (!visitors.includes(event.visitor) && visitors.length < 2000) visitors.push(event.visitor);
@@ -1238,9 +1238,9 @@ function uploadLinkSummary(c: Context, l: UploadLink) {
     msg: l.msg || '',
     notifyActivity: l.notifyActivity !== false,
     maxBytes: l.maxBytes || 0,
-    filesReceived: l.filesReceived,
-    uploadedBytes: l.uploadedBytes,
-    views: l.views,
+    filesReceived: l.filesReceived || 0,
+    uploadedBytes: l.uploadedBytes || 0,
+    views: l.views || 0,
     visitors: l.visitors?.length || 0,
     visitorsCapped: (l.visitors?.length || 0) >= 2000,
     lastAccess: l.lastAccess,
@@ -3351,8 +3351,8 @@ export function registerLibraryRoutes(app: Hono,transfers?:FileTransfers,catalog
       current.finalName = name;
       current.received = current.size;
       current.t = Date.now();
-      l.filesReceived++;
-      l.uploadedBytes += current.size;
+      l.filesReceived = (l.filesReceived || 0) + 1;
+      l.uploadedBytes = (l.uploadedBytes || 0) + current.size;
       const uploads = l.uploads ||= [];
       uploads.push({ n: name, s: current.size, t: current.t });
       if (uploads.length > 200) uploads.splice(0, uploads.length - 200);
