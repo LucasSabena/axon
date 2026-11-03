@@ -19,10 +19,25 @@ try{
     assert(Array.isArray(info.tabs),'no tabs list');
     await page.goto(origin+'/navegador');
     await page.waitForSelector('#browser-bar .browser-chip',{timeout:20000});
+    await page.waitForSelector('#browser-tabs',{timeout:10000});
     await page.click('#browser-manage-toggle');
     await page.waitForSelector('#browser-manage h3',{timeout:15000});
     await page.waitForTimeout(6000);
     const chips=await page.$$eval('#browser-bar .browser-chip',els=>els.map(e=>e.textContent?.trim()));
+    // El selector de visor tiene que cambiar el título y el iframe.
+    assert(await page.isVisible('#browser-follow'),'follow toggle missing');
+    // Vista en vivo: captura por HTTP, sin WebSocket.
+    await page.click('#browser-live-toggle');
+    await page.waitForFunction(()=>{const i=document.querySelector('#browser-live-img') as HTMLImageElement|null;return !!i&&i.naturalWidth>0;},undefined,{timeout:20000});
+    const live=await page.$eval('#browser-live-img',(i:HTMLImageElement)=>({w:i.naturalWidth,h:i.naturalHeight}));
+    assert(live.w>0&&live.h>0,'live screenshot did not load: '+JSON.stringify(live));
+    await page.click('#browser-live-toggle');
+    await page.click('.browser-view[data-browser-view="agents"]');
+    await page.waitForTimeout(3000);
+    const agentTitle=(await page.textContent('#browser-title'))||'';
+    assert(/agentes/i.test(agentTitle),'agents view did not switch: '+agentTitle);
+    await page.click('.browser-view[data-browser-view="server"]');
+    await page.waitForTimeout(3000);
     const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth+1);
     await page.screenshot({path:`${output}/${name}.png`});
     console.log(name,JSON.stringify(chips),'overflow:',overflow,'errors:',JSON.stringify(errors));

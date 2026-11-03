@@ -393,18 +393,33 @@
             <!-- NAVEGADOR -->
             <section id="tab-navegador" class="tab-content">
               <div class="section-header">
-                <h2>Navegador del servidor</h2>
+                <h2 id="browser-title">Navegador del servidor</h2>
                 <div class="section-actions">
                   <button id="browser-manage-toggle" class="btn-secondary" aria-expanded="false" aria-controls="browser-manage"><i data-lucide="sliders-horizontal" class="lucide-icon"></i> Gestionar</button>
                   <button id="browser-reload" class="btn-secondary"><i data-lucide="rotate-cw" class="lucide-icon"></i> Recargar</button>
                   <button id="browser-open-ext" class="btn-secondary"><i data-lucide="external-link" class="lucide-icon"></i> Abrir aparte</button>
                 </div>
               </div>
+              <div class="browser-head">
+                <div id="browser-views" class="browser-views" role="tablist" aria-label="Navegador a mostrar">
+                  <button class="browser-view" data-browser-view="server" role="tab" aria-selected="true">Servidor</button>
+                  <button class="browser-view" data-browser-view="agents" role="tab" aria-selected="false">Agentes</button>
+                </div>
+                <div class="browser-head-tools">
+                  <button id="browser-live-toggle" class="browser-live-btn" type="button" aria-pressed="false" title="Capturas de la pestaña por HTTP, sin WebSocket">Vista en vivo</button>
+                  <label class="browser-follow"><input type="checkbox" id="browser-follow" checked> <span>Seguir al agente</span></label>
+                </div>
+              </div>
               <div id="browser-bar" class="browser-bar" aria-live="polite"></div>
+              <div id="browser-tabs" class="browser-tabs" aria-label="Pestañas abiertas"></div>
               <div class="browser-body">
                 <div class="browser-frame-wrap">
                   <div id="browser-state" class="browser-state" role="status" aria-live="polite"></div>
                   <iframe id="browser-frame" title="Navegador del servidor" allow="clipboard-read; clipboard-write"></iframe>
+                  <div id="browser-live" class="browser-live" hidden>
+                    <img id="browser-live-img" alt="Vista en vivo de la pestaña">
+                    <span class="browser-live-note">Vista en vivo · sin control</span>
+                  </div>
                 </div>
                 <aside id="browser-manage" class="browser-manage" hidden></aside>
               </div>

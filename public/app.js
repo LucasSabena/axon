@@ -2235,56 +2235,131 @@ loaders.terminal = async () => {
   }
 };
 
-// ---------- Server-side browser (Steel session viewer) ----------
+// ---------- Navegador del servidor ----------
 
-// Chromium real (jlesage/chromium + noVNC) — full browser running on the
-// server with a persistent profile (accounts/cookies stay logged in).
-const BROWSER_PORT = 5800;
-const browserUrl = `/p/${BROWSER_PORT}/?autoconnect=true&resize=scale&path=p/${BROWSER_PORT}/websockify`;
+// Dos Chrome reales en el host, cada uno con su pantalla virtual y su visor
+// noVNC. "server" tiene las sesiones del usuario; "agents" es el Chrome limpio
+// que usan los agentes (antes era headless, así que no se veía nunca).
+const BROWSER_VIEWS = {
+  server: { port: 5800, label: 'Servidor' },
+  agents: { port: 5801, label: 'Agentes' },
+};
+const browserUrl = (view) => {
+  const port = BROWSER_VIEWS[view].port;
+  return `/p/${port}/?autoconnect=true&resize=scale&path=p/${port}/websockify`;
+};
+let browserView = 'server';
 let browserLoaded = false;
 let browserTicket = 0;
+let browserInfo = null;
+// Vista en vivo: capturas por HTTP en vez del WebSocket de noVNC. Es el plan B
+// cuando la red del celular corta el Upgrade, y sirve para mirar rápido.
+let browserLive = false;
+let browserLiveTab = '';
+let browserLiveTimer = 0;
+
+const browserAvailable = (r, view = browserView) => view === 'agents' ? !!r?.agentsAvailable : !!r?.available;
 
 async function loadBrowser() {
-  const ticket = ++browserTicket, status = $('#browser-state');
+  const ticket = ++browserTicket, status = $('#browser-state'), view = browserView;
   if (browserLoaded) {
     // El iframe puede quedar mostrando un 502 viejo del proxy aunque la
-    // página cargó OK — verificar que el contenedor siga vivo al volver.
+    // página cargó OK — verificar que el navegador siga vivo al volver.
     try {
       const r = await api('/api/browser/status');
       if (ticket !== browserTicket) return;
-      if (r.available) return;
+      if (browserAvailable(r, view)) return;
       browserLoaded = false;
       $('#browser-frame').src = 'about:blank';
     } catch { if (ticket !== browserTicket) return; }
   }
-  status.dataset.state='loading'; status.innerHTML=`${icon('loader','spin')} Conectando con Chromium…`; refreshIcons();
+  status.hidden = false;
+  status.dataset.state='loading'; status.innerHTML=`${icon('loader','spin')} Conectando con ${BROWSER_VIEWS[view].label.toLowerCase()}…`; refreshIcons();
   try {
     const result=await api('/api/browser/status');
     if(ticket!==browserTicket)return;
-    if(!result.available)throw new Error('Chromium no responde. Revisá el contenedor desde Docker.');
-    $('#browser-frame').src = browserUrl;
+    if(!browserAvailable(result, view))throw new Error(view === 'agents' ? 'El navegador de agentes no responde.' : 'El navegador del servidor no responde.');
+    $('#browser-frame').src = browserUrl(view);
     browserLoaded = true;
     status.textContent='Abriendo la sesión del navegador…';
-  } catch(e) { if(ticket!==browserTicket)return;status.dataset.state='error';status.textContent=e.message + ' Usá Recargar para reintentar.'; }
+    // Si el iframe nunca dispara load (red que corta la conexión), a los 20 s
+    // pasamos a la vista en vivo por HTTP en vez de dejar "Conectando…".
+    setTimeout(() => {
+      if (ticket !== browserTicket || !browserLoaded || browserLive) return;
+      const st = $('#browser-state');
+      if (st && !st.hidden) {
+        setBrowserLive(true);
+        toast('El visor no cargó: te muestro la pestaña en vivo.', 'warning', '', 8000);
+      }
+    }, 20000);
+  } catch(e) { if(ticket!==browserTicket)return;status.hidden=false;status.dataset.state='error';status.textContent=e.message + ' Usá Recargar para reintentar.'; }
 }
 function unloadBrowser(force = false) {
   // Preserve the established viewer when moving between sections.
   if (force) { browserTicket++; $('#browser-frame').src='about:blank'; browserLoaded=false; }
 }
+function setBrowserLive(on) {
+  browserLive = !!on;
+  const btn = $('#browser-live-toggle');
+  if (btn) {
+    btn.setAttribute('aria-pressed', String(browserLive));
+    btn.textContent = browserLive ? 'Controlar' : 'Vista en vivo';
+  }
+  const box = $('#browser-live');
+  if (box) box.hidden = !browserLive;
+  $('#browser-frame').style.visibility = browserLive ? 'hidden' : '';
+  clearTimeout(browserLiveTimer);
+  if (browserLive) liveTick();
+}
+
+function liveTick() {
+  clearTimeout(browserLiveTimer);
+  if (!browserLive || activeTabName !== 'navegador' || document.hidden) return;
+  const img = $('#browser-live-img');
+  const q = new URLSearchParams({ which: browserView, t: String(Date.now()) });
+  if (browserLiveTab) q.set('id', browserLiveTab);
+  img.onload = () => { if (browserLive) browserLiveTimer = setTimeout(liveTick, 1800); };
+  img.onerror = () => { if (browserLive) browserLiveTimer = setTimeout(liveTick, 5000); };
+  img.src = `/api/browser/screenshot?${q}`;
+}
+
+// El iframe puede cargar el HTML de noVNC y quedarse sin WebSocket (proxy,
+// red del celu, sesión vencida). Es mismo origen, así que miramos adentro: si
+// a los ~12 s no hay canvas, pasamos a la vista en vivo por HTTP.
+async function watchViewer(ticket) {
+  const frame = $('#browser-frame');
+  for (let i = 0; i < 8; i++) {
+    await new Promise((r) => setTimeout(r, 1500));
+    if (ticket !== browserTicket || !browserLoaded) return;
+    try {
+      if (frame.contentDocument?.querySelector('canvas')) return;
+    } catch { return; } // no pudimos leerlo: no alarmamos
+  }
+  if (ticket !== browserTicket || !browserLoaded || browserLive) return;
+  let why = '';
+  try { why = frame.contentDocument?.querySelector('#noVNC_status')?.textContent?.trim() || ''; } catch { /* sin acceso */ }
+  setBrowserLive(true);
+  toast(`El visor no conectó${why ? ` (${why})` : ''}: te muestro la pestaña en vivo.`, 'warning', 'Para controlar, usá «Abrir aparte».', 9000);
+}
+
 $('#browser-frame').addEventListener('load', async ()=>{
   // El evento load también dispara con la página de error 502 del proxy —
-  // no declarar "listo" hasta confirmar que Chromium responde de verdad.
+  // no declarar "listo" hasta confirmar que el navegador responde de verdad.
   if(!browserLoaded)return;
   const ticket = browserTicket, status = $('#browser-state');
   try {
     const r = await api('/api/browser/status');
     if(ticket!==browserTicket || !browserLoaded)return;
-    if(!r.available)throw new Error('no disponible');
+    if(!browserAvailable(r, browserView))throw new Error('no disponible');
+    // Con el visor conectado la barra de estado no aporta y le robaba alto.
+    status.hidden = true;
     status.dataset.state='ready'; status.textContent='Visor del navegador cargado';
+    watchViewer(ticket);
   } catch {
     if(ticket!==browserTicket)return;
+    status.hidden = false;
     status.dataset.state='error';
-    status.textContent='Chromium no responde — puede seguir arrancando. Reintentando…';
+    status.textContent='El navegador no responde — puede seguir arrancando. Reintentando…';
     // Reintento diferido: si el contenedor está levantando, vuelve solo.
     setTimeout(()=>{ if(ticket===browserTicket){browserLoaded=false;$('#browser-frame').src='about:blank';loadBrowser();} }, 4000);
   }
@@ -2296,26 +2371,75 @@ loaders.navegador = loadBrowser;
 // resolved on the SERVER, so localhost:* means the server's own services.
 async function openInServerBrowser(url) {
   try {
-    await api('/api/browser/open', { method: 'POST', body: { url } });
+    await api('/api/browser/open', { method: 'POST', body: { url, which: 'server' } });
   } catch (e) {
     toast(e.message || 'El navegador del server no respondió', 'error', e.detail || '', 4000);
     return false;
   }
+  setBrowserView('server');
   document.querySelector('.tab-btn[data-tab="navegador"]')?.click();
   loadBrowser();
   return true;
 }
 window.openInServerBrowser = openInServerBrowser;
 
-$('#browser-open-ext').addEventListener('click', () => window.open(browserUrl, '_blank', 'noopener'));
+$('#browser-open-ext').addEventListener('click', () => window.open(browserUrl(browserView), '_blank', 'noopener'));
 $('#browser-reload').addEventListener('click', e => AxonUI.busy(e.currentTarget, async () => { unloadBrowser(true); await loadBrowser(); }));
 
-// Estado y gestión: pestañas abiertas, agentes enganchados por CDP, el Chrome
-// de Playwright de agentes y el registro de limpieza automática.
+// Selector de visor: cada navegador tiene su pantalla virtual y su noVNC.
+const viewTitle = (view) => view === 'agents' ? 'Navegador de agentes' : 'Navegador del servidor';
+function setBrowserView(view) {
+  if (!BROWSER_VIEWS[view] || view === browserView) return;
+  browserView = view;
+  browserLiveTab = '';
+  document.querySelectorAll('.browser-view').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.browserView === view)));
+  $('#browser-title').textContent = viewTitle(view);
+  $('#browser-frame').title = viewTitle(view);
+  unloadBrowser(true);
+  loadBrowser();
+  refreshBrowserInfo();
+  if (browserLive) liveTick();
+}
+document.querySelectorAll('.browser-view').forEach((btn) => btn.addEventListener('click', () => setBrowserView(btn.dataset.browserView)));
+$('#browser-follow').addEventListener('change', (e) => {
+  api('/api/browser/follow', { method: 'POST', body: { which: browserView, on: e.currentTarget.checked } })
+    .catch(() => toast('No se pudo cambiar el modo seguir', 'error', '', 3000));
+});
+$('#browser-live-toggle').addEventListener('click', () => setBrowserLive(!browserLive));
+
+// Estado y gestión: pestañas, quién las está usando, CPU por pestaña y el
+// registro de limpieza automática.
 let browserInfoTimer = 0;
 const fmtAge = (sec) => sec < 3600 ? `${Math.max(1, Math.round(sec / 60))} min` : sec < 86400 ? `${(sec / 3600).toFixed(1)} h` : `${(sec / 86400).toFixed(1)} días`;
+// El CPU del servicio es la suma de todos sus procesos: 224% son 2,24 núcleos,
+// no 224% de un núcleo. Mostrar las dos cosas evita el susto.
+const cpuLabel = (pct) => pct >= 100 ? `${pct}% · ${(pct / 100).toFixed(1).replace('.', ',')} núcleos` : `${pct}%`;
 const unitLine = (u) => !u ? 'no instalado' : u.active !== 'active' ? (u.active === 'inactive' ? 'apagado' : u.active)
-  : [u.cpuPct != null && `CPU ${u.cpuPct}%`, u.memoryMb != null && `RAM ${u.memoryMb >= 1024 ? (u.memoryMb / 1024).toFixed(1) + ' GB' : u.memoryMb + ' MB'}`].filter(Boolean).join(' · ') || 'activo';
+  : [u.cpuPct != null && cpuLabel(u.cpuPct), u.memoryMb != null && `RAM ${u.memoryMb >= 1024 ? (u.memoryMb / 1024).toFixed(1) + ' GB' : u.memoryMb + ' MB'}`].filter(Boolean).join(' · ') || 'activo';
+
+const viewUnit = (info) => browserView === 'server' ? info.browser : info.agents;
+const viewTabs = (info) => (browserView === 'server' ? info.tabs : info.agentTabs) || [];
+const viewClients = (info) => (browserView === 'server' ? info.clients : info.agentClients) || [];
+
+function renderBrowserTabs(tabs) {
+  const strip = $('#browser-tabs');
+  if (!tabs.length) {
+    strip.innerHTML = '<p class="browser-empty">No hay pestañas abiertas.</p>';
+    return;
+  }
+  strip.innerHTML = tabs.map((t) => {
+    const state = t.active ? 'active' : t.recent ? 'agent' : t.frozen ? 'frozen' : '';
+    const meta = t.frozen ? 'congelada' : (t.jsPct != null && t.jsPct >= 1 ? `${t.jsPct}% JS` : '');
+    return `<div class="browser-tab" data-state="${state}">
+      <button class="browser-tab-main" data-activate="${esc(t.id)}" title="${esc(t.url)}${t.active ? ' · al frente' : t.recent ? ' · navegó recién' : ''}">
+        <span class="browser-tab-title">${esc(t.title || t.url)}</span>
+        ${meta ? `<span class="browser-tab-meta">${esc(meta)}</span>` : ''}
+      </button>
+      <button class="browser-tab-close" data-close-tab="${esc(t.id)}" title="Cerrar pestaña" aria-label="Cerrar ${esc(t.title || t.url)}">${icon('x')}</button>
+    </div>`;
+  }).join('');
+  refreshIcons(strip);
+}
 
 async function refreshBrowserInfo() {
   clearTimeout(browserInfoTimer);
@@ -2325,36 +2449,53 @@ async function refreshBrowserInfo() {
   if (activeTabName !== 'navegador') return;
   browserInfoTimer = setTimeout(refreshBrowserInfo, 5000);
   const bar = $('#browser-bar'), panel = $('#browser-manage');
-  if (!info || info.fixture) { bar.textContent = ''; return; }
-  const b = info.browser, tabs = info.tabs || [], clients = info.clients || [];
-  const stale = clients.filter((c) => c.ageSec > 3600);
+  if (!info || info.fixture) { bar.textContent = ''; $('#browser-tabs').textContent = ''; return; }
+  browserInfo = info;
+  const b = viewUnit(info), tabs = viewTabs(info), clients = viewClients(info);
+  browserLiveTab = ((tabs.find((t) => t.active) || tabs[0] || {}).id) || '';
+  const live = clients.filter((c) => c.kind !== 'mcp');
+  const stale = live.filter((c) => c.ageSec > 3600);
+  const agentLabel = live.length
+    ? `${live.length} ${live.length === 1 ? 'agente conectado' : 'agentes conectados'}`
+    : clients.some((c) => c.kind === 'mcp') ? 'MCP listo' : 'ningún agente conectado';
+  const front = tabs.some((t) => t.active);
+  const followBox = $('#browser-follow');
+  if (followBox && document.activeElement !== followBox) {
+    followBox.checked = !info.follow || info.follow[browserView] !== false;
+  }
   bar.innerHTML = `
-    <span class="browser-chip" data-state="${b?.active === 'active' ? 'ok' : 'error'}">${icon('globe')} Chrome · ${esc(unitLine(b))}</span>
-    <span class="browser-chip">${icon('layers')} ${tabs.length} ${tabs.length === 1 ? 'pestaña' : 'pestañas'}</span>
-    <span class="browser-chip" data-state="${stale.length ? 'warn' : ''}">${icon('bot')} ${clients.length ? `${clients.length} ${clients.length === 1 ? 'agente conectado' : 'agentes conectados'}` : 'ningún agente conectado'}</span>
-    <span class="browser-chip">${icon('flask-conical')} Playwright de agentes · ${esc(unitLine(info.agents))}</span>`;
+    <span class="browser-chip" data-state="${b?.active === 'active' ? 'ok' : 'error'}">${icon('globe')} ${esc(BROWSER_VIEWS[browserView].label)} · ${esc(unitLine(b))}</span>
+    <span class="browser-chip">${icon('layers')} ${tabs.length} ${tabs.length === 1 ? 'pestaña' : 'pestañas'}${tabs.length && !front ? ' · ninguna al frente' : ''}</span>
+    <span class="browser-chip" data-state="${stale.length ? 'warn' : ''}">${icon('bot')} ${esc(agentLabel)}</span>`;
+  renderBrowserTabs(tabs);
   if (panel.hidden) { refreshIcons(bar); return; }
   panel.innerHTML = `
     <section>
-      <h3>Pestañas abiertas</h3>
-      ${tabs.length ? `<ul class="browser-list">${tabs.map((t) => `
-        <li><div><strong>${esc(t.title || 'Sin título')}</strong><small>${esc(t.url)}</small></div>
-        <button class="bk-icon-button" data-close-tab="${esc(t.id)}" title="Cerrar pestaña" aria-label="Cerrar ${esc(t.title || t.url)}">${icon('x')}</button></li>`).join('')}</ul>` : '<p class="browser-empty">No hay pestañas abiertas.</p>'}
+      <h3>Pestañas · ${esc(BROWSER_VIEWS[browserView].label)}</h3>
+      ${tabs.length ? `<ul class="browser-list">${tabs.map((t) => {
+        const freezeLocked = t.active && !t.frozen;
+        const freezeTitle = freezeLocked ? 'Está al frente: cambiá de pestaña antes de congelarla' : t.frozen ? 'Descongelar' : 'Congelar';
+        return `
+        <li><div><strong>${esc(t.title || 'Sin título')}</strong><small>${esc(t.url)}</small>
+        <small>${[t.active && 'al frente', t.recent && 'navegó recién', t.frozen && 'congelada', t.jsPct != null && `${t.jsPct}% de JS`, t.heapMb != null && `${t.heapMb} MB`].filter(Boolean).join(' · ') || `sin cambios hace ${fmtAge(t.idleSec)}`}</small></div>
+        <button class="bk-icon-button" data-freeze-tab="${esc(t.id)}" data-frozen="${t.frozen ? '1' : '0'}" ${freezeLocked ? 'disabled' : ''} title="${freezeTitle}" aria-label="${freezeTitle} ${esc(t.title || t.url)}">${icon(t.frozen ? 'play' : 'snowflake')}</button>
+        <button class="bk-icon-button" data-close-tab="${esc(t.id)}" title="Cerrar pestaña" aria-label="Cerrar ${esc(t.title || t.url)}">${icon('x')}</button></li>`;
+      }).join('')}</ul>` : '<p class="browser-empty">No hay pestañas abiertas.</p>'}
+      <p class="browser-hint">Congelar deja la pestaña abierta pero sin correr nada: corta el CPU de una página que quedó girando.</p>
     </section>
     <section>
       <h3>Agentes conectados</h3>
       ${clients.length ? `<ul class="browser-list">${clients.map((c) => `
         <li><div><strong>${esc(c.label)}</strong><small>${esc(c.detail)} · conectado hace ${fmtAge(c.ageSec)}</small></div>
         <button class="btn-secondary" data-disconnect="${c.pid}">Desconectar</button></li>`).join('')}</ul>`
-        : '<p class="browser-empty">Ningún agente está usando el navegador ahora.</p>'}
+        : '<p class="browser-empty">Ningún agente está usando este navegador ahora.</p>'}
       <p class="browser-hint">Las sesiones de playwright-cli sin uso por 30 minutos se cierran solas.</p>
     </section>
     <section>
       <h3>Acciones</h3>
       <div class="browser-actions">
         <button class="btn-secondary" data-browser-action="cleanup">${icon('sparkles')} Limpiar ahora</button>
-        <button class="btn-secondary" data-browser-action="agents">${icon('flask-conical')} Reiniciar Playwright de agentes</button>
-        <button class="btn-secondary" data-browser-action="browser">${icon('power')} Reiniciar navegador</button>
+        <button class="btn-secondary" data-browser-action="restart">${icon('power')} Reiniciar ${esc(BROWSER_VIEWS[browserView].label.toLowerCase())}</button>
       </div>
       <p class="browser-hint">Reiniciar cierra Chrome ordenado, así no se pierde la sesión de Google.</p>
     </section>
@@ -2365,31 +2506,49 @@ async function refreshBrowserInfo() {
   refreshIcons(bar); refreshIcons(panel);
 }
 
+function runBrowserAction(btn, path, body, done) {
+  return AxonUI.busy(btn, async () => {
+    try { await api(path, { method: 'POST', body }); if (done) toast(done, 'success', '', 3000); }
+    catch (err) { toast(err.message || 'No se pudo completar', 'error', err.detail || '', 5000); }
+    await refreshBrowserInfo();
+  });
+}
+
 $('#browser-manage-toggle').addEventListener('click', (e) => {
   const panel = $('#browser-manage');
   panel.hidden = !panel.hidden;
   e.currentTarget.setAttribute('aria-expanded', String(!panel.hidden));
   refreshBrowserInfo();
 });
+$('#browser-tabs').addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  if (btn.dataset.closeTab) return runBrowserAction(btn, '/api/browser/tabs/close', { id: btn.dataset.closeTab, which: browserView });
+  if (btn.dataset.activate) return runBrowserAction(btn, '/api/browser/tabs/activate', { id: btn.dataset.activate, which: browserView });
+});
 $('#browser-manage').addEventListener('click', (e) => {
   const btn = e.target.closest('button');
   if (!btn) return;
-  const run = (path, body, done) => AxonUI.busy(btn, async () => {
-    try { await api(path, { method: 'POST', body }); if (done) toast(done, 'success', '', 3000); }
-    catch (err) { toast(err.message || 'No se pudo completar', 'error', err.detail || '', 5000); }
-    await refreshBrowserInfo();
-  });
-  if (btn.dataset.closeTab) return run('/api/browser/tabs/close', { id: btn.dataset.closeTab });
-  if (btn.dataset.disconnect) return run('/api/browser/clients/disconnect', { pid: Number(btn.dataset.disconnect) }, 'Agente desconectado');
+  if (btn.dataset.closeTab) return runBrowserAction(btn, '/api/browser/tabs/close', { id: btn.dataset.closeTab, which: browserView });
+  if (btn.dataset.freezeTab) {
+    const frozen = btn.dataset.frozen === '1';
+    return runBrowserAction(btn, '/api/browser/tabs/freeze', { id: btn.dataset.freezeTab, which: browserView, frozen: !frozen }, frozen ? 'Pestaña descongelada' : 'Pestaña congelada');
+  }
+  if (btn.dataset.disconnect) return runBrowserAction(btn, '/api/browser/clients/disconnect', { pid: Number(btn.dataset.disconnect), which: browserView }, 'Agente desconectado');
   const action = btn.dataset.browserAction;
-  if (action === 'cleanup') return run('/api/browser/cleanup', {}, 'Limpieza hecha');
-  if (action === 'agents') return confirmDialog('¿Reiniciar Playwright de agentes?', 'Se cierra el Chrome headless que usan los agentes. Un agente que lo esté usando ahora pierde su página y tiene que volver a abrirla.', 'Reiniciar')
-    .then((ok) => ok && run('/api/browser/restart', { target: 'agents' }, 'Playwright de agentes reiniciado'));
-  if (action === 'browser') return confirmDialog('¿Reiniciar el navegador?', 'Chrome se cierra guardando todo y vuelve a abrir con las cuentas iniciadas. Las pestañas abiertas se cierran y los agentes conectados se desconectan.', 'Reiniciar')
-    .then((ok) => ok && run('/api/browser/restart', { target: 'browser' }, 'Navegador reiniciado').then(() => { unloadBrowser(true); loadBrowser(); }));
+  if (action === 'cleanup') return runBrowserAction(btn, '/api/browser/cleanup', {}, 'Limpieza hecha');
+  if (action === 'restart') {
+    const label = BROWSER_VIEWS[browserView].label.toLowerCase();
+    const detail = browserView === 'server'
+      ? 'Chrome se cierra guardando todo y vuelve a abrir con las cuentas iniciadas. Las pestañas abiertas se cierran y los agentes conectados se desconectan.'
+      : 'Se reinicia el Chrome limpio de los agentes. Un agente que lo esté usando ahora pierde su página y tiene que volver a abrirla.';
+    return confirmDialog(`¿Reiniciar ${label}?`, detail, 'Reiniciar')
+      .then((ok) => ok && runBrowserAction(btn, '/api/browser/restart', { target: browserView === 'server' ? 'browser' : 'agents' }, 'Navegador reiniciado')
+        .then(() => { if (browserView === 'server') { unloadBrowser(true); loadBrowser(); } }));
+  }
 });
-document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshBrowserInfo(); });
-document.addEventListener('axon:section', (e) => { if (e.detail === 'navegador') refreshBrowserInfo(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { refreshBrowserInfo(); if (browserLive) liveTick(); } });
+document.addEventListener('axon:section', (e) => { if (e.detail === 'navegador') { refreshBrowserInfo(); if (browserLive) liveTick(); } });
 
 // ---------- QR pairing ----------
 
