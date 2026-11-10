@@ -151,7 +151,7 @@ Luego conectá tus cuentas desde Agentes. El cambio de cuenta no convierte una s
 ## Qué incluye
 
 - Salud del servidor, CPU, memoria, disco, procesos y diagnóstico de uso. Optimización con propuesta, revalidación y recuperación; los servicios desconocidos y las bases de datos empiezan protegidos.
-- Puertos y procesos, proyectos de desarrollo, logs, terminal y programas del host.
+- Puertos y procesos con nombre propio, ocultos y cierre bloqueado por entrada; proyectos de desarrollo, logs, terminal y programas del host. Los ocultos se ven en solo lectura para poder recuperarlos.
 - Docker, edición y despliegue de Compose con borradores y registro persistente de operaciones.
 - Archivos: explorador con panel de navegación (acceso rápido, discos, etiquetas, nube), edición de texto, creación, transferencias, subidas por bloques y papelera recuperable.
 - Biblioteca multimedia dentro de Archivos: colecciones, favoritos, visor, links para compartir, optimización y transcripción desde el menú de cualquier archivo. Ver [docs/archivos-explorador.md](docs/archivos-explorador.md).

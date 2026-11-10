@@ -1,6 +1,7 @@
 import { readFile, chmod } from 'fs/promises';
 import { atomicPrivateWrite } from './atomic-file';
 import { hashPassword } from './auth';
+import { normalizePortPrefs } from './port-prefs';
 import type { AppConfig } from './types';
 
 const CONFIG_PATH = process.env.CONFIG_PATH || '/app/data/config.json';
@@ -47,6 +48,8 @@ export async function loadConfig(): Promise<AppConfig> {
     throw new Error(`Configuración inválida en ${CONFIG_PATH}; conservá el archivo y recuperá una copia válida.`);
   }
   config.settings = { ...DEFAULT_SETTINGS, ...(config.settings || {}) };
+  // User prefs are UI-managed; drop malformed entries instead of failing boot.
+  config.portPrefs = normalizePortPrefs(config.portPrefs);
   if (process.env.PROJECT_SCAN_DIRS) {
     config.settings.scanDirs = process.env.PROJECT_SCAN_DIRS.split(',').map((s) => s.trim()).filter(Boolean);
   }

@@ -223,12 +223,15 @@ export async function hostSpawnDetached(
       // or empty MainPID query must NOT fall through to the setsid fallback:
       // that would launch the command a second time.
       for (let i = 0; i < 10; i++) {
-        const res = await hostExec(`${env}systemctl --user show -p MainPID,ActiveState --value ${shq(unit)}`, { user, timeoutMs: 10_000 });
+        // Without --value the properties keep their names: systemd does not
+        // guarantee the order requested, and a positional read of
+        // "MainPID,ActiveState" silently yielded ActiveState first.
+        const res = await hostExec(`${env}systemctl --user show -p MainPID -p ActiveState ${shq(unit)}`, { user, timeoutMs: 10_000 });
         if (!res.ok) {
           return { ok: false, error: 'No se pudo verificar el proceso lanzado; no se reintentó para evitar duplicarlo' };
         }
-        const [pidRaw, state] = res.stdout.trim().split('\n');
-        const pid = parseInt(pidRaw || '', 10);
+        const pid = Number(/^MainPID=(\d+)$/m.exec(res.stdout)?.[1] ?? 0);
+        const state = /^ActiveState=(\w+)$/m.exec(res.stdout)?.[1];
         if (pid > 0) return { ok: true, pid };
         // A definitively dead unit means the command failed to start.
         if (state === 'failed' || state === 'inactive' || state === 'dead') break;

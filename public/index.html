@@ -12,10 +12,10 @@
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>AXON</title>
-  <link rel="stylesheet" href="/app.css?v=baf95f81d25b">
-  <link rel="axon-feature" data-axon-style="/document-viewer.css?v=edeb44e4d558">
+  <link rel="stylesheet" href="/app.css?v=3ea11265a958">
+  <link rel="axon-feature" data-axon-style="/document-viewer.css?v=82d0154b47b3">
   <link rel="axon-feature" data-axon-style="/file-catalog.css?v=96f0317dffb4">
-  <link rel="axon-feature" data-axon-style="/feat-files.css?v=90484a3b2c42">
+  <link rel="axon-feature" data-axon-style="/feat-files.css?v=ef7fad9fde83">
   <link rel="axon-feature" data-axon-style="/feat-dropbox.css?v=b43589b9a006">
   <link rel="axon-feature" data-axon-style="/feat-scripts.css?v=2da1ea482319">
   <link rel="axon-feature" data-axon-style="/feat-metrics.css?v=d7e6f14552bc">
@@ -24,7 +24,7 @@
   <link rel="axon-feature" data-axon-style="/feat-compose.css?v=34a752b90e13">
   <link rel="axon-feature" data-axon-style="/feat-agents.css?v=83bcf81535cb">
   <link rel="axon-feature" data-axon-style="/agent-context.css?v=41d2320e73be">
-  <link rel="axon-feature" data-axon-style="/feat-library.css?v=746ea558bca4">
+  <link rel="axon-feature" data-axon-style="/feat-library.css?v=790f1005d021">
   <link rel="axon-feature" data-axon-style="/navigation.css?v=5f9ea34490fd">
   <link rel="axon-feature" data-axon-style="/dashboard.css?v=9c0cbcfa963d">
   <link rel="axon-feature" data-axon-style="/polish.css?v=fa05b5dc573c">
@@ -211,11 +211,15 @@
                     <button class="chip" data-filter="project">Proyectos</button>
                     <button class="chip" data-filter="service">Servicios</button>
                     <button class="chip" data-filter="system">Sistema</button>
+                    <button class="chip chip-hidden" data-filter="hidden" title="Puertos que ocultaste de esta página"><i data-lucide="eye-off" class="lucide-icon"></i> Ocultos <span id="ports-hidden-count"></span></button>
                   </div>
                   <button id="ports-refresh" class="btn-secondary" title="Recargar"><i data-lucide="refresh-cw" class="lucide-icon"></i></button>
                   <span class="last-updated" id="ports-updated"></span>
                 </div>
               </div>
+              <p id="ports-hidden-note" class="ports-hidden-note hidden" role="note">
+                <i data-lucide="lock" class="lucide-icon"></i> Los ocultos son de solo lectura: no se pueden cerrar ni modificar. Usá <strong>Mostrar</strong> para volver a operarlos.
+              </p>
               <div class="table-wrapper">
                 <table id="ports-table">
                   <thead>
@@ -456,6 +460,25 @@
     </div>
   </div>
 
+  <!-- Rename a Ports entry -->
+  <div id="port-rename-modal" class="modal hidden" role="dialog" aria-labelledby="port-rename-title" aria-modal="true">
+    <div class="modal-content">
+      <h3 id="port-rename-title">Renombrar en Puertos</h3>
+      <p id="port-rename-target" class="listener-note"></p>
+      <form id="port-rename-form">
+        <label>Nombre
+          <input type="text" id="port-rename-input" maxlength="64" autocomplete="off" spellcheck="false">
+        </label>
+        <p class="rename-hint">Solo cambia cómo se ve en esta página. Vacío = nombre original.</p>
+        <div id="port-rename-error" class="error"></div>
+        <div class="modal-actions">
+          <button type="button" id="port-rename-cancel" class="btn-secondary">Cancelar</button>
+          <button type="submit" id="port-rename-save" class="btn-primary">Guardar nombre</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <!-- Domain modal -->
   <div id="domain-modal" class="modal hidden" role="dialog" aria-modal="true">
     <div class="modal-content">
@@ -477,6 +500,25 @@
           <button type="submit" class="btn-primary">Asignar</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- Dev-server host check modal: the tunnel works, the app rejects the Host -->
+  <div id="host-fix-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="host-fix-title">
+    <div class="modal-content">
+      <h3 id="host-fix-title">Permitir el dominio en la app</h3>
+      <p id="host-fix-summary" class="listener-note"></p>
+      <div id="host-fix-file" class="host-fix-file"></div>
+      <pre id="host-fix-change" class="host-fix-change"></pre>
+      <label id="host-fix-restart-row" class="host-fix-restart">
+        <input type="checkbox" id="host-fix-restart" checked>
+        <span id="host-fix-restart-label">Reiniciar el proceso para que tome efecto</span>
+      </label>
+      <div id="host-fix-error" class="error"></div>
+      <div class="modal-actions">
+        <button type="button" id="host-fix-cancel" class="btn-secondary">Cancelar</button>
+        <button type="button" id="host-fix-apply" class="btn-primary">Agregar y reiniciar</button>
+      </div>
     </div>
   </div>
 
@@ -714,8 +756,8 @@
   <script type="text/axon-feature" data-src="/vendor/qrcode.js?v=18ae399f8118"></script>
   <script defer src="/vendor/lucide.min.js?v=344d31835187"></script>
   <script defer src="/assets.js?v=4b3b47dc2cf3"></script>
-  <script defer src="/request-client.js?v=9e06d92f3fee"></script>
-  <script defer src="/interaction.js?v=c48c62d0af37"></script>
+  <script defer src="/request-client.js?v=5e86afb46837"></script>
+  <script defer src="/interaction.js?v=908532132adc"></script>
   <script defer src="/themes.js?v=4d0f2999b0b7"></script>
   <script defer src="/login.js?v=e2272554d7cb"></script>
   <link rel="axon-feature" data-axon-style="/agent-accounts.css?v=bab461a7dcee">
@@ -725,17 +767,17 @@
   <script type="text/axon-feature" data-src="/terminal-tools.js?v=dfff049a9a58"></script>
   <link rel="stylesheet" href="/software.css?v=c2e4c5707cac">
   <script defer src="/context-menu.js?v=73f8c703ea03"></script>
-  <script defer src="/app.js?v=aeb73a582599"></script>
+  <script defer src="/app.js?v=4380b234e95b"></script>
   <script defer src="/software.js?v=25987ed3df7e"></script>
   <script defer src="/onboarding.js?v=8e8516b302ef"></script>
   <link rel="stylesheet" href="/host-storage.css?v=64594bea1d0d">
   <script defer src="/host-storage.js?v=c7809d6e2f59"></script>
   <link rel="stylesheet" href="/transfer-review.css?v=98bc9c35eadc">
-  <script defer src="/transfer-review.js?v=205ff33f3b6d"></script>
-  <script type="text/axon-feature" data-src="/document-viewer.js?v=27ae6ed4b04b"></script>
+  <script defer src="/transfer-review.js?v=a439cbc9ef53"></script>
+  <script type="text/axon-feature" data-src="/document-viewer.js?v=e0c6726be0b3"></script>
   <script type="text/axon-feature" data-src="/file-catalog.js?v=33a73fda00fa"></script>
-  <script type="text/axon-feature" data-src="/feat-files.js?v=3d7a291f2754"></script>
-  <script type="text/axon-feature" data-src="/feat-dropbox.js?v=85ef346ddf04"></script>
+  <script type="text/axon-feature" data-src="/feat-files.js?v=108311450454"></script>
+  <script type="text/axon-feature" data-src="/feat-dropbox.js?v=1c9557dc0ceb"></script>
   <script type="text/axon-feature" data-src="/feat-scripts.js?v=735267350c01"></script>
   <script type="text/axon-feature" data-src="/feat-logs.js?v=8b7a506006d5"></script>
   <script type="text/axon-feature" data-src="/feat-metrics.js?v=09f85736d7be"></script>
@@ -756,8 +798,8 @@
   <script type="text/axon-feature" data-src="/feat-bots-web.js?v=ace72fe3eee2"></script>
   <script type="text/axon-feature" data-src="/feat-bots-doctor.js?v=9625eecad194"></script>
   <script type="text/axon-feature" data-src="/feat-bots-agents.js?v=d80088c1cb38"></script>
-  <script type="text/axon-feature" data-src="/feat-library.js?v=ef4b45f247f6"></script>
-  <script type="text/axon-feature" data-src="/feat-explorer.js?v=f5da1e8b4f3e"></script>
+  <script type="text/axon-feature" data-src="/feat-library.js?v=2967bda79e49"></script>
+  <script type="text/axon-feature" data-src="/feat-explorer.js?v=229dbc5c6353"></script>
   <script type="text/axon-feature" data-src="/dashboard.js?v=a82586b73546"></script>
   <link rel="axon-feature" data-axon-style="/disks.css?v=5a7126099567">
   <script type="text/axon-feature" data-src="/disks.js?v=1705581c28b6"></script>

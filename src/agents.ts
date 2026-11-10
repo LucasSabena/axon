@@ -705,7 +705,7 @@ async function withFileLocks<T>(paths: string[], work: () => Promise<T>): Promis
   return run;
 }
 
-async function writeHostText(hostPath: string, content: string): Promise<{ ok: boolean; error?: string }> {
+export async function writeHostText(hostPath: string, content: string): Promise<{ ok: boolean; error?: string }> {
   try{hostPath=await resolveHostPath(hostPath);}catch(e){return {ok:false,error:e instanceof Error?e.message:'Disco no disponible'};}
   await hostExec(`cp ${shq(hostPath)} ${shq(hostPath)}.axonbak 2>/dev/null`, { user: 'user', timeoutMs: 10_000 });
   // Write to a temp sibling and rename: an interrupted `cat >` would leave a

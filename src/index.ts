@@ -22,9 +22,10 @@ import {
 import { loadConfig, saveConfig, updateConfigAuth } from './config';
 import { LoginChallenges } from './login-challenges';
 import { domainsForPorts, domainsForProject } from './domain-associations';
+import { checkDomainHost, applyDomainHostFix } from './domain-host-check';
 import { validateSettings, isForbiddenWebhookHost, maskWebhookUrl } from './settings-validation';
 import { getServerStats, getServerHosts } from './stats';
-import { HOST_USER, setHostUser, hostExec, hostToContainer, hostSpawnInteractive, killHostProc } from './host';
+import { HOST_USER, setHostUser, hostExec, hostToContainer, hostSpawnInteractive, hostSpawnDetached, killHostProc } from './host';
 import {
   configurePorts,
   listPortProcesses,
@@ -34,6 +35,7 @@ import {
   maskCmd,
   maskArgv,
 } from './ports';
+import { applyPortPrefPatch, isValidPortPrefKey, type PortPrefPatch } from './port-prefs';
 import { isCriticalUnit } from './systemd-units';
 import { getJob, listJobs, runJob, setJobCompletionHook } from './jobs';
 import {
@@ -109,7 +111,7 @@ import {ComposeReleases} from './compose-releases';
 import { registerComposeRoutes } from './compose';
 import { registerStoreRoutes, invalidateStoreCache } from './app-store';
 import { software, registerSoftwareRoutes, runSoftwareJob, softwareCommand, softwareConfig, softwareInstallSpec } from './software';
-import { registerAgentRoutes, listAgents, invalidateAgentsCache, agentPathReferences } from './agents';
+import { registerAgentRoutes, listAgents, invalidateAgentsCache, agentPathReferences, writeHostText } from './agents';
 import { registerAgentAccounts } from './agent-accounts';
 import { registerAgentUsage } from './agent-usage';
 import { registerAgentConsumption } from './agent-consumption';
@@ -154,7 +156,9 @@ const PORT = parseInt(process.env.PORT || '3457', 10);
 const BASE_DOMAIN = process.env.BASE_DOMAIN || 'example.com';
 
 let config = await loadConfig();
-configurePorts(config.settings);
+// Serializes every read-modify-write of config.json (settings, port prefs).
+let settingsWrite: Promise<unknown> = Promise.resolve();
+configurePorts({ ...config.settings, portPrefs: config.portPrefs });
 setHostUser(config.settings.hostUser);
 initHostStorage(maintenanceQaRoot||undefined);
 initProjects(config, saveConfig);
@@ -697,7 +701,7 @@ app.get('/api/ports', async (c) => {
           .sort((a, b) => a - b)[0] ?? null)
       : null;
     const editorUrl = (config.settings as any).editorUrl || null;
-    return c.json({ ok: true, processes, networkHost, codeServerPort, editorUrl });
+    return c.json({ ok: true, processes, prefs: config.portPrefs || {}, networkHost, codeServerPort, editorUrl });
   } catch (err) {
     return fail(c, 500, 'No se pudo escanear los puertos', { detail: String(err) });
   }
@@ -756,6 +760,44 @@ app.get('/api/ports/:pid/detail', async (c) => {
   const detail = await getProcessDetail(pid);
   if (!detail) return fail(c, 404, 'El proceso ya no existe');
   return c.json({ ok: true, detail });
+});
+
+// Rename / hide / close-block one entry of the Ports page. Purely a UI
+// preference, except "protected" and "hidden", which kill paths enforce.
+app.put('/api/ports/prefs', async (c) => {
+  let body: Record<string, unknown>;
+  try {
+    const parsed = await c.req.json();
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Cuerpo inválido');
+    body = parsed as Record<string, unknown>;
+  } catch { return fail(c, 400, 'Cuerpo inválido'); }
+  for (const key of Object.keys(body)) {
+    if (!['key', 'label', 'hidden', 'protected'].includes(key)) return fail(c, 400, `Campo desconocido: ${key}`);
+  }
+  const key = body.key;
+  if (!isValidPortPrefKey(key)) return fail(c, 400, 'Referencia de puerto inválida');
+  if (!('label' in body) && !('hidden' in body) && !('protected' in body)) return fail(c, 400, 'Nada para cambiar');
+  if ('label' in body && body.label !== null && typeof body.label !== 'string') return fail(c, 400, 'Nombre inválido');
+  if ('hidden' in body && typeof body.hidden !== 'boolean') return fail(c, 400, 'Valor inválido en hidden');
+  if ('protected' in body && typeof body.protected !== 'boolean') return fail(c, 400, 'Valor inválido en protected');
+  const patch: PortPrefPatch = {};
+  if ('label' in body) patch.label = body.label as string | null;
+  if ('hidden' in body) patch.hidden = body.hidden as boolean;
+  if ('protected' in body) patch.protected = body.protected as boolean;
+
+  const operation = settingsWrite.catch(() => {}).then(async () => {
+    const prefs = applyPortPrefPatch(config.portPrefs || {}, key, patch);
+    await saveConfig({ ...config, portPrefs: prefs });
+    config.portPrefs = prefs;
+    configurePorts({ ...config.settings, portPrefs: prefs });
+    return prefs;
+  });
+  settingsWrite = operation;
+  try {
+    return c.json({ ok: true, prefs: await operation });
+  } catch (e) {
+    return fail(c, 400, (e as Error).message);
+  }
 });
 
 // ---------- Programs / updater ----------
@@ -1212,7 +1254,21 @@ async function probeDomain(
     httpStatus = res.status;
     res.body?.cancel().catch(() => {});
     if (res.status < 400) return { state: 'up', httpStatus, ms };
-    if (res.status === 401 || res.status === 403) {
+    // 403 is ambiguous: an app ACL asks for auth, while a dev server refuses
+    // the Host header outright ("Blocked request. This host … is not allowed").
+    // Only the body tells them apart — and only the second one Axon can fix.
+    if (res.status === 403) {
+      let body = '';
+      try { body = await res.text(); } catch { /* body already gone */ }
+      if (/blocked request|this host .*is not allowed/i.test(body)) {
+        return {
+          state: 'warn', httpStatus, ms, fix: 'allowedHosts',
+          reason: 'La app rechaza este dominio (allowedHosts) — el túnel y el proceso funcionan',
+        };
+      }
+      return { state: 'warn', httpStatus, ms, reason: 'La app responde pero pide autenticación (HTTP 403)' };
+    }
+    if (res.status === 401) {
       return { state: 'warn', httpStatus, ms, reason: `La app responde pero pide autenticación (HTTP ${res.status})` };
     }
     if (res.status < 500) {
@@ -1361,6 +1417,63 @@ app.post('/api/domains', async (c) => {
   }
   domainStatusCache = null;
   return c.json({ ok: true, domain });
+});
+
+// The tunnel can be perfectly healthy and the app behind it still refuse the
+// domain: Vite rejects unknown Host headers (403 "Blocked request") unless the
+// hostname is listed in server/preview.allowedHosts. Report the exact edit,
+// then offer to write it — and to relaunch the process so it takes effect.
+app.get('/api/domains/:id/host-check', async (c) => {
+  const domain = config.domains.find((d) => d.id === c.req.param('id'));
+  if (!domain) return fail(c, 404, 'Dominio no encontrado');
+  const check = await checkDomainHost(domain, await listPortProcesses(), `.${BASE_DOMAIN}`);
+  return c.json({ ok: true, check });
+});
+
+app.post('/api/domains/:id/host-fix', async (c) => {
+  const domain = config.domains.find((d) => d.id === c.req.param('id'));
+  if (!domain) return fail(c, 404, 'Dominio no encontrado');
+  const body = await c.req
+    .json<{ restart?: boolean }>()
+    .catch(() => ({}) as { restart?: boolean });
+  const procs = await listPortProcesses();
+  const result = await applyDomainHostFix(domain, procs, `.${BASE_DOMAIN}`, {
+    restart: body.restart === true,
+    write: writeHostText,
+    restartProcess: async (proc) => {
+      const plan = await killPlan(proc.pid, config.domains);
+      if (plan?.blocked) return { ok: false, error: `No se puede reiniciar: ${plan.blocked}` };
+      // The relaunch appends to this log; a missing directory makes the
+      // detached unit die on its redirect before the process ever starts.
+      const logDir = process.env.HOST_LOG_DIR || '/tmp/pm-logs';
+      const prepared = await hostExec(`mkdir -p ${shq(logDir)} && chmod 700 ${shq(logDir)}`, {
+        user: 'user', timeoutMs: 10_000,
+      });
+      if (!prepared.ok) return { ok: false, error: `No se pudo preparar el directorio de logs: ${prepared.stderr.trim().slice(0, 200)}` };
+      const killed = await killProcessTree(proc.pid);
+      if (!killed.ok) return { ok: false, error: killed.error || 'No se pudo cerrar el proceso' };
+      // Free the port before relaunching, or the new process dies on EADDRINUSE.
+      for (let i = 0; i < 25; i++) {
+        const live = await listPortProcesses();
+        if (!live.some((p) => p.listeners?.some((l) => l.port === domain.port))) break;
+        await Bun.sleep(200);
+      }
+      return hostSpawnDetached(proc.cmd, proc.cwd, path.join(logDir, `domain-${domain.port}.log`)).then(async (spawned) => {
+        if (spawned.ok) return spawned;
+        // The launch report can fail while the process is already up; the port
+        // listening again is the honest answer to "did it restart?".
+        for (let i = 0; i < 20; i++) {
+          const live = await listPortProcesses();
+          if (live.some((p) => p.listeners?.some((l) => l.port === domain.port))) return { ok: true };
+          await Bun.sleep(250);
+        }
+        return spawned;
+      });
+    },
+  });
+  if (!result.ok) return fail(c, 400, result.error || 'No se pudo corregir la configuración');
+  domainStatusCache = null;
+  return c.json({ ok: true, ...result });
 });
 
 app.put('/api/domains/:id', async (c) => {
@@ -1521,7 +1634,6 @@ app.get('/api/config', async (c) => {
   return c.json({ ok: true, config: { ...rest, settings, auth: { username: auth.username, totpEnabled: !!auth.totpSecret } } });
 });
 
-let settingsWrite: Promise<unknown> = Promise.resolve();
 app.put('/api/config', async (c) => {
   let body: Partial<AppConfig['settings']>;
   try { body = validateSettings(await c.req.json(), config.settings); } catch (e) { return fail(c, 400, (e as Error).message); }
@@ -1529,7 +1641,7 @@ app.put('/api/config', async (c) => {
     const settings = { ...config.settings, ...body };
     await saveConfig({ ...config, settings });
     config.settings = settings;
-    configurePorts(settings);
+    configurePorts({ ...settings, portPrefs: config.portPrefs });
     setHostUser(settings.hostUser);
     software.invalidate(); invalidateStoreCache();
     invalidateProgramsCache(); invalidateAgentsCache();

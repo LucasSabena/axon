@@ -8,6 +8,11 @@ import {
   readHostJson,
   hostExec,
 } from './host';
+import {
+  groupPrefKey,
+  resolvePortPrefs,
+  type PortPrefs,
+} from './port-prefs';
 import type {
   Identity,
   KillPlan,
@@ -71,17 +76,20 @@ let customServices: Record<string, KnownService> = {};
 let protectedPids: number[] = [];
 let protectedPorts: number[] = [];
 let ignoredPatterns: string[] = [];
+let portPrefs: PortPrefs = {};
 
 export function configurePorts(settings: {
   knownServices?: Record<string, KnownService>;
   protectedPids?: number[];
   protectedPorts?: number[];
   ignoredPatterns?: string[];
+  portPrefs?: PortPrefs;
 }) {
   customServices = settings.knownServices || {};
   protectedPids = settings.protectedPids || [];
   protectedPorts = settings.protectedPorts || [];
   ignoredPatterns = settings.ignoredPatterns || [];
+  portPrefs = settings.portPrefs || {};
 }
 
 // --- ss parsing ---
@@ -453,7 +461,7 @@ function baseCmd(cmd: string): string {
   return path.basename(first).replace(/\.(exe|sh|py)$/, '');
 }
 
-async function classify(pid: number, name: string, cmd: string, cwd: string, uid: number, ports: number[]): Promise<Identity> {
+async function classifyBase(pid: number, name: string, cmd: string, cwd: string, uid: number, ports: number[]): Promise<Identity> {
   const lower = cmd.toLowerCase();
   const procKey = name.toLowerCase();
 
@@ -552,6 +560,35 @@ async function classify(pid: number, name: string, cmd: string, cwd: string, uid
   };
 }
 
+// Ports-page overrides ride on top of detection: a custom name replaces the
+// detected label, and a close-block made from the page is as strong as a
+// built-in protection (kill paths re-run classify()).
+function applyPortPrefs(identity: Identity, ports: number[]): Identity {
+  const resolved = resolvePortPrefs(portPrefs, ports);
+  if (resolved.label && resolved.label !== identity.label) {
+    identity.originalLabel = identity.label;
+    identity.label = resolved.label;
+    identity.customLabel = true;
+  }
+  if (resolved.protected && !identity.protected) {
+    identity.protected = true;
+    identity.protectionReason = 'Bloqueado desde Puertos';
+  }
+  return identity;
+}
+
+async function classify(pid: number, name: string, cmd: string, cwd: string, uid: number, ports: number[]): Promise<Identity> {
+  return applyPortPrefs(await classifyBase(pid, name, cmd, cwd, uid, ports), ports);
+}
+
+function hiddenByProject(identity: Identity): string | null {
+  if (identity.category !== 'project' || !identity.projectRoot) return null;
+  const pref = portPrefs[groupPrefKey(identity.projectRoot)];
+  if (pref?.hidden) return 'El proyecto está oculto en Puertos';
+  if (pref?.protected) return 'El proyecto está bloqueado desde Puertos';
+  return null;
+}
+
 function isIgnored(cmd: string): boolean {
   const lower = cmd.toLowerCase();
   return ignoredPatterns.some((p) => p && lower.includes(p.toLowerCase()));
@@ -634,6 +671,7 @@ async function scanPortProcesses(): Promise<PortProcess[]> {
       const startedAtSec = boot && startJiffies ? boot + startJiffies / cachedClkTck : 0;
       const ports = Array.from(new Set(ls.map((l) => l.port))).sort((a, b) => a - b);
       const identity = await classify(pid, name, cmd, cwd, uid, ports);
+      const resolved = resolvePortPrefs(portPrefs, ports);
       const unit = systemdUnit(cgroup);
       if (unit) { identity.unit = unit.unit; identity.unitScope = unit.scope; }
       // Stamp the identity we just observed so a later killProcessTree can
@@ -650,6 +688,7 @@ async function scanPortProcesses(): Promise<PortProcess[]> {
         listeners: ls.map(({ proto, address, port }) => ({ proto, address, port })),
         ports,
         identity,
+        prefs: { hidden: resolved.hidden, hiddenPorts: resolved.hiddenPorts },
         memoryMb: procRssMb(status),
         uptimeSeconds: startedAtSec ? Math.max(0, Math.round(now - startedAtSec)) : 0,
         startedAt: startedAtSec ? new Date(startedAtSec * 1000).toISOString() : '',
@@ -667,6 +706,14 @@ async function scanPortProcesses(): Promise<PortProcess[]> {
     }
     for (const [port, ls] of byPort) {
       const kp = KNOWN_PORTS[port];
+      const identity: Identity = {
+        category: 'system',
+        label: kp ? kp.name : `socket :${port}`,
+        icon: kp?.icon || 'puzzle',
+        protected: true,
+        protectionReason: 'Socket del kernel (sin PID)',
+      };
+      const resolved = resolvePortPrefs(portPrefs, [port]);
       out.push({
         pid: 0,
         ppid: 0,
@@ -677,13 +724,8 @@ async function scanPortProcesses(): Promise<PortProcess[]> {
         cwd: '',
         listeners: ls.map(({ proto, address, port: p }) => ({ proto, address, port: p })),
         ports: [port],
-        identity: {
-          category: 'system',
-          label: kp ? kp.name : `socket :${port}`,
-          icon: kp?.icon || 'puzzle',
-          protected: true,
-          protectionReason: 'Socket del kernel (sin PID)',
-        },
+        identity: applyPortPrefs(identity, [port]),
+        prefs: { hidden: resolved.hidden, hiddenPorts: resolved.hiddenPorts },
         memoryMb: 0,
         uptimeSeconds: 0,
         startedAt: '',
@@ -789,7 +831,11 @@ export async function killPlan(pid: number, domains?: DomainMapping[]): Promise<
     portsFreed: ports,
     tree: [{ pid, name, cmd: maskCmd(cmd || name) }, ...tree.map((t) => ({ ...t, cmd: maskCmd(t.cmd) }))],
     warnings,
-    blocked: identity.protected ? identity.protectionReason || 'Proceso protegido' : undefined,
+    blocked: identity.protected
+      ? identity.protectionReason || 'Proceso protegido'
+      : resolvePortPrefs(portPrefs, ports).hidden
+        ? 'El puerto está oculto en Puertos — mostralo para poder cerrarlo'
+        : hiddenByProject(identity) || undefined,
   };
 }
 
@@ -838,6 +884,13 @@ export async function killProcessTree(pid: number, expectedStart?: number): Prom
   if (identity.protected) {
     return { ok: false, killed: [], error: identity.protectionReason || 'Proceso protegido' };
   }
+  // Hidden entries are read-only from the Ports page: the page never offers
+  // the button, and a direct call must not bypass that safety either.
+  if (resolvePortPrefs(portPrefs, ports).hidden) {
+    return { ok: false, killed: [], error: 'El puerto está oculto en Puertos — mostralo para poder cerrarlo' };
+  }
+  const groupBlock = hiddenByProject(identity);
+  if (groupBlock) return { ok: false, killed: [], error: groupBlock };
 
   const tree = await processTree(pid);
   // Children are killed alongside the parent but get no classify() pass —

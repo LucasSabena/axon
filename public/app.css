@@ -550,6 +550,36 @@ td.num { white-space: nowrap; font-variant-numeric: tabular-nums; font-family: v
 .link-proxy:hover { background: var(--accent); color: var(--bg-canvas); }
 .link-proxy svg { width: 10px; height: 10px; }
 
+/* Hidden/read-only entries: visible in Ocultos, never closable from there. */
+.chip-hidden { display: inline-flex; align-items: center; gap: 5px; }
+.chip-hidden .lucide-icon { width: 12px; height: 12px; }
+.chip-hidden.active { background: var(--bg-overlay); color: var(--text); }
+#ports-hidden-count:not(:empty) {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 17px; height: 17px; padding: 0 5px; border-radius: 99px;
+  background: var(--bg-overlay); color: var(--text-dim);
+  font-size: 0.68rem; font-variant-numeric: tabular-nums;
+}
+.ports-hidden-note {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 0 10px; padding: 8px 12px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--bg-panel); color: var(--text-dim); font-size: 0.8rem;
+}
+.ports-hidden-note .lucide-icon { width: 13px; height: 13px; flex-shrink: 0; }
+tr.port-hidden-row td { background: var(--bg-panel); }
+tr.port-hidden-row strong { color: var(--text-dim); }
+tr.port-hidden-row.folder-row { cursor: default; }
+tr.port-hidden-row:hover td { background: var(--bg-hover); }
+.badge-hidden { background: var(--bg-overlay); color: var(--text-dim); }
+.badge-hidden svg { width: 10px; height: 10px; }
+.rename-hint { margin: -4px 0 10px; color: var(--text-faint); font-size: 0.76rem; }
+.proc-label {
+  display: inline-block; max-width: 280px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  vertical-align: bottom;
+}
+
 .health-dot {
   width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex-shrink: 0;
 }
@@ -693,6 +723,17 @@ tr.domain-dead .domain-link { opacity: 0.55; text-decoration: line-through; }
 }
 .modal-content input:focus, .modal-content textarea:focus, .modal-content select:focus { border-color: var(--accent); }
 .error { color: var(--danger); font-size: 0.82rem; margin-top: 8px; }
+/* Host-check modal: file + exact line that will be written. */
+.host-fix-file { font-size: 0.82rem; color: var(--text-dim); margin: 2px 0 8px; overflow-wrap: anywhere; }
+.host-fix-file code { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text); }
+.host-fix-change {
+  background: var(--bg-canvas); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); font-family: var(--font-mono);
+  font-size: 0.8rem; line-height: 1.5; padding: 10px 12px;
+  margin: 0 0 12px; white-space: pre-wrap; overflow-x: auto;
+}
+.host-fix-restart { display: flex !important; align-items: center; gap: 8px; }
+.host-fix-restart input { width: auto !important; margin: 0 !important; }
 .warning-line {
   display: flex; align-items: flex-start; gap: 7px;
   color: var(--warn); font-size: 0.83rem; margin: 8px 0;

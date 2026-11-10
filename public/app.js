@@ -296,10 +296,21 @@ function bestNetworkHost() {
 
 let portsFilter = 'all';
 let portsData = [];
+let portsPrefs = {};
 let networkHost = '';
 let codeServerPort = null;
 let editorUrl = '';
 const collapsedGroups = new Set();
+
+const portPrefKey = (port) => `port:${port}`;
+const groupPrefKey = (root) => `group:${root}`;
+const prefFor = (key) => portsPrefs[key] || {};
+const isPortHidden = (port) => !!prefFor(portPrefKey(port)).hidden;
+const visiblePorts = (p) => (p.ports || []).filter((port) => !isPortHidden(port));
+const processHidden = (p) => !!p.prefs?.hidden;
+const groupPref = (root) => prefFor(groupPrefKey(root));
+const groupLocked = (root) => !!root && (!!groupPref(root).hidden || !!groupPref(root).protected);
+const userProtected = (p) => (p.ports || []).some((port) => !!prefFor(portPrefKey(port)).protected);
 
 function netHost() {
   return networkHost || bestNetworkHost() || '';
@@ -328,6 +339,7 @@ async function loadPorts() {
   try {
     const data = await api('/api/ports');
     portsData = data.processes || [];
+    portsPrefs = data.prefs || {};
     if (data.networkHost !== undefined) networkHost = data.networkHost || '';
     codeServerPort = data.codeServerPort ?? null;
     editorUrl = data.editorUrl || '';
@@ -399,31 +411,53 @@ function domainLinksHtml(domains) {
 
 function processRow(p, isChild, groupRoot) {
   const tr = document.createElement('tr');
-  if (isChild) { tr.className = 'project-child'; tr.dataset.groupRoot = groupRoot || ''; }
+  const hidden = processHidden(p);
+  if (isChild) tr.className = 'project-child';
+  if (hidden) tr.classList.add('port-hidden-row');
+  if (isChild) tr.dataset.groupRoot = groupRoot || '';
   const [catLabel, catClass] = CATEGORY_BADGE[p.identity.category] || CATEGORY_BADGE.unknown;
-  const portChips = (p.ports || []).map((port) => portLinksHtml(port, p.listeners)).join(' ');
+  const shownPorts = hidden ? (p.ports || []) : visiblePorts(p);
+  const portChips = shownPorts.map((port) => portLinksHtml(port, p.listeners)).join(' ');
   const frameworkBadge = p.identity.framework
     ? `<span class="badge badge-python">${esc(p.identity.framework)}</span>` : '';
+  const renamedBadge = p.identity.customLabel
+    ? `<span class="badge badge-other" title="Nombre original: ${esc(p.identity.originalLabel || '')}">${icon('pencil')} renombrado</span>` : '';
+  const hiddenBadge = hidden
+    ? `<span class="badge badge-hidden">${icon('eye-off')} oculto</span>` : '';
   const unitBadge = p.identity.unit
     ? `<span class="badge badge-other" title="Supervisado por ${esc(p.identity.unit)} — al cerrarlo se reinicia solo">${icon('refresh-ccw')} systemd</span>` : '';
   const domainLink = domainLinksHtml(p.domains || (p.domain ? [p.domain] : []));
   const folderCell = p.identity.projectRoot || p.cwd || '-';
-  const actions = p.pid > 0
-    ? `<button class="btn-action act-detail" data-pid="${p.pid}" title="Info">${icon('info')} Info</button>
-       <button class="btn-action act-menu" data-pid="${p.pid}" title="Más acciones">${icon('ellipsis-vertical')}</button>
-       ${p.identity.protected
-         ? `<button class="btn-danger" disabled title="${esc(p.identity.protectionReason || 'Protegido')}">${icon('lock')}</button>`
-         : `<button class="btn-danger act-kill" data-pid="${p.pid}" title="Cerrar">${icon('power')}</button>`}`
-    : `<span class="listener-note">kernel</span>`;
+  const portList = (p.ports || []).join(',');
+  const lockedByGroup = isChild && groupLocked(groupRoot);
+  let actions;
+  if (hidden) {
+    // Hidden entries are read-only: restoring is the only mutation.
+    actions = `${portList ? `<button class="btn-action act-unhide" data-ports="${portList}" title="Volver a mostrarlo en Puertos">${icon('eye')} Mostrar</button>` : ''}
+       ${p.pid > 0 ? `<button class="btn-action act-detail" data-pid="${p.pid}" title="Info">${icon('info')} Info</button>` : ''}`;
+  } else {
+    const info = p.pid > 0
+      ? `<button class="btn-action act-detail" data-pid="${p.pid}" title="Info">${icon('info')} Info</button>` : '';
+    const hideBtn = portList
+      ? `<button class="btn-action act-hide" data-ports="${portList}" title="Ocultar de Puertos">${icon('eye-off')}</button>` : '';
+    const menu = p.pid > 0
+      ? `<button class="btn-action act-menu" data-pid="${p.pid}" title="Más acciones">${icon('ellipsis-vertical')}</button>` : '';
+    const close = p.pid > 0
+      ? (p.identity.protected || lockedByGroup
+          ? `<button class="btn-danger" disabled title="${esc(lockedByGroup ? 'El proyecto está bloqueado desde Puertos' : p.identity.protectionReason || 'Protegido')}">${icon('lock')}</button>`
+          : `<button class="btn-danger act-kill" data-pid="${p.pid}" title="Cerrar">${icon('power')}</button>`)
+      : '';
+    actions = `${info}${hideBtn}${menu}${close}` || '<span class="listener-note">kernel</span>';
+  }
 
   tr.innerHTML = `
     <td class="icon-cell">${icon(lucideName(p.identity.icon, CATEGORY_ICON[p.identity.category] || 'box'))}</td>
     <td>
-      <strong>${esc(p.identity.label)}</strong> ${frameworkBadge}<br>
+      <strong class="proc-label" title="${esc(p.identity.label)}">${esc(p.identity.label)}</strong> ${frameworkBadge} ${renamedBadge} ${hiddenBadge}<br>
       <span class="badge ${catClass}">${catLabel}</span> ${unitBadge}
       <span class="cmd-cell" style="display:block;max-width:340px" title="${esc(p.cmd)}">${esc(p.name)} · ${esc(p.user)}</span>
     </td>
-    <td>${portChips} ${domainLink}</td>
+    <td>${portChips || '<span class="listener-note">-</span>'} ${domainLink}</td>
     <td class="cmd-cell" title="${esc(folderCell)}">${esc(folderCell)}</td>
     <td class="num">${p.pid || '-'}</td>
     <td class="num">${p.memoryMb ? p.memoryMb + ' MB' : '-'}</td>
@@ -435,25 +469,32 @@ function processRow(p, isChild, groupRoot) {
 function projectHeaderRow(root, procs) {
   const tr = document.createElement('tr');
   tr.className = 'folder-row';
+  const gp = groupPref(root);
   const framework = procs.find((p) => p.identity.framework)?.identity.framework;
-  const label = root.split('/').filter(Boolean).pop() || procs[0].identity.label;
-  const allPorts = [...new Set(procs.flatMap((p) => p.ports || []))].sort((a, b) => a - b);
+  const originalLabel = root.split('/').filter(Boolean).pop() || procs[0].identity.label;
+  const label = gp.label || originalLabel;
+  const renamedBadge = gp.label
+    ? `<span class="badge badge-other" title="Nombre original: ${esc(originalLabel)}">${icon('pencil')} renombrado</span>` : '';
+  const allPorts = [...new Set(procs.flatMap((p) => visiblePorts(p)))].sort((a, b) => a - b);
   const allListeners = procs.flatMap((p) => p.listeners || []);
   const domains = [...new Map(procs.flatMap(p => p.domains || (p.domain ? [p.domain] : [])).map(d => [d.id, d])).values()];
   const ram = procs.reduce((s, p) => s + (p.memoryMb || 0), 0);
   const up = Math.max(0, ...procs.map((p) => p.uptimeSeconds || 0));
-  const killable = procs.filter((p) => p.pid > 0 && !p.identity.protected).map((p) => p.pid);
+  const protectedGroup = !!gp.protected;
+  const killable = protectedGroup ? [] : procs.filter((p) => p.pid > 0 && !p.identity.protected && !processHidden(p)).map((p) => p.pid);
   const editorBtn = (editorUrl || codeServerPort)
     ? `<button class="btn-action act-editor" data-root="${esc(root)}" title="Abrir en el editor">${icon('code')} Editor</button>` : '';
-  const killAllBtn = killable.length
-    ? `<button class="btn-danger act-kill-all" data-pids="${killable.join(',')}" title="Cerrar todos los procesos del proyecto">${icon('x-circle')} Cerrar todo</button>` : '';
+  const killAllBtn = protectedGroup
+    ? `<button class="btn-danger" disabled title="El proyecto está bloqueado desde Puertos">${icon('lock')}</button>`
+    : killable.length
+      ? `<button class="btn-danger act-kill-all" data-pids="${killable.join(',')}" title="Cerrar todos los procesos del proyecto">${icon('x-circle')} Cerrar todo</button>` : '';
   const collapsed = collapsedGroups.has(root);
   if (collapsed) tr.classList.add('group-collapsed');
   tr.dataset.root = root;
   tr.innerHTML = `
     <td class="icon-cell"><span class="group-caret">${icon('chevron-down')}</span></td>
-    <td><strong>${icon('folder-git-2')} ${esc(label)}</strong> ${framework ? `<span class="badge badge-python">${esc(framework)}</span>` : ''} <span class="badge badge-node">Proyecto</span></td>
-    <td>${allPorts.map((pt) => portLinksHtml(pt, allListeners)).join(' ')} ${domainLinksHtml(domains)}</td>
+    <td><strong class="proc-label" title="${esc(label)}">${icon('folder-git-2')} ${esc(label)}</strong> ${framework ? `<span class="badge badge-python">${esc(framework)}</span>` : ''} ${renamedBadge} <span class="badge badge-node">Proyecto</span></td>
+    <td>${allPorts.map((pt) => portLinksHtml(pt, allListeners)).join(' ') || '<span class="listener-note">-</span>'} ${domainLinksHtml(domains)}</td>
     <td class="cmd-cell folder-path" title="${esc(root)}">${esc(root)}</td>
     <td>·</td>
     <td>${ram ? `${Math.round(ram)} MB` : '-'}</td>
@@ -461,42 +502,97 @@ function projectHeaderRow(root, procs) {
     <td><div class="actions">
       <button class="btn-action act-copy" data-path="${esc(root)}" title="Copiar ruta">${icon('copy')}</button>
       ${editorBtn}
+      <button class="btn-action act-group-menu" data-root="${esc(root)}" title="Acciones del proyecto">${icon('ellipsis-vertical')}</button>
       ${killAllBtn}
     </div></td>`;
   return tr;
 }
 
+function hiddenGroupRow(root, procs) {
+  const tr = document.createElement('tr');
+  tr.className = 'folder-row port-hidden-row';
+  const gp = groupPref(root);
+  const originalLabel = root.split('/').filter(Boolean).pop() || procs[0]?.identity.label || root;
+  const label = gp.label || originalLabel;
+  const allPorts = [...new Set(procs.flatMap((p) => p.ports || []))].sort((a, b) => a - b);
+  const allListeners = procs.flatMap((p) => p.listeners || []);
+  const ram = procs.reduce((s, p) => s + (p.memoryMb || 0), 0);
+  tr.dataset.root = root;
+  tr.dataset.hiddenGroup = '1';
+  tr.innerHTML = `
+    <td class="icon-cell">${icon('eye-off')}</td>
+    <td><strong>${esc(label)}</strong> <span class="badge badge-hidden">oculto</span><br>
+      <span class="badge badge-node">Proyecto</span>
+      <span class="cmd-cell">${procs.length} proceso(s) · ${allPorts.length ? ':' + allPorts.join(', :') : 'sin puertos'}</span>
+    </td>
+    <td>${allPorts.map((pt) => portLinksHtml(pt, allListeners)).join(' ') || '<span class="listener-note">-</span>'}</td>
+    <td class="cmd-cell folder-path" title="${esc(root)}">${esc(root)}</td>
+    <td class="num">·</td>
+    <td class="num">${ram ? `${Math.round(ram)} MB` : '-'}</td>
+    <td class="num">-</td>
+    <td><div class="actions"><button class="btn-action act-show-group" data-root="${esc(root)}" title="Volver a mostrar el proyecto en Puertos">${icon('eye')} Mostrar</button></div></td>`;
+  return tr;
+}
+
 function renderPorts() {
   const tbody = $('#ports-table tbody');
-  const filtered = portsData.filter((p) => {
-    if (portsFilter === 'all') return true;
-    if (portsFilter === 'project') return p.identity.category === 'project';
-    if (portsFilter === 'service') return p.identity.category === 'service' || p.identity.category === 'docker';
-    if (portsFilter === 'system') return p.identity.category === 'system' || p.identity.category === 'unknown';
-    return true;
-  });
-  tbody.innerHTML = '';
-  $('#ports-empty').classList.toggle('hidden', filtered.length > 0);
+  const hiddenView = portsFilter === 'hidden';
 
-  // Group project processes by projectRoot; everything else renders flat
-  const groups = new Map();
-  const flat = [];
-  for (const p of filtered) {
+  // Every running project group, before visibility filters, so hidden groups
+  // and hidden children can still be restored from the Ocultos view.
+  const allGroups = new Map();
+  for (const p of portsData) {
     if (p.identity.category === 'project' && p.identity.projectRoot) {
       const root = p.identity.projectRoot;
-      if (!groups.has(root)) groups.set(root, []);
-      groups.get(root).push(p);
-    } else {
-      flat.push(p);
+      if (!allGroups.has(root)) allGroups.set(root, []);
+      allGroups.get(root).push(p);
     }
   }
+  const hiddenGroupRoots = new Set([...allGroups.keys()].filter((root) => groupPref(root).hidden));
+  const hiddenProcs = portsData.filter((p) => processHidden(p)
+    && !(p.identity.category === 'project' && p.identity.projectRoot && hiddenGroupRoots.has(p.identity.projectRoot)));
+  const hiddenCount = hiddenGroupRoots.size + hiddenProcs.length;
 
   const minPort = (p) => Math.min(...(p.ports || []), Infinity);
-  const units = [
-    ...[...groups.entries()].map(([root, procs]) => ({ kind: 'group', root, procs, minPort: Math.min(...procs.map(minPort)) })),
-    ...flat.map((p) => ({ kind: 'proc', p, minPort: minPort(p) })),
-  ].sort((a, b) => a.minPort - b.minPort);
+  let units = [];
 
+  if (hiddenView) {
+    units = [
+      ...[...hiddenGroupRoots].map((root) => {
+        const procs = allGroups.get(root) || [];
+        return { kind: 'hiddenGroup', root, procs, minPort: Math.min(...procs.map(minPort), Infinity) };
+      }),
+      ...hiddenProcs.map((p) => ({ kind: 'hiddenProc', p, minPort: minPort(p) })),
+    ];
+  } else {
+    const filtered = portsData.filter((p) => {
+      if (processHidden(p)) return false;
+      if (p.identity.category === 'project' && p.identity.projectRoot && hiddenGroupRoots.has(p.identity.projectRoot)) return false;
+      if (portsFilter === 'all') return true;
+      if (portsFilter === 'project') return p.identity.category === 'project';
+      if (portsFilter === 'service') return p.identity.category === 'service' || p.identity.category === 'docker';
+      if (portsFilter === 'system') return p.identity.category === 'system' || p.identity.category === 'unknown';
+      return true;
+    });
+    const groups = new Map();
+    const flat = [];
+    for (const p of filtered) {
+      if (p.identity.category === 'project' && p.identity.projectRoot) {
+        const root = p.identity.projectRoot;
+        if (!groups.has(root)) groups.set(root, []);
+        groups.get(root).push(p);
+      } else {
+        flat.push(p);
+      }
+    }
+    units = [
+      ...[...groups.entries()].map(([root, procs]) => ({ kind: 'group', root, procs, minPort: Math.min(...procs.map(minPort)) })),
+      ...flat.map((p) => ({ kind: 'proc', p, minPort: minPort(p) })),
+    ];
+  }
+  units.sort((a, b) => a.minPort - b.minPort);
+
+  tbody.innerHTML = '';
   for (const u of units) {
     if (u.kind === 'group') {
       tbody.appendChild(projectHeaderRow(u.root, u.procs));
@@ -505,23 +601,79 @@ function renderPorts() {
           tbody.appendChild(processRow(p, true, u.root));
         }
       }
+    } else if (u.kind === 'hiddenGroup') {
+      tbody.appendChild(hiddenGroupRow(u.root, u.procs));
+    } else if (u.kind === 'hiddenProc') {
+      tbody.appendChild(processRow(u.p, false));
     } else {
       tbody.appendChild(processRow(u.p, false));
     }
   }
+
+  const empty = $('#ports-empty');
+  empty.classList.toggle('hidden', units.length > 0);
+  const emptyTitle = empty.querySelector('strong');
+  const emptyBody = empty.querySelector('p');
+  if (hiddenView) {
+    if (emptyTitle) emptyTitle.textContent = 'No hay puertos ocultos';
+    if (emptyBody) emptyBody.textContent = 'Ocultá los que no querés ver con el botón de ojo de cada fila. Acá aparecen en modo solo lectura para poder recuperarlos.';
+  } else {
+    if (emptyTitle) emptyTitle.textContent = 'Los puertos en uso aparecen acá';
+    if (emptyBody) emptyBody.textContent = 'Cuando un proceso abra un puerto vas a ver qué app lo usa, cuánta memoria consume y un enlace directo para abrirlo.';
+  }
+  const note = $('#ports-hidden-note');
+  if (note) note.classList.toggle('hidden', !hiddenView);
+  const hiddenCountEl = $('#ports-hidden-count');
+  if (hiddenCountEl) hiddenCountEl.textContent = hiddenCount ? String(hiddenCount) : '';
+
+  const visibleCount = portsData.filter((p) => !processHidden(p)
+    && !(p.identity.category === 'project' && p.identity.projectRoot && hiddenGroupRoots.has(p.identity.projectRoot))).length;
   const nc = $('#nav-count-ports');
-  if (nc) nc.textContent = portsData.length || '';
+  if (nc) nc.textContent = visibleCount || '';
   refreshIcons();
 }
 
 $('#ports-table').addEventListener('click', (e) => {
   const grow = e.target.closest('tr.folder-row');
   if (!grow || e.target.closest('button') || e.target.closest('a')) return;
+  if (grow.dataset.hiddenGroup) return;
   const root = grow.dataset.root;
   if (collapsedGroups.has(root)) collapsedGroups.delete(root);
   else collapsedGroups.add(root);
   renderPorts();
 });
+
+async function putPortPref(key, patch) {
+  const res = await api('/api/ports/prefs', { method: 'PUT', body: { key, ...patch } });
+  portsPrefs = res.prefs || {};
+  return res;
+}
+
+async function savePortPref(key, patch, message) {
+  try {
+    await putPortPref(key, patch);
+    toast(message, 'ok', '', 3000);
+    await loadPorts();
+    return true;
+  } catch (err) {
+    errToast(err);
+    return false;
+  }
+}
+
+async function savePortPrefs(ports, patch, message) {
+  try {
+    for (const port of ports) await putPortPref(portPrefKey(port), patch);
+    toast(message, 'ok', '', 3000);
+    await loadPorts();
+    return true;
+  } catch (err) {
+    errToast(err);
+    return false;
+  }
+}
+
+const portsOfButton = (btn) => (btn.dataset.ports || '').split(',').map((n) => parseInt(n, 10)).filter(Boolean);
 
 $('#ports-table').addEventListener('click', async (e) => {
   const btn = e.target.closest('button');
@@ -534,6 +686,22 @@ $('#ports-table').addEventListener('click', async (e) => {
   } else if (btn.classList.contains('act-menu')) {
     const p = portsData.find((x) => x.pid === parseInt(btn.dataset.pid, 10));
     if (p) openProcMenu(p, btn);
+  } else if (btn.classList.contains('act-hide')) {
+    const ports = portsOfButton(btn);
+    if (!ports.length) return;
+    await savePortPrefs(ports, { hidden: true }, 'Oculto de Puertos — está en la pestaña Ocultos');
+  } else if (btn.classList.contains('act-unhide')) {
+    const ports = portsOfButton(btn);
+    if (!ports.length) return;
+    await savePortPrefs(ports, { hidden: false }, 'Puerto visible de nuevo');
+  } else if (btn.classList.contains('act-show-group')) {
+    const root = btn.dataset.root;
+    if (!root) return;
+    await savePortPref(groupPrefKey(root), { hidden: false }, 'Proyecto visible de nuevo');
+  } else if (btn.classList.contains('act-group-menu')) {
+    const root = btn.dataset.root;
+    const procs = portsData.filter((p) => p.identity.category === 'project' && p.identity.projectRoot === root);
+    if (root) openGroupMenu(root, procs, btn);
   } else if (btn.classList.contains('act-copy')) {
     await navigator.clipboard.writeText(btn.dataset.path).catch(() => {});
     toast('Ruta copiada', 'ok', '', 2000);
@@ -667,7 +835,9 @@ async function openDetailModal(pid) {
     $('#detail-user').textContent = detail.user;
     $('#detail-start').textContent = detail.startedAt ? new Date(detail.startedAt).toLocaleString() : '-';
     $('#detail-cmd').textContent = detail.cmd;
-    $('#detail-kill-btn').style.display = detail.identity.protected ? 'none' : '';
+    const hiddenEntry = (detail.ports || []).length > 0 && detail.ports.every(isPortHidden);
+    const groupLock = detail.identity.category === 'project' && groupLocked(detail.identity.projectRoot);
+    $('#detail-kill-btn').style.display = (detail.identity.protected || hiddenEntry || groupLock) ? 'none' : '';
     detailEnvCache = detail.env || {};
     renderEnv(detailEnvCache);
   } catch (err) {
@@ -1260,7 +1430,10 @@ async function loadDomainStatuses() {
       const label = s.state === 'up' ? 'Activo' : s.state === 'warn' ? `HTTP ${s.httpStatus}` : 'Caído';
       const cls = s.state === 'up' ? 'health-ok' : s.state === 'warn' ? 'health-warn' : 'health-bad';
       const ms = s.ms !== undefined ? ` <span class="health-ms">${s.ms}ms</span>` : '';
-      cell.innerHTML = `<span class="health-dot ${cls}"></span> <span class="listener-note">${label}</span>${ms}<div class="uptime-strip" data-domain-id="${id}"></div>`;
+      const fix = s.fix === 'allowedHosts'
+        ? ` <button class="btn-action dm-fix" data-id="${id}" title="${esc(s.reason || 'La app rechaza este dominio')}">${icon('wrench')} Arreglar</button>`
+        : '';
+      cell.innerHTML = `<span class="health-dot ${cls}"></span> <span class="listener-note">${label}</span>${ms}${fix}<div class="uptime-strip" data-domain-id="${id}"></div>`;
       cell.title = s.reason || (s.state === 'up' ? `Responde HTTP ${s.httpStatus}` : '');
       cell.closest('tr').classList.toggle('domain-dead', s.state === 'down');
     }
@@ -1394,6 +1567,8 @@ $('#domains-table').addEventListener('click', async (e) => {
     $('#domain-id').value = id;
     $('#domain-error').textContent = '';
     $('#domain-modal').classList.remove('hidden');
+  } else if (btn.classList.contains('dm-fix')) {
+    openHostFixModal(id);
   }
 });
 
@@ -1422,10 +1597,11 @@ $('#domain-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const id = $('#domain-id').value;
   try {
+    let created = null;
     if (id) {
       await api(`/api/domains/${id}`, { method: 'PUT', body: { subdomain: $('#domain-input').value } });
     } else {
-      await api('/api/domains', {
+      const res = await api('/api/domains', {
         method: 'POST',
         body: {
           subdomain: $('#domain-input').value,
@@ -1434,12 +1610,79 @@ $('#domain-form').addEventListener('submit', async (e) => {
           projectName: $('#domain-project').value,
         },
       });
+      created = res?.domain || null;
     }
     $('#domain-modal').classList.add('hidden');
     toast('Dominio guardado', 'ok');
     await Promise.all([loadDomains(), loadPorts(), loadProjects()]);
+    // The tunnel is up at this point — a 403 from here on is the app rejecting
+    // the hostname, so offer the config edit before the user hits it.
+    if (created) openHostFixModal(created, { quiet: true });
   } catch (err) {
     $('#domain-error').textContent = err.message + (err.detail ? ` — ${err.detail}` : '');
+  }
+});
+
+// ---------- Dev-server host check ----------
+// A published domain can route perfectly and still answer 403: dev servers
+// reject Host headers they don't know (Vite: allowedHosts). The fix lives in
+// the project's config, so Axon shows the exact line and offers to write it.
+let hostFixDomainId = null;
+
+async function openHostFixModal(domain, opts = {}) {
+  const id = typeof domain === 'string' ? domain : domain?.id;
+  if (!id) return;
+  let check;
+  try {
+    check = (await api(`/api/domains/${encodeURIComponent(id)}/host-check`)).check;
+  } catch (err) {
+    if (!opts.quiet) errToast(err);
+    return;
+  }
+  if (!check?.blocked) {
+    if (!opts.quiet) toast(check?.summary || 'El dominio ya está permitido', 'ok');
+    return;
+  }
+  hostFixDomainId = id;
+  $('#host-fix-title').textContent = check.autoFixable
+    ? 'Permitir el dominio en la app'
+    : 'El dominio necesita un cambio manual';
+  $('#host-fix-summary').textContent = check.summary;
+  $('#host-fix-file').innerHTML = check.file ? `Archivo: <code>${esc(check.file)}</code>` : '';
+  const changes = (check.changes || []).map((ch) => `${ch.key} = ${ch.value}`);
+  $('#host-fix-change').textContent = changes.join('\n');
+  $('#host-fix-change').classList.toggle('hidden', changes.length === 0);
+  $('#host-fix-restart-row').classList.toggle('hidden', !check.autoFixable);
+  $('#host-fix-restart').checked = true;
+  $('#host-fix-apply').classList.toggle('hidden', !check.autoFixable);
+  $('#host-fix-cancel').textContent = check.autoFixable ? 'Cancelar' : 'Entendido';
+  $('#host-fix-error').textContent = '';
+  $('#host-fix-modal').classList.remove('hidden');
+}
+
+$('#host-fix-cancel').addEventListener('click', () => $('#host-fix-modal').classList.add('hidden'));
+
+$('#host-fix-apply').addEventListener('click', async () => {
+  const id = hostFixDomainId;
+  if (!id) return;
+  const restart = $('#host-fix-restart').checked;
+  const btn = $('#host-fix-apply');
+  btn.disabled = true;
+  try {
+    const res = await api(`/api/domains/${encodeURIComponent(id)}/host-fix`, { method: 'POST', body: { restart } });
+    $('#host-fix-modal').classList.add('hidden');
+    if (restart && res.restart && res.restart.ok === false) {
+      toast(`Archivo actualizado, pero no se pudo reiniciar: ${res.restart.error || 'error'}`, 'warn');
+    } else if (restart) {
+      toast('Dominio permitido — proceso reiniciado', 'ok');
+    } else {
+      toast('Archivo actualizado — reiniciá el proceso para aplicarlo', 'ok');
+    }
+    loadDomains();
+  } catch (err) {
+    $('#host-fix-error').textContent = err.message + (err.detail ? ` — ${err.detail}` : '');
+  } finally {
+    btn.disabled = false;
   }
 });
 
@@ -1758,15 +2001,18 @@ function cmdkCommands() {
     { icon: 'moon', label: 'Tema: Warp', hint: 'tema', run: () => setTheme('warp') },
   );
   for (const p of portsData) {
+    if (processHidden(p)) continue;
+    const projectPref = p.identity.category === 'project' && p.identity.projectRoot ? groupPref(p.identity.projectRoot) : {};
+    if (projectPref.hidden) continue;
     const label = p.identity.label;
-    for (const port of p.ports.slice(0, 4)) {
+    for (const port of visiblePorts(p).slice(0, 4)) {
       if (isLocalClient()) {
         cmds.push({ icon: 'external-link', label: `Abrir ${label} :${port} (local)`, hint: 'localhost', run: () => window.open(`http://localhost:${port}`, '_blank') });
         if (net) cmds.push({ icon: 'external-link', label: `Abrir ${label} :${port} (red)`, hint: net, run: () => window.open(`http://${net}:${port}`, '_blank') });
       }
       cmds.push({ icon: 'route', label: `Abrir ${label} :${port} (proxy)`, hint: 'funciona remoto', run: () => window.open(`/p/${port}/`, '_blank') });
     }
-    if (p.pid > 0 && !p.identity.protected) {
+    if (p.pid > 0 && !p.identity.protected && !projectPref.protected) {
       cmds.push({ icon: 'power', label: `Cerrar ${label} (PID ${p.pid})`, hint: 'proceso', run: () => openKillModal(p.pid) });
     }
   }
@@ -1853,9 +2099,12 @@ function slugify(s) {
 }
 
 function openProcMenu(p, anchor, coords) {
-  const port = (p.ports || [])[0];
+  if (processHidden(p)) return;
+  const ports = visiblePorts(p);
+  const port = ports[0];
   const net = netHost();
   const cwd = p.identity.projectRoot || p.cwd || '';
+  const lockedByGroup = p.identity.category === 'project' && groupLocked(p.identity.projectRoot);
   const items = [];
   if (port) {
     items.push(
@@ -1870,6 +2119,22 @@ function openProcMenu(p, anchor, coords) {
     items.push({ sep: true });
   }
   items.push({ icon: 'info', label: 'Info del proceso', run: () => openDetailModal(p.pid) });
+  if (ports.length) {
+    items.push(
+      { sep: true },
+      { icon: 'pencil', label: 'Renombrar en Puertos…', run: () => openPortRenameForProc(p) },
+      { icon: 'eye-off', label: 'Ocultar de Puertos', run: () => savePortPrefs(ports, { hidden: true }, 'Oculto de Puertos — está en la pestaña Ocultos') },
+    );
+    if (userProtected(p)) {
+      items.push({ icon: 'unlock', label: 'Desbloquear cierre', run: () => savePortPrefs(ports, { protected: false }, 'Cierre desbloqueado') });
+    } else if (lockedByGroup) {
+      items.push({ icon: 'lock', label: 'Proyecto bloqueado desde Puertos', disabled: true });
+    } else if (p.identity.protected) {
+      items.push({ icon: 'lock', label: 'Protegido por el sistema', disabled: true });
+    } else {
+      items.push({ icon: 'lock', label: 'Bloquear cierre (no cerrar por error)', run: () => savePortPrefs(ports, { protected: true }, 'Cierre bloqueado: no se puede cerrar por error') });
+    }
+  }
   if (cwd) items.push({ icon: 'terminal', label: 'Terminal en esta carpeta', run: () => openTerm(cwd) });
   if (!p.domain && port) {
     items.push({ icon: 'globe', label: 'Exponer dominio…', run: () => openDomainModal({ port, processType: 'process', projectName: p.identity.projectRoot?.split('/').pop() || p.identity.label, label: p.identity.label, suggest: slugify(p.identity.projectRoot?.split('/').pop() || p.identity.label) }) });
@@ -1877,12 +2142,94 @@ function openProcMenu(p, anchor, coords) {
   if (!p.identity.unit) {
     items.push({ icon: 'shield-plus', label: 'Convertir en servicio…', run: () => openServiceModal(p.pid, slugify(p.identity.projectRoot?.split('/').pop() || p.name || 'app')) });
   }
-  if (!p.identity.protected) {
+  if (!p.identity.protected && !lockedByGroup) {
     items.push({ sep: true }, { icon: 'power', label: 'Cerrar proceso', danger: true, run: () => openKillModal(p.pid) });
   }
   const r = anchor ? anchor.getBoundingClientRect() : null;
   showCtxMenu(items, coords ? coords.x : r.right + 4, coords ? coords.y : r.bottom + 4);
 }
+
+function openGroupMenu(root, procs, anchor) {
+  const gp = groupPref(root);
+  const original = root.split('/').filter(Boolean).pop() || procs[0]?.identity.label || root;
+  const items = [
+    { header: gp.label || original },
+    { icon: 'pencil', label: 'Renombrar proyecto…', run: () => openPortRename({
+      key: groupPrefKey(root),
+      value: gp.label || '',
+      original,
+      target: `Proyecto · ${root}`,
+    }) },
+    { icon: 'eye-off', label: 'Ocultar proyecto de Puertos', run: () => savePortPref(groupPrefKey(root), { hidden: true }, 'Proyecto oculto — está en la pestaña Ocultos') },
+  ];
+  if (gp.protected) {
+    items.push({ icon: 'unlock', label: 'Desbloquear cierre del proyecto', run: () => savePortPref(groupPrefKey(root), { protected: false }, 'Cierre del proyecto desbloqueado') });
+  } else {
+    items.push({ icon: 'lock', label: 'Bloquear cierre del proyecto', hint: 'Ningún proceso del proyecto se podrá cerrar desde Puertos', run: () => savePortPref(groupPrefKey(root), { protected: true }, 'Cierre del proyecto bloqueado') });
+  }
+  const r = anchor.getBoundingClientRect();
+  showCtxMenu(items, r.right + 4, r.bottom + 4);
+}
+
+// ---------- Rename a Ports entry ----------
+
+let renamePrefKey = null;
+
+function openPortRename({ key, value, original, target }) {
+  renamePrefKey = key;
+  const input = $('#port-rename-input');
+  input.value = value || '';
+  input.placeholder = original || '';
+  $('#port-rename-target').textContent = target;
+  $('#port-rename-error').textContent = '';
+  $('#port-rename-save').disabled = false;
+  $('#port-rename-modal').classList.remove('hidden');
+  setTimeout(() => { input.focus(); input.select(); }, 0);
+}
+
+function closePortRename() {
+  $('#port-rename-modal').classList.add('hidden');
+  renamePrefKey = null;
+}
+
+function openPortRenameForProc(p) {
+  const ports = p.ports || [];
+  if (!ports.length) return;
+  const keyPort = ports.find((port) => prefFor(portPrefKey(port)).label) || ports[0];
+  openPortRename({
+    key: portPrefKey(keyPort),
+    value: prefFor(portPrefKey(keyPort)).label || '',
+    original: p.identity.originalLabel || p.identity.label,
+    target: `Puerto ${keyPort} · ${p.name}`,
+  });
+}
+
+$('#port-rename-cancel').addEventListener('click', closePortRename);
+$('#port-rename-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'port-rename-modal') closePortRename();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('#port-rename-modal').classList.contains('hidden')) closePortRename();
+});
+$('#port-rename-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const key = renamePrefKey;
+  if (!key) return;
+  const label = $('#port-rename-input').value.trim();
+  const save = $('#port-rename-save');
+  $('#port-rename-error').textContent = '';
+  save.disabled = true;
+  try {
+    await putPortPref(key, { label: label || null });
+    closePortRename();
+    toast(label ? 'Nombre guardado' : 'Nombre original restaurado', 'ok', '', 3000);
+    await loadPorts();
+  } catch (err) {
+    $('#port-rename-error').textContent = err.message;
+  } finally {
+    if (save.isConnected) save.disabled = false;
+  }
+});
 
 // Right-click on a process row opens the same menu
 $('#ports-table').addEventListener('contextmenu', (e) => {
@@ -1891,7 +2238,7 @@ $('#ports-table').addEventListener('contextmenu', (e) => {
   const killBtn = tr.querySelector('.act-kill, .act-menu, .act-detail');
   const pid = killBtn ? parseInt(killBtn.dataset.pid || '0', 10) : 0;
   const p = portsData.find((x) => x.pid === pid);
-  if (!p) return;
+  if (!p || processHidden(p)) return;
   e.preventDefault();
   openProcMenu(p, null, { x: e.clientX, y: e.clientY });
 });

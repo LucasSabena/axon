@@ -27,6 +27,10 @@ export interface Identity {
   unitScope?: 'user' | 'system';
   protected: boolean;
   protectionReason?: string;
+  /** Label comes from the Ports page, not from process detection. */
+  customLabel?: boolean;
+  /** Detected label kept for the "restore original name" hint. */
+  originalLabel?: string;
 }
 
 export interface PortProcess {
@@ -42,6 +46,8 @@ export interface PortProcess {
   listeners: Listener[];
   ports: number[];
   identity: Identity;
+  /** Presentation overrides applied from the Ports page. */
+  prefs?: { hidden: boolean; hiddenPorts: number[] };
   memoryMb: number;
   uptimeSeconds: number;
   startedAt: string;
@@ -111,6 +117,31 @@ export interface DomainStatus {
   httpStatus?: number;
   ms?: number;
   reason?: string;
+  // Set when the app answers but rejects the hostname — Axon can repair the
+  // dev-server config instead of leaving the user with a 403.
+  fix?: 'allowedHosts';
+}
+
+export interface DomainHostChange {
+  /** e.g. "preview.allowedHosts" */
+  key: string;
+  /** exactly what gets written, e.g. "['.example.com']" */
+  value: string;
+}
+
+/** Whether the app behind a published domain accepts that hostname. */
+export interface DomainHostCheck {
+  /** false when the target can't be inspected (container, non-Vite server) */
+  applicable: boolean;
+  framework?: string;
+  /** host path of the file that decides the check */
+  file?: string;
+  mode?: 'dev' | 'preview';
+  blocked: boolean;
+  autoFixable: boolean;
+  /** one sentence for the UI */
+  summary: string;
+  changes: DomainHostChange[];
 }
 
 export interface Project {
@@ -221,6 +252,8 @@ export interface AppConfig {
   projects?: Project[];
   // User-written notes per compose stack, keyed by compose file path.
   composeNotes?: Record<string, string>;
+  // Ports page preferences (custom names, hidden and close-blocked entries).
+  portPrefs?: import('./port-prefs').PortPrefs;
   settings: {
     scanIntervalMs: number;
     protectedPids: number[];
