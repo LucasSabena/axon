@@ -1423,10 +1423,18 @@ app.post('/api/domains', async (c) => {
 // domain: Vite rejects unknown Host headers (403 "Blocked request") unless the
 // hostname is listed in server/preview.allowedHosts. Report the exact edit,
 // then offer to write it — and to relaunch the process so it takes effect.
+// The listener is often a child whose title hides the subcommand
+// (`next-server (v15…)` under `next dev`); the parent tells the mode apart.
+async function commandOfPid(pid: number): Promise<string> {
+  if (!Number.isInteger(pid) || pid <= 1) return '';
+  const res = await hostExec(`tr '\\0' ' ' < /proc/${pid}/cmdline`, { user: 'root', timeoutMs: 5_000 });
+  return res.ok ? res.stdout.trim().slice(0, 2000) : '';
+}
+
 app.get('/api/domains/:id/host-check', async (c) => {
   const domain = config.domains.find((d) => d.id === c.req.param('id'));
   if (!domain) return fail(c, 404, 'Dominio no encontrado');
-  const check = await checkDomainHost(domain, await listPortProcesses(), `.${BASE_DOMAIN}`);
+  const check = await checkDomainHost(domain, await listPortProcesses(), BASE_DOMAIN, { commandOf: commandOfPid });
   return c.json({ ok: true, check });
 });
 
@@ -1437,7 +1445,8 @@ app.post('/api/domains/:id/host-fix', async (c) => {
     .json<{ restart?: boolean }>()
     .catch(() => ({}) as { restart?: boolean });
   const procs = await listPortProcesses();
-  const result = await applyDomainHostFix(domain, procs, `.${BASE_DOMAIN}`, {
+  const result = await applyDomainHostFix(domain, procs, BASE_DOMAIN, {
+    commandOf: commandOfPid,
     restart: body.restart === true,
     write: writeHostText,
     restartProcess: async (proc) => {

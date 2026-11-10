@@ -129,14 +129,28 @@ export interface DomainHostChange {
   value: string;
 }
 
+export interface DomainHostDiffLine {
+  kind: ' ' | '+' | '-';
+  line: number;
+  text: string;
+}
+
 /** Whether the app behind a published domain accepts that hostname. */
 export interface DomainHostCheck {
-  /** false when the target can't be inspected (container, non-Vite server) */
+  /** false when the target can't be inspected (container, unknown framework) */
   applicable: boolean;
+  /** astro | vite | nuxt | next | angular */
   framework?: string;
+  frameworkLabel?: string;
   /** host path of the file that decides the check */
   file?: string;
   mode?: 'dev' | 'preview';
+  /** exactly what gets listed, e.g. ".example.com" or "*.example.com" */
+  host?: string;
+  /** false when the server reloads its config by itself (dev servers) */
+  restartNeeded?: boolean;
+  /** the edit, with a line of context, for the confirmation modal */
+  diff?: DomainHostDiffLine[];
   blocked: boolean;
   autoFixable: boolean;
   /** one sentence for the UI */

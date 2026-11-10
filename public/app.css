@@ -732,6 +732,10 @@ tr.domain-dead .domain-link { opacity: 0.55; text-decoration: line-through; }
   font-size: 0.8rem; line-height: 1.5; padding: 10px 12px;
   margin: 0 0 12px; white-space: pre-wrap; overflow-x: auto;
 }
+.host-fix-change .diff-add { display: block; background: var(--ok-soft); color: var(--ok); }
+.host-fix-change .diff-del { display: block; background: var(--danger-soft); color: var(--danger); }
+.host-fix-change .diff-ctx { display: block; opacity: 0.7; }
+.host-fix-change .diff-ln { display: inline-block; min-width: 3ch; margin-right: 8px; opacity: 0.55; text-align: right; user-select: none; }
 .host-fix-restart { display: flex !important; align-items: center; gap: 8px; }
 .host-fix-restart input { width: auto !important; margin: 0 !important; }
 .warning-line {

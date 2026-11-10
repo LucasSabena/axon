@@ -1628,6 +1628,7 @@ $('#domain-form').addEventListener('submit', async (e) => {
 // reject Host headers they don't know (Vite: allowedHosts). The fix lives in
 // the project's config, so Axon shows the exact line and offers to write it.
 let hostFixDomainId = null;
+let hostFixRestartable = false;
 
 async function openHostFixModal(domain, opts = {}) {
   const id = typeof domain === 'string' ? domain : domain?.id;
@@ -1644,19 +1645,36 @@ async function openHostFixModal(domain, opts = {}) {
     return;
   }
   hostFixDomainId = id;
+  const fw = check.frameworkLabel || 'La app';
   $('#host-fix-title').textContent = check.autoFixable
-    ? 'Permitir el dominio en la app'
+    ? `Permitir el dominio en ${fw}`
     : 'El dominio necesita un cambio manual';
   $('#host-fix-summary').textContent = check.summary;
-  $('#host-fix-file').innerHTML = check.file ? `Archivo: <code>${esc(check.file)}</code>` : '';
-  const changes = (check.changes || []).map((ch) => `${ch.key} = ${ch.value}`);
-  $('#host-fix-change').textContent = changes.join('\n');
-  $('#host-fix-change').classList.toggle('hidden', changes.length === 0);
-  $('#host-fix-restart-row').classList.toggle('hidden', !check.autoFixable);
+  $('#host-fix-file').innerHTML = check.file
+    ? `${check.autoFixable ? 'Se va a modificar' : 'Archivo'}: <code>${esc(check.file)}</code>`
+    : '';
+  const pre = $('#host-fix-change');
+  if (check.diff && check.diff.length) {
+    pre.innerHTML = check.diff.map((d) => {
+      const cls = d.kind === '+' ? 'diff-add' : d.kind === '-' ? 'diff-del' : 'diff-ctx';
+      return `<span class="${cls}"><span class="diff-ln">${d.line}</span>${d.kind} ${esc(d.text)}</span>`;
+    }).join('');
+  } else {
+    pre.textContent = (check.changes || []).map((ch) => `${ch.key} = ${ch.value}`).join('\n');
+  }
+  pre.classList.toggle('hidden', !pre.textContent);
+  const restartable = check.autoFixable && check.restartNeeded !== false;
+  $('#host-fix-restart-row').classList.toggle('hidden', !restartable);
   $('#host-fix-restart').checked = true;
+  $('#host-fix-reload-note').classList.toggle('hidden', !(check.autoFixable && check.restartNeeded === false));
   $('#host-fix-apply').classList.toggle('hidden', !check.autoFixable);
-  $('#host-fix-cancel').textContent = check.autoFixable ? 'Cancelar' : 'Entendido';
+  $('#host-fix-apply').textContent = restartable ? 'Modificar y reiniciar' : 'Modificar archivo';
+  $('#host-fix-restart').onchange = () => {
+    $('#host-fix-apply').textContent = $('#host-fix-restart').checked ? 'Modificar y reiniciar' : 'Modificar archivo';
+  };
+  $('#host-fix-cancel').textContent = check.autoFixable ? 'Ahora no' : 'Entendido';
   $('#host-fix-error').textContent = '';
+  hostFixRestartable = restartable;
   $('#host-fix-modal').classList.remove('hidden');
 }
 
@@ -1665,7 +1683,7 @@ $('#host-fix-cancel').addEventListener('click', () => $('#host-fix-modal').class
 $('#host-fix-apply').addEventListener('click', async () => {
   const id = hostFixDomainId;
   if (!id) return;
-  const restart = $('#host-fix-restart').checked;
+  const restart = hostFixRestartable && $('#host-fix-restart').checked;
   const btn = $('#host-fix-apply');
   btn.disabled = true;
   try {
@@ -1675,8 +1693,10 @@ $('#host-fix-apply').addEventListener('click', async () => {
       toast(`Archivo actualizado, pero no se pudo reiniciar: ${res.restart.error || 'error'}`, 'warn');
     } else if (restart) {
       toast('Dominio permitido — proceso reiniciado', 'ok');
-    } else {
+    } else if (hostFixRestartable) {
       toast('Archivo actualizado — reiniciá el proceso para aplicarlo', 'ok');
+    } else {
+      toast('Dominio permitido — el servidor recarga la config solo', 'ok');
     }
     loadDomains();
   } catch (err) {
