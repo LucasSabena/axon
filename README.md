@@ -108,6 +108,8 @@ La página **Backups** guía en cuatro pasos: qué proteger, en qué discos guar
 
 El host necesita **Restic** y Python; el panel indica si falta Restic. [Preparar el servidor](docs/installation.md#dependencias-para-backups). Copiar los archivos de un disco no crea una imagen arrancable del sistema. [Guía y alcance de Backups](docs/backups-2026-10-06/README.md).
 
+La [publicación 1.7.0](https://github.com/LucasSabena/axon/releases/tag/v1.7.0) hace rápida la navegación de Archivos, mueve selecciones grandes con una sola confirmación, permite arrastrar o copiar archivos hacia otros programas y trae un visor de PDF nuevo. [Notas](docs/releases/v1.7.0.md).
+
 La [publicación 1.5.0](https://github.com/LucasSabena/axon/releases/tag/v1.5.0) unifica Archivos y Biblioteca en un explorador con panel de navegación, menú contextual único y teclado completo. 
 
 La [publicación 1.4.0](https://github.com/LucasSabena/axon/releases/tag/v1.4.0) incorpora organización de archivos y carpetas, gestión de discos y sesiones, inventario progresivo de programas, lectura Markdown y navegación móvil con flechas en los visores. Biblioteca permite agregar carpetas de otros discos desde su cabecera. [Notas y actualización](docs/releases/v1.4.0.md).
