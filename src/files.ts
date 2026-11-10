@@ -15,6 +15,7 @@ import { volumeForPath } from './file-volumes';
 import { hostVolumes, diskVisibility, initHostStorage, resolveHostPath } from './host-storage';
 import { fileTreeSize } from './file-sizes';
 import { documentResponse } from './document-preview';
+import { createDragToken, readDragToken } from './file-drag-links';
 
 // ---------------------------------------------------------------------------
 // File manager routes — browse / read / edit / upload / download host files.
@@ -581,6 +582,43 @@ export function registerFilesRoutes(app: Hono, operations?: FileOperations, tran
         'X-Content-Type-Options': 'nosniff',
       },
     });
+  });
+
+  // ---------- Drag out to other apps ----------
+  // The browser hands other programs a URL; these 15-minute signed links let them fetch the
+  // file without the session cookie. Read-only, one file each, rechecked against the same
+  // root/disk authorization as /api/files/download on every request.
+  app.post('/api/files/drag-links', async (c) => {
+    const input = await c.req.json().catch(() => null) as { paths?: unknown } | null;
+    const paths = Array.isArray(input?.paths) ? input!.paths.filter((p): p is string => typeof p === 'string').slice(0, 50) : [];
+    const secret = process.env.SESSION_SECRET || '';
+    const links: { path: string; url: string; name: string; type: string; expiresAt: number }[] = [];
+    for (const requested of paths) {
+      const r = await resolveAllowed(requested);
+      if (!r.path) continue;
+      try { if (!(await stat(hostToContainer(r.path))).isFile()) continue; } catch { continue; }
+      const name = path.posix.basename(r.path), { token, expiresAt } = createDragToken(secret, r.path);
+      links.push({ path: requested, name, type: guessMime(name), url: `/dl/${token}/${encodeURIComponent(name)}`, expiresAt });
+    }
+    return c.json({ ok: true, links });
+  });
+  app.on(['GET', 'HEAD'], '/dl/:token/:name', async (c) => {
+    const target = readDragToken(process.env.SESSION_SECRET || '', c.req.param('token'));
+    if (!target) return c.text('El link venció. Volvé a arrastrar el archivo desde AXON.', 410);
+    const r = await resolveAllowed(target);
+    if (!r.path) return c.text('Sin acceso', 403);
+    const cp = hostToContainer(r.path);
+    let st;
+    try { st = await stat(cp); if (!st.isFile()) return c.text('No es un archivo', 404); } catch { return c.text('El archivo ya no existe', 404); }
+    const name = path.posix.basename(r.path), ascii = name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_') || 'archivo';
+    const headers = {
+      'Content-Type': guessMime(name), 'Content-Length': String(st.size),
+      'Content-Disposition': `inline; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+      'Access-Control-Allow-Origin': '*', 'Cache-Control': 'private, max-age=600', 'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'no-referrer', 'X-Robots-Tag': 'noindex', 'Content-Security-Policy': "default-src 'none'; sandbox",
+    };
+    if (c.req.method === 'HEAD') return new Response(null, { headers });
+    return new Response(Readable.toWeb(createReadStream(cp)) as unknown as ReadableStream, { headers });
   });
 
   // ---------- Download a folder (or a selection) as a streamed zip ----------

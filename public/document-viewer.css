@@ -57,3 +57,34 @@
 .axon-markdown .task-list-item-checkbox { margin-right: .5em; accent-color: var(--accent); }
 .axon-markdown-empty { color: var(--text-dim); }
 @media (max-width: 480px) { .axon-doc-markdown-stage { padding: 16px; } .axon-markdown { font-size: .88rem; } }
+
+/* PDF: continuous pages, thumbnail rail, grouped toolbar and search highlights. */
+.axon-doc-pdf .axon-doc-controls { gap: 6px 10px; }
+.axon-doc-group { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.axon-doc-group + .axon-doc-group { padding-left: 10px; border-left: 1px solid var(--border); }
+.axon-doc-group-end { margin-left: auto; }
+.axon-doc-group:has(input[type=search]) { flex: 1 1 200px; }
+.axon-doc-controls .axon-doc-tool { display: inline-flex; align-items: center; justify-content: center; min-width: 32px; padding: 4px 6px; }
+.axon-doc-controls .axon-doc-tool .lucide-icon { width: 16px; height: 16px; }
+.axon-doc-controls .axon-doc-tool.on { color: var(--accent); border-color: var(--accent); }
+.axon-doc-controls .axon-doc-tool:disabled { opacity: .4; cursor: default; }
+.axon-doc-hits:empty { display: none; }
+.axon-doc-body { flex: 1; min-height: 0; min-width: 0; display: flex; }
+.axon-doc-thumbs { display: none; flex: 0 0 auto; width: 148px; overflow-y: auto; overscroll-behavior: contain; padding: 10px 8px; border-right: 1px solid var(--border); background: var(--bg-elevated); }
+.axon-doc-side-on .axon-doc-thumbs { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.axon-doc-thumb { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 4px; border: 2px solid transparent; border-radius: var(--radius-sm); background: none; cursor: pointer; color: var(--text-dim); font-size: .7rem; }
+.axon-doc-thumb:hover { border-color: var(--border-strong); }
+.axon-doc-thumb.active { border-color: var(--accent); color: var(--text); }
+.axon-doc-thumb-sheet { display: block; background: #fff; box-shadow: 0 1px 4px #0003; overflow: hidden; }
+.axon-doc-thumb-sheet canvas { display: block; width: 100%; height: 100%; }
+.axon-doc-scroll { position: relative; padding: 12px 16px 24px; background: var(--bg-canvas); }
+.axon-doc-pdf .axon-doc-page { margin: 0 auto 12px; flex-shrink: 0; }
+.axon-doc-pdf .axon-doc-page:not([data-ready]) { background: #fff linear-gradient(90deg, #0000 0, #00000008 50%, #0000 100%); }
+.axon-doc-pdf .axon-doc-page canvas { width: 100%; height: 100%; }
+.axon-doc .textLayer mark.axon-doc-hit { color: transparent; background: rgba(255, 196, 0, .45); border-radius: 2px; padding: 0; }
+.axon-doc .textLayer mark.axon-doc-hit.current { background: rgba(255, 110, 0, .65); outline: 2px solid rgba(255, 110, 0, .9); }
+@media (max-width: 640px) {
+  .axon-doc-group + .axon-doc-group { padding-left: 0; border-left: 0; }
+  .axon-doc-side-on .axon-doc-thumbs { display: none; }
+  .axon-doc-scroll { padding: 8px 6px 16px; }
+}

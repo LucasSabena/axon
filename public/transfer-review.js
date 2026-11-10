@@ -3,18 +3,19 @@
   'use strict';
   const cancelled = () => Object.assign(new Error('Movimiento cancelado'), { cancelled:true });
   let flight = Promise.resolve();
-  function dialog({ title, body, accept, error=false, setup }) {
+  function dialog({ title, body, accept, extra='', error=false, setup }) {
     const work = async () => {
       await customElements.whenDefined('wa-dialog');
       const trigger=document.activeElement, el=document.createElement('wa-dialog');
       el.className='operation-dialog';el.label=title;
-      el.innerHTML=`<span slot="label">${esc(title)}</span><div class="operation-body">${body}</div><div slot="footer" class="operation-actions">${error?'<wa-button class="operation-copy" appearance="plain">Copiar detalle</wa-button>':''}<wa-button class="operation-cancel" appearance="outlined">${error?'Cerrar':'Cancelar'}</wa-button>${accept?`<wa-button class="operation-accept" variant="brand">${esc(accept)}</wa-button>`:''}</div>`;
+      el.innerHTML=`<span slot="label">${esc(title)}</span><div class="operation-body">${body}</div><div slot="footer" class="operation-actions">${error?'<wa-button class="operation-copy" appearance="plain">Copiar detalle</wa-button>':''}<wa-button class="operation-cancel" appearance="outlined">${error?'Cerrar':'Cancelar'}</wa-button>${extra?`<wa-button class="operation-extra" appearance="outlined">${esc(extra)}</wa-button>`:''}${accept?`<wa-button class="operation-accept" variant="brand">${esc(accept)}</wa-button>`:''}</div>`;
       document.body.append(el);await el.updateComplete;refreshIcons();
       return new Promise(resolve=>{
         let settled=false;const cleanup=setup?.(el);
         const done=value=>{if(settled)return;settled=true;cleanup?.();el.addEventListener('wa-after-hide',()=>{el.remove();if(trigger?.isConnected){trigger.focus({preventScroll:true});setTimeout(()=>trigger.isConnected&&trigger.focus({preventScroll:true}),0);}resolve(value);},{once:true});el.open=false;};
         el.querySelector('.operation-cancel').onclick=()=>done(false);
         el.querySelector('.operation-accept')?.addEventListener('click',()=>done(true));
+        el.querySelector('.operation-extra')?.addEventListener('click',()=>done('extra'));
         el.querySelector('.operation-copy')?.addEventListener('click',async()=>{
           const button=el.querySelector('.operation-copy');
           try{await navigator.clipboard.writeText(`${title}\n${el.querySelector('.operation-body').innerText}`);button.textContent='Copiado';}catch{button.textContent='Seleccioná el texto para copiar';}
@@ -31,10 +32,18 @@
   const fmtEta=s=>{s=Math.round(s);if(s<60)return `${Math.max(1,s)}s`;if(s<3600)return `${Math.ceil(s/60)}min`;return `${Math.floor(s/60)}min`;};
   // ETA from the byte delta between two status samples over real elapsed ms.
   const etaFor=(copiedBefore,op,ms)=>{const d=Number(op.copiedBytes||0)-copiedBefore;if(d<=0||ms<=0)return'';const left=(Number(op.logicalBytes||0)-Number(op.copiedBytes||0))/(d/ms*1000);return Number.isFinite(left)&&left>1?fmtEta(left):'';};
-  async function review(plan){
+  // Library/AXON references (favorites, links, collections, index, library folders) are updated
+  // automatically by the server, so they don't need a question. Only paths AXON can't fix itself
+  // ("configuration" warnings) stop the move, once per batch when the user picks "Aceptar todos".
+  const automatic=r=>r.impacts.every(i=>i.kind!=='configuration');
+  async function review(plan,batch){
     const r=plan.review;if(!r?.needsConfirmation)return true;
+    if(automatic(r)||batch?.all)return true;
+    const rest=batch?Math.max(0,batch.total-batch.done-1):0;
     const changes=r.impacts.map(i=>`<details class="operation-impact${i.kind==='configuration'?' operation-impact-warning':''}"${i.kind==='configuration'?' open':''}><summary><span>${esc(i.title)}</span><span class="operation-count">${i.kind==='configuration'?'Revisar':i.paths.length}</span></summary><p>${esc(i.detail)}</p><ul>${i.paths.map(p=>`<li><code>${esc(p.from)}</code>${p.from!==p.to?`<span aria-hidden="true">→</span><code>${esc(p.to)}</code>`:''}</li>`).join('')}</ul></details>`).join('');
-    return dialog({title:'Revisar movimiento',accept:'Aceptar y mover',body:`<div class="operation-intro">${icon('folder-input')}<p>Este movimiento afecta referencias de AXON. Revisá los cambios automáticos y las rutas que necesitarán tu atención.</p></div>${locations(plan.from,plan.to)}${r.addRoots.length?`<div class="operation-notice">${icon('library')}<div><b>Conservar el acceso desde Biblioteca</b><p>Se incorporará ${r.addRoots.map(p=>`<code>${esc(p)}</code>`).join(', ')} a sus carpetas. Se indexará su contenido; los links existentes conservarán sus permisos.</p></div></div>`:''}<h4>Qué se verá afectado</h4>${changes}<p class="operation-footnote">Si cancelás, no se mueve nada. El servidor vuelve a comprobar las referencias antes de iniciar. Los programas externos pueden tener otras referencias que AXON no registra.</p>`});
+    const value=await dialog({title:'Revisar movimiento',accept:'Mover este',extra:rest?`Mover todos (${rest+1})`:'',body:`<div class="operation-intro">${icon('folder-input')}<p>Hay rutas configuradas fuera de la Biblioteca que apuntan a este elemento y no se actualizan solas. Revisalas después de mover.</p></div>${rest?`<p class="operation-footnote">Quedan ${rest} elemento${rest===1?'':'s'} más en esta selección. «Mover todos» no vuelve a preguntar.</p>`:''}${locations(plan.from,plan.to)}${r.addRoots.length?`<div class="operation-notice">${icon('library')}<div><b>Conservar el acceso desde Biblioteca</b><p>Se incorporará ${r.addRoots.map(p=>`<code>${esc(p)}</code>`).join(', ')} a sus carpetas. Se indexará su contenido; los links existentes conservarán sus permisos.</p></div></div>`:''}<h4>Qué se verá afectado</h4>${changes}<p class="operation-footnote">Si cancelás, no se mueve nada. El servidor vuelve a comprobar las referencias antes de iniciar. Los programas externos pueden tener otras referencias que AXON no registra.</p>`});
+    if(value==='extra'&&batch)batch.all=true;
+    return !!value;
   }
   async function showPending(pending,message){
     let lastCopied=null,lastT=0;
@@ -68,9 +77,12 @@
     const blockers=error.raw?.blockers;
     return dialog({title:context.mode==='copy'?'No se pudo copiar':context.mode==='move'?'No se pudo mover':'No se pudo completar la acción',error:true,body:`<div class="operation-intro operation-error">${icon('circle-alert')}<p>${esc(error.message||'Reintentá la acción.')}</p></div>${context.from?locations(context.from,context.to):''}${Array.isArray(blockers)&&blockers.length?`<details class="operation-impact" open><summary>Elementos incompatibles (${blockers.length})</summary><ul>${blockers.map(b=>`<li><code>${esc(b.path)}</code><p>${esc(b.reason)}</p></li>`).join('')}</ul></details>`:''}${error.detail?`<details class="operation-impact"><summary>Detalle técnico</summary><pre>${esc(error.detail)}</pre></details>`:''}<p class="operation-footnote">Revisá la causa antes de volver a intentarlo. Si el trabajo llegó a iniciarse, comprobá su resultado en el historial de transferencias.</p>`});
   }
+  // batch: {total, done, all} shared by the items of one multi-selection move.
+  const batch=total=>({total,done:0,all:false});
   async function start(from,to,mode='move',options={}){
-    const {plan}=await api('/api/files/transfers/plans',{method:'POST',body:{from,to,mode,...options}});
-    if(!await review(plan))throw cancelled();
+    const {batch:group,...rest}=options;
+    const {plan}=await api('/api/files/transfers/plans',{method:'POST',body:{from,to,mode,...rest}});
+    if(!await review(plan,group))throw cancelled();
     const {operation}=await api(`/api/files/transfers/${plan.id}/execute`,{method:'POST',body:{digest:plan.digest,...(plan.review?.needsConfirmation?{reviewDigest:plan.review.revision}:{})}});
     return operation;
   }
@@ -95,5 +107,5 @@
     return operation;
   }
   async function cancel(id){return api(`/api/files/copyjob/${encodeURIComponent(id)}`,{method:'DELETE'});}
-  window.AxonTransfers={start,run,cancel,review,showError};
+  window.AxonTransfers={start,run,cancel,review,showError,batch};
 })();

@@ -2354,8 +2354,11 @@
     const toVolume=volumeToken(destDir);
     const taken = new Set(await dirNames(destDir));
     const out = { moved: [], copied: [], skipped: 0, failed: [] };
+    // One review answer ("Mover todos") covers the whole selection.
+    const batch = window.AxonTransfers.batch(names.length);
     for (const name of names) {
       const from = join(srcDir, name);
+      batch.done = out.moved.length + out.copied.length + out.skipped + out.failed.length;
       if (mode === 'cut' && srcDir === destDir) { out.skipped++; continue; }
       // A folder can never move inside itself (also reachable via paste).
       if (mode === 'cut' && (destDir === from || destDir.startsWith(from + '/'))) {
@@ -2366,10 +2369,10 @@
       const to = join(destDir, target);
       try {
         if (mode === 'cut') {
-          await copyWithJobs(from,to,name,'move',fromVolume,toVolume);
+          await copyWithJobs(from,to,name,'move',fromVolume,toVolume,batch);
           out.moved.push({ from, to });
         } else {
-          await copyWithJobs(from, to, name,'copy',fromVolume,toVolume);
+          await copyWithJobs(from, to, name,'copy',fromVolume,toVolume,batch);
           out.copied.push({ from, to });
         }
         taken.add(target);
@@ -2396,8 +2399,8 @@
 
   // Copy via the job endpoint when it makes sense — small copies still return
   // fast because cp finishes before the first poll.
-  async function copyWithJobs(from, to, label, mode='copy',fromVolume,toVolume) {
-    const operation=await window.AxonTransfers.start(from,to,mode,{fromVolume,toVolume});
+  async function copyWithJobs(from, to, label, mode='copy',fromVolume,toVolume,batch) {
+    const operation=await window.AxonTransfers.start(from,to,mode,{fromVolume,toVolume,batch});
     const jobId = operation.id;
     if (!jobId) return;
     trackJob(jobId, label);
@@ -4142,8 +4145,73 @@
     S.dragging = { dir, names: [...selSet] };
     e.dataTransfer.effectAllowed = 'copyMove';
     e.dataTransfer.setData('application/x-axon-fm', '1');
-    e.dataTransfer.setData('text/plain', S.dragging.names.join(', '));
+    const entries = colI !== null ? S.cols[colI].entries : S.entries;
+    const typed = S.dragging.names.map((n) => ({ name: n, path: join(dir, n), type: entries.find((x) => x.name === n)?.type || row.dataset.type }));
+    exportDrag(e.dataTransfer, typed, dir);
+    dragGhost(e.dataTransfer, typed, row);
   });
+
+  // ---------- Drag out to other programs ----------
+  // Dropping on the desktop/Finder/Explorer downloads the file (Chrome's DownloadURL). Apps that
+  // accept links or images (Figma, editors, chats) get a 15-minute signed link they can fetch
+  // without the AXON session. Links are prepared on hover because dragstart can't wait.
+  const dragLinks = new Map();
+  const freshLink = (p) => { const l = dragLinks.get(p); return l && l.expiresAt - Date.now() > 60_000 ? l : null; };
+  async function warmDragLinks(paths) {
+    const need = [...new Set(paths)].filter((p) => !freshLink(p)).slice(0, 50);
+    if (!need.length) return;
+    need.forEach((p) => dragLinks.set(p, { pending: true, expiresAt: Date.now() + 90_000 }));
+    try {
+      const r = await api('/api/files/drag-links', { method: 'POST', body: { paths: need } });
+      for (const l of r.links || []) dragLinks.set(l.path, { ...l, url: new URL(l.url, location.origin).href });
+    } catch { need.forEach((p) => dragLinks.delete(p)); }
+  }
+  let warmTimer = 0;
+  listEl.addEventListener('pointerover', (e) => {
+    const row = e.target.closest?.('tr.fm-row, .fm-card, .fm-col-row');
+    if (!row || row.dataset.name === '..' || row.dataset.type !== 'file' || inTrash(S.cwd)) return;
+    clearTimeout(warmTimer);
+    warmTimer = setTimeout(() => {
+      const colI = row.dataset.col !== undefined ? parseInt(row.dataset.col, 10) : null;
+      const dir = colI !== null ? S.cols[colI]?.path : S.cwd, sel = colI !== null ? S.cols[colI]?.sel : S.sel;
+      if (dir == null) return;
+      const entries = colI !== null ? S.cols[colI].entries : S.entries;
+      const names = sel?.has(row.dataset.name) ? [...sel].filter((n) => entries.find((x) => x.name === n)?.type === 'file') : [row.dataset.name];
+      void warmDragLinks(names.slice(0, 50).map((n) => join(dir, n)));
+    }, 120);
+  });
+  function exportDrag(dt, items, dir) {
+    const abs = (u) => new URL(u, location.origin).href;
+    const files = items.filter((i) => i.type === 'file');
+    const links = files.map((i) => freshLink(i.path)).filter((l) => l?.url);
+    try {
+      const safe = (n) => n.replace(/[:\n\r]/g, '_');
+      if (items.length === 1 && files.length === 1) {
+        const f = files[0], l = freshLink(f.path);
+        dt.setData('DownloadURL', `${l?.type || 'application/octet-stream'}:${safe(f.name)}:${l?.url || abs('/api/files/download?path=' + encodeURIComponent(f.path))}`);
+      } else {
+        const label = items.length === 1 ? items[0].name : (dir.split('/').pop() || 'seleccion');
+        dt.setData('DownloadURL', `application/zip:${safe(label)}.zip:${abs('/api/files/download-zip?' + new URLSearchParams({ dir, items: JSON.stringify(items.map((i) => i.name)) }))}`);
+      }
+    } catch { /* DownloadURL is Chromium-only */ }
+    if (links.length) {
+      dt.setData('text/uri-list', links.map((l) => l.url).join('\r\n'));
+      dt.setData('text/plain', links.map((l) => l.url).join('\n'));
+      const imgs = links.filter((l) => /^image\//.test(l.type));
+      dt.setData('text/html', imgs.length ? imgs.map((l) => `<img src="${esc(l.url)}" alt="${esc(l.name)}">`).join('') : links.map((l) => `<a href="${esc(l.url)}">${esc(l.name)}</a>`).join('<br>'));
+    } else dt.setData('text/plain', items.map((i) => i.name).join(', '));
+  }
+  // A stacked ghost with the count makes it obvious the whole selection is moving.
+  function dragGhost(dt, items, row) {
+    if (items.length < 2 || !dt.setDragImage) return;
+    const g = document.createElement('div');
+    g.className = 'fm-drag-ghost';
+    g.innerHTML = `<span class="fm-drag-ghost-ic">${icon(iconFor(items[0]))}</span><span class="fm-drag-ghost-name">${esc(items[0].name)}</span><b class="fm-drag-ghost-count">${items.length}</b><small>${items.length} elementos</small>`;
+    document.body.appendChild(g);
+    refreshIcons(g);
+    dt.setDragImage(g, 18, 18);
+    setTimeout(() => g.remove(), 0);
+  }
 
   const dndOver = (e) => {
     if (!S.dragging) return;

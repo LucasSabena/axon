@@ -28,7 +28,7 @@ export function registerQaBoundary(app:Hono,root:string|null){
    // Upload-only folder links write into a folder under the owned QA fixture.
    const fixtureUploadLink=/^\/u\/[^/]+\/(?:unlock|up(?:\/init|\/[^/]+(?:\/finish)?)?)$/.test(p);
    // Conversion only stages root-validated fixture bytes in a private cache.
-   const fixtureDocuments=/^\/api\/(files\/document|library\/document\/[^/]+)$/.test(p);
+   const fixtureDocuments=/^\/api\/(files\/document|files\/drag-links|library\/document\/[^/]+)$/.test(p);
    const fixtureProject=/^\/api\/projects$/.test(p);
    const fixtureAgentDoc=p==='/api/agent-docs/create';
    // Icon assignments and uploads only write the QA-owned AXON cache.

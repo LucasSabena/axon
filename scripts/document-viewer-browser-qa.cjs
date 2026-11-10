@@ -51,7 +51,8 @@ const assert = (ok, message) => { if (!ok) throw Error(message); };
         assert(await doc.getAttribute('data-pages') === '2', section + ' missing pages: ' + name);
         await doc.getByRole('button', { name: 'Página siguiente', exact: true }).click();
         await page.waitForFunction(() => document.querySelector('.axon-doc')?.dataset.page === '2');
-        assert((await doc.locator('.textLayer').textContent()).includes(name.startsWith('diapositivas') ? 'DIAPOSITIVA 2' : 'SEGUNDA PAGINA'), 'Wrong page content: ' + name);
+        await doc.locator('.axon-doc-page[data-page="2"] .textLayer span').first().waitFor();
+        assert((await doc.locator('.axon-doc-page[data-page="2"] .textLayer').textContent()).includes(name.startsWith('diapositivas') ? 'DIAPOSITIVA 2' : 'SEGUNDA PAGINA'), 'Wrong page content: ' + name);
         assert(await doc.getByRole('button', { name: 'Página siguiente', exact: true }).isDisabled(), 'Last page wraps');
         await doc.getByRole('spinbutton', { name: 'Número de página' }).fill('1');
         await doc.getByRole('spinbutton', { name: 'Número de página' }).press('Enter');
@@ -72,7 +73,7 @@ const assert = (ok, message) => { if (!ok) throw Error(message); };
         }
         await doc.getByRole('combobox', { name: 'Zoom del documento' }).selectOption('1.5');
         await page.waitForTimeout(150);
-        assert((await doc.locator('canvas').evaluate(c => c.width)) > 0, 'Empty canvas');
+        assert((await doc.locator('.axon-doc-stage canvas').first().evaluate(c => c.width)) > 0, 'Empty canvas');
         checks.push(section + ': real content and page/zoom controls for ' + name);
       }
       for (const name of ['planilla.xls', 'planilla.xlsx', 'planilla.ods']) {

@@ -260,8 +260,10 @@ body.lib-noscroll { overflow: hidden; }
    fit the space below the toolbar, including their native playback controls. */
 .lv-stage { flex: 1; min-width: 0; min-height: 0; display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); place-items: center; position: relative; padding: 0 64px max(16px, env(safe-area-inset-bottom)); overflow: hidden; }
 .lv-stage > video { min-width: 0; min-height: 0; max-width: 100%; max-height: 100%; width: 100%; height: 100%; object-fit: contain; background: #000; border-radius: 6px; }
-.lv-img-wrap { position: relative; width: 100%; height: 100%; display: grid; place-items: center; }
-.lv-img-wrap img { max-width: 100%; max-height: 100%; object-fit: contain; grid-area: 1 / 1; }
+.lv-img-wrap { position: relative; width: 100%; height: 100%; min-width: 0; min-height: 0; display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); place-items: center; overflow: hidden; }
+/* Definite track sizes let max-height resolve, so tall images and SVGs fit the screen instead of overflowing. */
+.lv-img-wrap img { min-width: 0; min-height: 0; max-width: 100%; max-height: 100%; object-fit: contain; grid-area: 1 / 1; }
+.lv-img-wrap img.lv-img-fill { width: 100%; height: 100%; }
 .lv-ph { width: 100%; height: 100%; filter: blur(6px); opacity: .6; }
 .lv-frame { width: 100%; height: 100%; border: 0; border-radius: 6px; background: #fff; }
 .lv-audio, .lv-file { display: grid; place-items: center; gap: 14px; color: #cbd5e1; text-align: center; }

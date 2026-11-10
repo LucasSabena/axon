@@ -31,7 +31,7 @@
       const download = element('a', '', 'Descargar original'); download.href = options.downloadUrl;
       footer.append(note, download); root.append(controls, status, stage, footer);
       const abort = new AbortController();
-      let disposed = false, loading, pdf, renderTask, textLayer, resize, renderVersion = 0;
+      let disposed = false, loading, pdf, renderTask, textLayer, resize, renderVersion = 0, stopExtra = () => {};
       const active = () => !disposed && root.isConnected;
       const button = (label, text, run) => {
         const b = element('button', 'btn-secondary', text); b.type = 'button'; b.title = label; b.setAttribute('aria-label', label);
@@ -84,60 +84,260 @@
         loading.onPassword = (_update, reason) => { fail(reason === 1 ? 'Este PDF está protegido con contraseña. Descargalo para abrirlo.' : 'No se pudo desbloquear el PDF.'); loading.destroy().catch(() => {}); };
         pdf = await loading.promise;
         if (!active()) { await pdf.destroy(); return; }
-        status.hidden = true; root.removeAttribute('aria-busy');
-        let number = 1, zoom = /\.(pptx?|pptm|ppsx?|potx?|odp|otp)$/i.test(options.name) ? 'fit' : 'width';
-        const previous = button('Página anterior', '‹', () => go(number - 1));
-        const pageInput = element('input'); pageInput.type = 'number'; pageInput.min = '1'; pageInput.max = String(pdf.numPages); pageInput.value = '1';
-        pageInput.setAttribute('aria-label', 'Número de página'); controls.append(pageInput);
-        const count = element('span', 'axon-doc-count', '/ ' + pdf.numPages); controls.append(count);
-        const next = button('Página siguiente', '›', () => go(number + 1));
+        const total = pdf.numPages, first = (await pdf.getPage(1)).getViewport({ scale: 1 });
+        if (!active()) return;
+        status.hidden = true; root.removeAttribute('aria-busy'); root.classList.add('axon-doc-pdf');
+        root.dataset.pages = String(total);
+        const slides = /\.(pptx?|pptm|ppsx?|potx?|odp|otp)$/i.test(options.name);
+        let number = 1, zoom = slides ? 'fit' : 'width', rotation = 0, scale = 1, quietUntil = 0;
+        const sizes = new Array(total).fill(null); sizes[0] = { w: first.width, h: first.height };
+        const group = () => { const g = element('div', 'axon-doc-group'); controls.append(g); return g; };
+        const tool = (parent, label, glyph, fallback, run) => {
+          const b = element('button', 'btn-secondary axon-doc-tool'); b.type = 'button'; b.title = label; b.setAttribute('aria-label', label);
+          if (typeof icon === 'function') b.innerHTML = icon(glyph); else b.textContent = fallback;
+          b.addEventListener('click', run); parent.append(b); return b;
+        };
+        // ---- Toolbar: thumbnails · pages · zoom · rotate · search · open/fullscreen
+        const gSide = group(), gPages = group(), gZoom = group(), gFind = group(), gEnd = group();
+        gEnd.classList.add('axon-doc-group-end');
+        const sideBtn = tool(gSide, 'Miniaturas de páginas', 'panel-left', '▤', () => toggleSide());
+        const previous = tool(gPages, 'Página anterior', 'chevron-left', '‹', () => go(number - 1));
+        const pageInput = element('input'); pageInput.type = 'number'; pageInput.min = '1'; pageInput.max = String(total); pageInput.value = '1';
+        pageInput.setAttribute('aria-label', 'Número de página'); gPages.append(pageInput);
+        const count = element('span', 'axon-doc-count', '/ ' + total); gPages.append(count);
+        const next = tool(gPages, 'Página siguiente', 'chevron-right', '›', () => go(number + 1));
+        tool(gZoom, 'Alejar', 'zoom-out', '−', () => zoomBy(1 / 1.2));
         const select = element('select'); select.setAttribute('aria-label', 'Zoom del documento');
-        for (const [value, label] of [['width', 'Ancho'], ['fit', 'Página'], ['1', '100 %'], ['1.5', '150 %'], ['2', '200 %']]) {
+        const custom = element('option', '', ''); custom.value = 'custom'; custom.hidden = true;
+        for (const [value, label] of [['width', 'Ajustar al ancho'], ['fit', 'Página completa'], ['0.5', '50 %'], ['0.75', '75 %'], ['1', '100 %'], ['1.25', '125 %'], ['1.5', '150 %'], ['2', '200 %'], ['3', '300 %'], ['4', '400 %']]) {
           const o = element('option', '', label); o.value = value; select.append(o);
         }
-        select.value = zoom;
-        controls.append(select);
-        select.addEventListener('change', () => { zoom = select.value; void render(); });
-        button('Pantalla completa', '⛶', () => {
+        select.append(custom); gZoom.append(select);
+        tool(gZoom, 'Acercar', 'zoom-in', '+', () => zoomBy(1.2));
+        tool(gZoom, 'Rotar página', 'rotate-cw', '⟳', () => { rotation = (rotation + 90) % 360; relayout(true); });
+        const search = element('input'); search.type = 'search'; search.placeholder = 'Buscar en el PDF'; search.setAttribute('aria-label', 'Buscar en el PDF');
+        gFind.append(search);
+        const hitPrev = tool(gFind, 'Coincidencia anterior', 'chevron-up', '▲', () => stepHit(-1));
+        const hitNext = tool(gFind, 'Coincidencia siguiente', 'chevron-down', '▼', () => stepHit(1));
+        const hits = element('span', 'axon-doc-count axon-doc-hits'); gFind.append(hits); hitPrev.disabled = hitNext.disabled = true;
+        tool(gEnd, 'Abrir en una pestaña nueva', 'external-link', '↗', () => window.open(url, '_blank', 'noopener'));
+        tool(gEnd, 'Pantalla completa', 'maximize', '⛶', () => {
           if (document.fullscreenElement === root) document.exitFullscreen().catch(() => {});
           else root.requestFullscreen?.().catch(() => { note.textContent = 'Este navegador no permite pantalla completa.'; });
         });
-        pageInput.addEventListener('change', () => go(Number(pageInput.value)));
-        function go(value) { number = Math.max(1, Math.min(pdf.numPages, Number.isFinite(value) ? Math.floor(value) : 1)); void render(); }
-        async function render() {
-          const version = ++renderVersion;
-          renderTask?.cancel(); textLayer?.cancel();
-          try {
-            const page = await pdf.getPage(number);
-            if (!active() || version !== renderVersion) return;
-            pageInput.value = String(number); previous.disabled = number === 1; next.disabled = number === pdf.numPages;
-            const base = page.getViewport({ scale: 1 });
-            const scale = zoom === 'fit' ? Math.max(.1, Math.min((stage.clientWidth - 24) / base.width, (stage.clientHeight - 24) / base.height, 2))
-              : zoom === 'width' ? Math.max(.1, Math.min((stage.clientWidth - 24) / base.width, 2)) : Number(zoom);
-            const viewport = page.getViewport({ scale });
-            // Bound canvas memory, including unusually large PDF page boxes.
-            const ratio = Math.min(devicePixelRatio || 1, 2, 8192 / viewport.width, 8192 / viewport.height, Math.sqrt(16000000 / (viewport.width * viewport.height)));
-            const sheet = element('div', 'axon-doc-page'); sheet.style.width = viewport.width + 'px'; sheet.style.height = viewport.height + 'px';
-            sheet.style.setProperty('--total-scale-factor', scale); sheet.style.setProperty('--scale-factor', scale);
-            const canvas = element('canvas'); canvas.width = Math.max(1, Math.floor(viewport.width * ratio)); canvas.height = Math.max(1, Math.floor(viewport.height * ratio));
-            canvas.style.width = viewport.width + 'px'; canvas.style.height = viewport.height + 'px';
-            canvas.setAttribute('aria-label', `Página ${number} de ${pdf.numPages} de ${options.name}`);
-            const text = element('div', 'textLayer'); sheet.append(canvas, text); stage.replaceChildren(sheet);
-            renderTask = page.render({ canvasContext: canvas.getContext('2d'), viewport, transform: ratio === 1 ? null : [ratio, 0, 0, ratio, 0, 0] });
-            await renderTask.promise;
-            if (!active() || version !== renderVersion) return;
-            textLayer = new lib.TextLayer({ textContentSource: page.streamTextContent(), container: text, viewport });
-            await textLayer.render();
-            root.dataset.page = String(number); root.dataset.pages = String(pdf.numPages); root.dataset.rendered = 'true';
-          } catch (e) { if (active() && version === renderVersion && e.name !== 'RenderingCancelledException' && e.name !== 'AbortException') fail('No se pudo dibujar esta página. Podés reintentar o descargar el original.'); }
+        if (typeof refreshIcons === 'function') refreshIcons(controls);
+        // ---- Layout: optional thumbnail rail + continuous pages
+        const body = element('div', 'axon-doc-body'), side = element('nav', 'axon-doc-thumbs');
+        side.setAttribute('aria-label', 'Miniaturas'); stage.replaceWith(body); body.append(side, stage);
+        stage.classList.add('axon-doc-scroll');
+        const sheets = [], thumbs = [], painted = new Map(), textLayers = new Map();
+        // Scroll only the viewer's own panes — scrollIntoView would also move the page behind it.
+        const reveal = (box, el, center = false) => {
+          const r = el.getBoundingClientRect(), b = box.getBoundingClientRect();
+          if (center) { box.scrollTop += r.top - b.top - (b.height - r.height) / 2; if (r.left < b.left || r.right > b.right) box.scrollLeft += r.left - b.left - (b.width - r.width) / 2; }
+          else if (r.top < b.top) box.scrollTop += r.top - b.top - 8; else if (r.bottom > b.bottom) box.scrollTop += r.bottom - b.bottom + 8;
+        };
+        for (let i = 0; i < total; i++) {
+          const sheet = element('div', 'axon-doc-page'); sheet.dataset.page = String(i + 1); sheets.push(sheet); stage.append(sheet);
+          const t = element('button', 'axon-doc-thumb'); t.type = 'button'; t.setAttribute('aria-label', 'Ir a la página ' + (i + 1));
+          t.append(element('span', 'axon-doc-thumb-sheet'), element('small', '', String(i + 1)));
+          t.addEventListener('click', () => go(i + 1)); thumbs.push(t); side.append(t);
         }
-        resize = new ResizeObserver(() => { if (['fit', 'width'].includes(zoom) && active()) void render(); }); resize.observe(stage);
+        const dims = i => { const s = sizes[i] || sizes[number - 1] || sizes[0]; return rotation % 180 ? { w: s.h, h: s.w } : s; };
+        const fitScale = () => {
+          const d = dims(number - 1), w = Math.max(80, stage.clientWidth - 32), h = Math.max(80, stage.clientHeight - 24);
+          return zoom === 'fit' ? Math.min(w / d.w, h / d.h, 4) : zoom === 'width' ? Math.min(w / d.w, 4) : Number(zoom);
+        };
+        function syncZoomControl() {
+          if ([...select.options].some(o => o.value === String(zoom) && o !== custom)) { select.value = String(zoom); custom.hidden = true; }
+          else { custom.textContent = Math.round(scale * 100) + ' %'; custom.hidden = false; select.value = 'custom'; }
+        }
+        function sizeSheet(i) {
+          const d = dims(i), sheet = sheets[i];
+          sheet.style.width = Math.round(d.w * scale) + 'px'; sheet.style.height = Math.round(d.h * scale) + 'px';
+          const ts = thumbs[i].firstChild, tw = 104; ts.style.width = tw + 'px'; ts.style.height = Math.round(tw * d.h / d.w) + 'px';
+        }
+        // Resizes every sheet at once; existing canvases stretch until redrawn so zooming never flashes blank.
+        function relayout(force = false, anchor) {
+          const before = scale, keep = anchor || { x: stage.clientWidth / 2, y: 0 };
+          const ox = stage.scrollLeft + keep.x, oy = stage.scrollTop + keep.y;
+          const pageTop = sheets[number - 1].offsetTop;
+          scale = fitScale(); syncZoomControl();
+          for (let i = 0; i < total; i++) sizeSheet(i);
+          if (force) for (const i of [...painted.keys()]) painted.get(i).key = '';
+          if (anchor) { const r = scale / before; stage.scrollLeft = ox * r - keep.x; stage.scrollTop = oy * r - keep.y; }
+          else if (before !== scale || force) { quietUntil = Date.now() + 250; stage.scrollTop = sheets[number - 1].offsetTop - 8 + (stage.scrollTop - pageTop + 8) * (scale / before); }
+          schedule();
+        }
+        function zoomBy(factor, anchor) { zoom = String(Math.max(0.1, Math.min(6, Math.round(scale * factor * 100) / 100))); relayout(false, anchor); }
+        select.addEventListener('change', () => { if (select.value !== 'custom') { zoom = select.value; relayout(); } });
+        // ---- Lazy page rendering: only pages near the viewport keep a canvas.
+        const near = new Set();
+        const io = new IntersectionObserver(entries => {
+          for (const e of entries) { const i = Number(e.target.dataset.page) - 1; if (e.isIntersecting) near.add(i); else { near.delete(i); release(i); } }
+          schedule();
+        }, { root: stage, rootMargin: '120% 0px' });
+        sheets.forEach(s => io.observe(s));
+        let timer = 0, busy = false;
+        function schedule() { clearTimeout(timer); timer = setTimeout(pump, 60); }
+        async function pump() {
+          if (busy || !active()) return; busy = true;
+          try {
+            const order = [...near].sort((a, b) => Math.abs(a - (number - 1)) - Math.abs(b - (number - 1)));
+            for (const i of order) { if (!active()) return; await paint(i); }
+          } finally { busy = false; }
+          if ([...near].some(i => painted.get(i)?.key !== scale + '/' + rotation)) schedule();
+        }
+        function release(i) {
+          const p = painted.get(i); if (!p) return;
+          p.task?.cancel(); p.text?.cancel(); painted.delete(i); textLayers.delete(i);
+          sheets[i].replaceChildren(); delete sheets[i].dataset.ready;
+        }
+        async function paint(i) {
+          const key = scale + '/' + rotation, prev = painted.get(i);
+          if (prev?.key === key) return;
+          const page = await pdf.getPage(i + 1); if (!active()) return;
+          const natural = page.getViewport({ scale: 1 });
+          if (!sizes[i] || sizes[i].w !== natural.width || sizes[i].h !== natural.height) { sizes[i] = { w: natural.width, h: natural.height }; sizeSheet(i); }
+          const viewport = page.getViewport({ scale, rotation: (page.rotate + rotation) % 360 });
+          // Bound canvas memory, including unusually large PDF page boxes.
+          const ratio = Math.min(devicePixelRatio || 1, 2, 8192 / viewport.width, 8192 / viewport.height, Math.sqrt(16000000 / (viewport.width * viewport.height)));
+          const canvas = element('canvas'); canvas.width = Math.max(1, Math.floor(viewport.width * ratio)); canvas.height = Math.max(1, Math.floor(viewport.height * ratio));
+          canvas.setAttribute('aria-label', `Página ${i + 1} de ${total} de ${options.name}`);
+          const entry = { key, task: page.render({ canvasContext: canvas.getContext('2d'), viewport, transform: ratio === 1 ? null : [ratio, 0, 0, ratio, 0, 0] }) };
+          prev?.task?.cancel(); prev?.text?.cancel(); painted.set(i, entry);
+          try { await entry.task.promise; } catch (e) { if (painted.get(i) === entry) painted.delete(i); if (e?.name !== 'RenderingCancelledException') throw e; return; }
+          if (!active() || painted.get(i) !== entry) return;
+          const text = element('div', 'textLayer'); sheets[i].style.setProperty('--total-scale-factor', scale); sheets[i].style.setProperty('--scale-factor', scale);
+          sheets[i].replaceChildren(canvas, text); sheets[i].dataset.ready = 'true';
+          if (i === number - 1) { root.dataset.page = String(number); root.dataset.rendered = 'true'; }
+          entry.text = new lib.TextLayer({ textContentSource: page.streamTextContent(), container: text, viewport });
+          try { await entry.text.render(); } catch { return; }
+          if (painted.get(i) !== entry) return;
+          textLayers.set(i, text); highlight(i);
+          if (thumbsOn && !thumbs[i].dataset.drawn) void drawThumb(i);
+        }
+        // ---- Thumbnails
+        let thumbsOn = false;
+        try { thumbsOn = localStorage.getItem('axon-doc-thumbs') === '1' || (localStorage.getItem('axon-doc-thumbs') == null && total > 1 && root.clientWidth >= 900); } catch {}
+        const thumbIo = new IntersectionObserver(entries => { for (const e of entries) if (e.isIntersecting) void drawThumb(thumbs.indexOf(e.target)); }, { root: side, rootMargin: '200px 0px' });
+        thumbs.forEach(t => thumbIo.observe(t));
+        async function drawThumb(i) {
+          const t = thumbs[i]; if (!thumbsOn || !t || t.dataset.drawn) return; t.dataset.drawn = '1';
+          try {
+            const page = await pdf.getPage(i + 1); if (!active()) return;
+            const base = page.getViewport({ scale: 1, rotation: (page.rotate + rotation) % 360 }), viewport = page.getViewport({ scale: 208 / base.width, rotation: (page.rotate + rotation) % 360 });
+            const c = element('canvas'); c.width = Math.ceil(viewport.width); c.height = Math.ceil(viewport.height);
+            await page.render({ canvasContext: c.getContext('2d'), viewport }).promise;
+            if (active()) t.firstChild.replaceChildren(c);
+          } catch { delete t.dataset.drawn; }
+        }
+        function toggleSide(on = !thumbsOn) {
+          thumbsOn = on; root.classList.toggle('axon-doc-side-on', on); sideBtn.classList.toggle('on', on); sideBtn.setAttribute('aria-pressed', String(on));
+          try { localStorage.setItem('axon-doc-thumbs', on ? '1' : '0'); } catch {}
+          if (on) { if (thumbs[number - 1]) reveal(side, thumbs[number - 1]); thumbs.forEach(t => { thumbIo.unobserve(t); thumbIo.observe(t); }); }
+          if (['fit', 'width'].includes(zoom)) requestAnimationFrame(() => relayout());
+        }
+        // ---- Current page follows scrolling; buttons, input and keys jump.
+        function setCurrent(n, fromScroll = false) {
+          number = Math.max(1, Math.min(total, n));
+          pageInput.value = String(number); previous.disabled = number === 1; next.disabled = number === total;
+          root.dataset.page = String(number);
+          thumbs.forEach((t, i) => t.classList.toggle('active', i === number - 1));
+          if (thumbsOn && fromScroll) reveal(side, thumbs[number - 1]);
+        }
+        function go(value) {
+          const n = Math.max(1, Math.min(total, Number.isFinite(value) ? Math.floor(value) : 1));
+          setCurrent(n); quietUntil = Date.now() + 400;
+          stage.scrollTop = sheets[n - 1].offsetTop - 8; if (thumbsOn) reveal(side, thumbs[n - 1]);
+          schedule();
+        }
+        stage.addEventListener('scroll', () => {
+          if (Date.now() < quietUntil) return;
+          const line = stage.scrollTop + stage.clientHeight * 0.35;
+          let n = 1; for (let i = 0; i < total; i++) { if (sheets[i].offsetTop <= line) n = i + 1; else break; }
+          if (stage.scrollTop + stage.clientHeight >= stage.scrollHeight - 2) { for (let i = total - 1; i >= 0; i--) if (sheets[i].offsetTop >= stage.scrollTop) n = i + 1; else break; }
+          if (n !== number) setCurrent(n, true);
+        }, { passive: true });
+        pageInput.addEventListener('change', () => go(Number(pageInput.value)));
+        // Ctrl/⌘ + wheel (and trackpad pinch) zooms around the pointer.
+        stage.addEventListener('wheel', e => {
+          if (!e.ctrlKey && !e.metaKey) return; e.preventDefault();
+          const r = stage.getBoundingClientRect();
+          zoomBy(Math.exp(-e.deltaY * 0.0025), { x: e.clientX - r.left, y: e.clientY - r.top });
+        }, { passive: false });
         root.addEventListener('keydown', e => {
+          if (e.target === search) {
+            if (e.key === 'Enter') { e.preventDefault(); stepHit(e.shiftKey ? -1 : 1); }
+            else if (e.key === 'Escape' && search.value) { e.preventDefault(); e.stopPropagation(); search.value = ''; runSearch(''); }
+            return;
+          }
+          if ((e.ctrlKey || e.metaKey) && ['=', '+', '-', '0', 'f'].includes(e.key.toLowerCase())) {
+            e.preventDefault(); e.stopPropagation();
+            if (e.key.toLowerCase() === 'f') { search.focus(); search.select(); }
+            else if (e.key === '0') { zoom = slides ? 'fit' : 'width'; relayout(); }
+            else zoomBy(e.key === '-' ? 1 / 1.2 : 1.2);
+            return;
+          }
           if (/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
           if (e.key === 'ArrowRight' || e.key === 'PageDown') { e.preventDefault(); e.stopPropagation(); go(number + 1); }
           else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); e.stopPropagation(); go(number - 1); }
+          else if (e.key === 'Home' && e.target !== stage) { e.preventDefault(); go(1); }
+          else if (e.key === 'End' && e.target !== stage) { e.preventDefault(); go(total); }
         });
-        await render();
+        // ---- Search across every page, with highlights in the text layer.
+        const pageText = new Map();
+        const textOf = i => { if (!pageText.has(i)) pageText.set(i, pdf.getPage(i + 1).then(p => p.getTextContent()).then(c => c.items.map(it => it.str || '').join('').toLocaleLowerCase()).catch(() => '')); return pageText.get(i); };
+        let query = '', matches = [], current = -1, searchRun = 0, searchTimer = 0;
+        search.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => runSearch(search.value), 250); });
+        async function runSearch(value) {
+          const run = ++searchRun; query = value.trim().toLocaleLowerCase(); matches = []; current = -1;
+          hitPrev.disabled = hitNext.disabled = true; hits.textContent = query ? 'Buscando…' : '';
+          for (const i of textLayers.keys()) highlight(i);
+          if (!query) return;
+          for (let i = 0; i < total; i++) {
+            const str = await textOf(i); if (run !== searchRun || !active()) return;
+            for (let at = str.indexOf(query); at !== -1; at = str.indexOf(query, at + query.length)) matches.push({ page: i, at });
+            if (current < 0 && matches.length && matches.at(-1).page >= number - 1) { current = matches.findIndex(m => m.page >= number - 1); showHit(); }
+            if (i % 20 === 19) hits.textContent = `${matches.length} · buscando…`;
+          }
+          if (current < 0 && matches.length) { current = 0; showHit(); }
+          hits.textContent = matches.length ? `${current + 1} / ${matches.length}` : 'Sin resultados';
+          hitPrev.disabled = hitNext.disabled = matches.length < 2;
+          for (const i of textLayers.keys()) highlight(i);
+        }
+        function stepHit(d) { if (!matches.length) return; current = (current + d + matches.length) % matches.length; hits.textContent = `${current + 1} / ${matches.length}`; showHit(); }
+        function showHit() {
+          const m = matches[current]; if (!m) return;
+          if (m.page !== number - 1 || !textLayers.has(m.page)) go(m.page + 1);
+          for (const i of textLayers.keys()) highlight(i);
+        }
+        function highlight(i) {
+          const layer = textLayers.get(i); if (!layer) return;
+          const spans = [...layer.querySelectorAll('span:not(.markedContent)')].filter(s => !s.querySelector('span'));
+          let offset = 0; const runs = spans.map(s => { const text = s.dataset.text ??= s.textContent; const r = { s, text, start: offset }; offset += text.length; return r; });
+          for (const r of runs) if (r.s.querySelector('mark')) r.s.textContent = r.text;
+          if (!query) return;
+          const own = matches.map((m, n) => ({ ...m, n })).filter(m => m.page === i);
+          let focus = null;
+          for (const r of runs) {
+            const cuts = own.filter(m => m.at < r.start + r.text.length && m.at + query.length > r.start);
+            if (!cuts.length) continue;
+            r.s.replaceChildren(); let pos = 0;
+            for (const m of cuts) {
+              const a = Math.max(0, m.at - r.start), b = Math.min(r.text.length, m.at + query.length - r.start);
+              if (a > pos) r.s.append(r.text.slice(pos, a));
+              const mark = element('mark', 'axon-doc-hit' + (m.n === current ? ' current' : ''), r.text.slice(a, b)); r.s.append(mark);
+              if (m.n === current && !focus) focus = mark; pos = b;
+            }
+            if (pos < r.text.length) r.s.append(r.text.slice(pos));
+          }
+          if (focus) { quietUntil = Date.now() + 400; reveal(stage, focus, true); }
+        }
+        resize = new ResizeObserver(() => { if (['fit', 'width'].includes(zoom) && active()) relayout(); }); resize.observe(stage);
+        const cleanup = stopExtra; stopExtra = () => { cleanup(); io.disconnect(); thumbIo.disconnect(); clearTimeout(timer); clearTimeout(searchTimer); for (const p of painted.values()) { p.task?.cancel(); p.text?.cancel(); } };
+        toggleSide(thumbsOn); scale = fitScale(); for (let i = 0; i < total; i++) sizeSheet(i); syncZoomControl(); setCurrent(1);
+        await paint(0);
       }
       async function showTable(workbook = null) {
         let parsed, encoding = '', sheets, csvText, csvParser;
@@ -229,7 +429,7 @@
       }
       function stop() {
         if (disposed) return;
-        disposed = true; abort.abort(); resize?.disconnect(); renderVersion++;
+        disposed = true; abort.abort(); resize?.disconnect(); renderVersion++; stopExtra();
         renderTask?.cancel(); textLayer?.cancel();
         if (loading) loading.destroy().catch(() => {});
         root.remove();

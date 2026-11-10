@@ -1140,7 +1140,9 @@
           if (currentOp?.id) await api(`/api/files/copyjob/${currentOp.id}`, { method: 'DELETE' }).catch(() => {});
         });
         let moved = 0;
+        const batch = window.AxonTransfers.batch(selected.length);
         for (const [idx, it] of selected.entries()) {
+          batch.done = idx;
           if (cancel) break;
           if (dirOf(it.p) === target) { moved++; continue; }
           let name = it.n, n = 1;
@@ -1149,6 +1151,7 @@
           stEl.textContent = `${idx + 1}/${selected.length} · ${it.n}`;
           try {
             await window.AxonTransfers.run(it.p, target + '/' + name, 'move', {
+              batch,
               onProgress: (op, info) => {
                 currentOp = op;
                 const pct = (idx + (info?.pct ?? 0) / 100) / selected.length * 100;
@@ -1362,7 +1365,7 @@
     if (it.k === 'image' || it.k === 'raw' || it.k === 'vector' || (it.k === 'design' && it.vw)) {
       const light = it.vw || it.bv;
       const src = light ? mediaUrl(it, 'view') : f;
-      return `<div class="lv-img-wrap" id="lv-zoom">${light && it.th >= 1 ? `<img class="lv-ph" src="${thumbUrl(it)}" alt="">` : ''}<img class="lv-img" src="${src}" alt="" draggable="false" onload="this.previousElementSibling?.classList?.contains('lv-ph')&&this.previousElementSibling.remove()"></div>`;
+      return `<div class="lv-img-wrap" id="lv-zoom">${light && it.th >= 1 ? `<img class="lv-ph" src="${thumbUrl(it)}" alt="">` : ''}<img class="lv-img${!light && /^svgz?$/i.test(it.e || '') ? ' lv-img-fill' : ''}" src="${src}" alt="" draggable="false" onload="this.previousElementSibling?.classList?.contains('lv-ph')&&this.previousElementSibling.remove()"></div>`;
     }
     if (it.k === 'audio') return `<div class="lv-audio"><audio controls autoplay preload="metadata" aria-label="${esc(it.n)}" src="${f}"></audio><small class="lv-audio-status" role="status"></small></div>`;
     if (window.AxonDocumentViewer?.supports(it.n)) return '<div class="lv-document"></div>';
