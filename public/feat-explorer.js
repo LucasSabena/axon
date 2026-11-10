@@ -175,7 +175,8 @@
     dirs.set(path, entry);
     entry.promise = (async () => {
       try {
-        const data = await api(`/api/files?path=${encodeURIComponent(path)}`, { signal: AbortSignal.timeout(20_000) });
+        // Shares the listing (and its in-flight request) with the folder view.
+        const data = window.AxonDirs ? await window.AxonDirs.list(path, { fresh: force }) : await api(`/api/files?path=${encodeURIComponent(path)}`, { signal: AbortSignal.timeout(20_000) });
         const all = (data.entries || []).filter((e) => e.type === 'dir');
         const sorted = all.sort((a, b) => a.name.localeCompare(b.name, 'es', { sensitivity: 'base', numeric: true }));
         const signature = sorted.map((e) => e.name).join('\n');

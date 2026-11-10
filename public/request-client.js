@@ -1,10 +1,10 @@
 /* Shared transport: bounded memory, one flight per GET, invalidation after writes. */
 (function (root) {
   'use strict';
-  function create({ fetcher = fetch, now = Date.now, onStart = () => {}, onEnd = () => {}, onError = () => {}, onAuth = () => {} } = {}) {
+  function create({ fetcher = fetch, now = Date.now, onStart = () => {}, onEnd = () => {}, onError = () => {}, onAuth = () => {}, onInvalidate = () => {} } = {}) {
     const flights = new Map(), cache = new Map();
     let generation = 0;
-    function invalidate() { generation++; cache.clear(); flights.clear(); }
+    function invalidate() { generation++; cache.clear(); flights.clear(); onInvalidate(); }
     function request(path, opts = {}) {
       const method = (opts.method || 'GET').toUpperCase();
       const ttl = opts.cacheMs || 0;
@@ -19,7 +19,7 @@
       const task = (async () => {
         let response;
         try {
-          const { cacheMs, fresh, busy, timeoutMs, ...init } = opts;
+          const { cacheMs, fresh, busy, timeoutMs, keepCache, ...init } = opts;
           response = await fetcher(path, {
             credentials: 'same-origin', cache: 'no-store', ...init, method,
             headers: { ...(opts.body != null ? { 'Content-Type': 'application/json' } : {}), ...opts.headers },
@@ -43,7 +43,8 @@
           if (response.status === 401) { invalidate(); onAuth(); }
           throw error;
         }
-        if (method !== 'GET') invalidate();
+        // keepCache: a POST that only reads (e.g. signing a link) must not drop cached data.
+        if (method !== 'GET') { if (!opts.keepCache) invalidate(); }
         else if (ttl && stamp === generation) {
           if (cache.size >= 64) cache.delete(cache.keys().next().value);
           cache.set(key, { at: now(), data });

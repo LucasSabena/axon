@@ -45,7 +45,13 @@ export class FileVolumes {
     return JSON.parse(await boundedCommand(argv,JSON.stringify({...request,user:HOST_USER}),undefined,30_000));
   },private registry?:string) {}
   async snapshot(fresh=false):Promise<VolumeSnapshot> {
-    if(!fresh && this.cached && Date.now()-this.cached.at<3000)return this.cached.value;
+    if(!fresh && this.cached){
+      const age=Date.now()-this.cached.at;
+      if(age<3000)return this.cached.value;
+      // Folder listings must not wait for a host disk inventory on every click: serve the
+      // recent inventory and refresh it behind. Writes validate with fresh=true.
+      if(age<60_000){if(!this.pending)void this.snapshot(true).catch(()=>{});return this.cached.value;}
+    }
     if(this.pending)return this.pending;
     const query = async () => {
       if(!this.loaded){this.loaded=true;if(this.registry)try{const saved=JSON.parse(await readFile(this.registry,'utf8'));for(const p of saved.paths||[])if(typeof p==='string'&&p.startsWith('/')&&p!=='/')this.known.set(p,'');}catch{/* first inventory */}}

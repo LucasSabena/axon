@@ -53,3 +53,12 @@ test('mount rejects arbitrary identifiers, uses a constrained runner and refresh
  await expect(disks.mount('/dev/sda;touch /tmp/injected')).rejects.toThrow('inválido');expect(calls).toBe(0);
  const result=await disks.mount(id);expect(calls).toBe(1);expect(result.volumes[0].readable).toBe(true);expect(result.path).toBe(external.path!);
 });
+
+test('recent inventory is served immediately and refreshed in the background',async()=>{
+ let calls=0,data=snapshot([root]);const disks=new FileVolumes(async()=>{calls++;await Bun.sleep(20);return data;});
+ await disks.snapshot();expect(calls).toBe(1);
+ (disks as any).cached.at-=10_000;data=snapshot([root,external]);
+ const started=performance.now();expect((await disks.snapshot()).volumes).toHaveLength(1);expect(performance.now()-started).toBeLessThan(15);
+ await Bun.sleep(40);expect(calls).toBe(2);expect((await disks.snapshot()).volumes).toHaveLength(2);
+ (disks as any).cached.at-=120_000;expect((await disks.snapshot()).volumes).toHaveLength(2);expect(calls).toBe(3);
+});

@@ -43,7 +43,9 @@
     tabs.innerHTML=`<button type="button" class="btn-secondary" data-source="server" aria-pressed="${panel.hidden}">${icon('hard-drive')} Servidor</button>`+S.providers.filter(p=>p.connected&&p.visible).map(p=>`<button type="button" class="btn-secondary" data-source="${p.id}" aria-pressed="${!panel.hidden&&S.provider===p.id}">${window.AxonConnections.logo(p.id)} ${esc(p.name)}</button>`).join('')+`<button type="button" class="btn-secondary cloud-manage" data-connections>${icon('plug')} Conexiones</button>`;refreshIcons();
     document.dispatchEvent(new CustomEvent('axon:cloud-sources',{detail:{providers:S.providers.filter(p=>p.connected&&p.visible).map(p=>({id:p.id,name:p.name})),active:panel.hidden?'':S.provider}}));
   }
-  async function refreshSources(){const nav=++S.sourcesNav;try{const d=await request('/api/connections');if(nav!==S.sourcesNav)return;S.providers=d.providers;renderSources();}catch{ /* Existing navigation remains usable during an outage. */ }}
+  let sourcesAt=0;
+  // Connections rarely change: leaving a cloud view on every folder change must not re-ask.
+  async function refreshSources(force=false){if(!force&&Date.now()-sourcesAt<60_000)return;sourcesAt=Date.now();const nav=++S.sourcesNav;try{const d=await request('/api/connections');if(nav!==S.sourcesNav)return;S.providers=d.providers;renderSources();}catch{ /* Existing navigation remains usable during an outage. */ }}
   document.addEventListener('axon:connections',e=>{S.sourcesNav++;S.providers=e.detail;renderSources();});
   function renderConnection(){
     const d=S.status,box=el('cloud-connection'),available=d.connected&&d.visible!==false;
@@ -121,7 +123,7 @@
     const nav=++S.nav;S.provider=Object.hasOwn(names,p.source)?p.source:'dropbox';base='/api/files/'+S.provider;S.crumbs=null;S.jobs=[];S.uploads=[];S.jobsKey='';el('cloud-jobs').replaceChildren();clearTimeout(S.poll);closePreview();S.local ||= window.AxonFilesLocal.params();sec.classList.add('fm-cloud-mode');panel.hidden=false;
     tabs.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.source===S.provider)));
     S.mark=p.mark||'';S.color=p.color||'';S.kind=p.kind||'';el('cloud-mark').value=S.mark;el('cloud-color').value=S.color;el('cloud-kind').value=S.kind;
-    S.location=p.location||'account';S.path=p.cloudPath||'';S.filter=p.q||'';S.item=p.item||null;S.view=views.includes(p.view)?p.view:S.view;S.sort=sorts.includes(p.sort)?p.sort:S.sort;S.order=['asc','desc'].includes(p.order)?p.order:S.order;S.sel=new Set();S.entries=[];S.cursor=null;S.busy=true;el('cloud-browser').hidden=true;el('cloud-filter').value=S.filter;message('Consultando '+name()+'…');panel.querySelector('h2').textContent=name();await refreshSources();
+    S.location=p.location||'account';S.path=p.cloudPath||'';S.filter=p.q||'';S.item=p.item||null;S.view=views.includes(p.view)?p.view:S.view;S.sort=sorts.includes(p.sort)?p.sort:S.sort;S.order=['asc','desc'].includes(p.order)?p.order:S.order;S.sel=new Set();S.entries=[];S.cursor=null;S.busy=true;el('cloud-browser').hidden=true;el('cloud-filter').value=S.filter;message('Consultando '+name()+'…');panel.querySelector('h2').textContent=name();await refreshSources(true);
     try{
       const d=await request(base+'/status');if(nav!==S.nav)return;S.status=d;
       if(d.connected&&!d.sources.some(s=>s.id===S.location)){S.location='account';S.path='';S.item=null;}

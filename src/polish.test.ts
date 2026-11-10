@@ -109,3 +109,16 @@ describe('webhook delivery', () => {
     expect(JSON.parse(requests.at(-1)!.body)).toEqual({content:'**Título**\nMensaje'});
   });
 });
+
+test('writes announce invalidation; read-only POSTs keep cached data', async () => {
+  let invalidations = 0, calls = 0;
+  const fetcher = async () => { calls++; return new Response(JSON.stringify({ ok: true, n: calls }), { status: 200 }); };
+  const c = client({ fetcher, onInvalidate: () => invalidations++ });
+  await c.request('/api/x', { cacheMs: 60_000 });
+  await c.request('/api/sign', { method: 'POST', body: {}, keepCache: true });
+  expect(invalidations).toBe(0);
+  expect((await c.request('/api/x', { cacheMs: 60_000 })).n).toBe(1);
+  await c.request('/api/write', { method: 'POST', body: {} });
+  expect(invalidations).toBe(1);
+  expect((await c.request('/api/x', { cacheMs: 60_000 })).n).toBe(4);
+});

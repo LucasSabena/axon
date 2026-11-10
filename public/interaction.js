@@ -42,6 +42,8 @@
     },
     onError: (path,error) => document.dispatchEvent(new CustomEvent('axon:request-error',{detail:{path,error}})),
     onAuth: () => document.dispatchEvent(new Event('axon:session-expired')),
+    // Any successful write may have changed files: shared listings drop their memory.
+    onInvalidate: () => document.dispatchEvent(new Event('axon:data-changed')),
   });
   window.AxonUI = {
     skeleton(label='Cargando datos', rows=4) {

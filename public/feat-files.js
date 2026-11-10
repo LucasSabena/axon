@@ -835,20 +835,20 @@
 
   // Push a directory column onto the stack and fetch its entries.
   async function drill(path, fromRoute = false) {
-    await AxonFileCatalog.load().catch(()=>toast('No se pudo cargar la organización. Usá Actualizar para reintentar.','warn'));syncCatalogControls();
-    if (window.AxonNavigation?.ready && !window.AxonNavigation.applying && !fromRoute) {
+    void AxonFileCatalog.load().catch(() => {});
+    if (window.AxonNavigation?.ready && !fromRoute) {
       const snapshot = captureFiles();
       snapshot.cols = [...snapshot.cols, { path, sel: [], top: 0 }];
       snapshot.scroll['fm-cols'][0]=Number.MAX_SAFE_INTEGER;
       return window.AxonNavigation.go(window.AxonNavigation.url('files', { ...fileParams(), path, item: null, edit: null }), { view: snapshot });
     }
-    const col = { path, entries: [], sel: new Set(), loading: true, error: null };
+    const remembered = Dirs.peek(path);
+    const col = { path, entries: remembered ? trashify(remembered.entries || [], remembered.path) : [], sel: new Set(), loading: !remembered, error: null };
     S.cols.push(col);
+    if (remembered) syncColCwd(remembered.path, remembered.home);
     renderCols();
     try {
-      const data = await api(`/api/files?path=${encodeURIComponent(path)}`, {
-        signal: AbortSignal.timeout(25_000),
-      });
+      const data = await Dirs.list(path, { fresh: true });
       if(!S.cols.includes(col))return;
       S.volume=data.volume;
       if (inTrash(data.path)) await loadTrashNames(data.path);
@@ -886,7 +886,7 @@
     // Selecting in a column discards every deeper column (Finder semantics).
     S.cols = S.cols.slice(0, i + 1);
     if (name === '..') {
-      if(window.AxonNavigation?.ready && !window.AxonNavigation.applying){const snap=captureFiles();snap.cols=snap.cols.slice(0,i);const target=snap.cols.at(-1)?.path || parentOf(col.path);void window.AxonNavigation.go(window.AxonNavigation.url('files',{...fileParams(),path:target,item:null,edit:null}),{view:snap});return;}
+      if(window.AxonNavigation?.ready){const snap=captureFiles();snap.cols=snap.cols.slice(0,i);const target=snap.cols.at(-1)?.path || parentOf(col.path);void window.AxonNavigation.go(window.AxonNavigation.url('files',{...fileParams(),path:target,item:null,edit:null}),{view:snap});return;}
       // Pop this column: parent column is the new deepest level.
       S.cols.pop();
       const prev = S.cols[S.cols.length - 1];
@@ -950,16 +950,57 @@
   }
 
   // ---------- Navigation ----------
+  // ---------- Directory listings (shared by the list, columns, tree and pickers) ----------
+  // One request per folder at a time, and a short memory of recent folders: going back,
+  // up or into a folder seen a moment ago paints instantly and is revalidated behind.
+  // Any write through the API (move, rename, upload, delete…) clears the memory.
+  const Dirs = window.AxonDirs ||= (() => {
+    const MAX = 150, memory = new Map(), flights = new Map();
+    let generation = 0;
+    const keep = (key, value) => { memory.delete(key); memory.set(key, value); while (memory.size > MAX) memory.delete(memory.keys().next().value); };
+    const clear = () => { generation++; memory.clear(); flights.clear(); };
+    document.addEventListener('axon:data-changed', clear);
+    document.addEventListener('axon:session-expired', clear);
+    function peek(path, maxAge = 120_000) { const hit = memory.get(path); return hit && Date.now() - hit.at <= maxAge ? hit.data : null; }
+    function list(path, { fresh = false, maxAge = 10_000 } = {}) {
+      const key = path || '~', hit = memory.get(key);
+      if (!fresh && hit && Date.now() - hit.at < maxAge) return Promise.resolve(hit.data);
+      const flight = flights.get(key);
+      if (flight && (!fresh || flight.started >= Date.now() - 250)) return flight.promise;
+      const stamp = generation, started = Date.now();
+      const promise = api(`/api/files${path ? `?path=${encodeURIComponent(path)}` : ''}`, { signal: AbortSignal.timeout(25_000) })
+        .then((data) => {
+          if (stamp === generation) { const value = { at: Date.now(), data }; keep(key, value); if (data.path && data.path !== key) keep(data.path, value); }
+          return data;
+        })
+        .finally(() => { if (flights.get(key)?.promise === promise) flights.delete(key); });
+      flights.set(key, { promise, started });
+      return promise;
+    }
+    // Hover warm-up: cheap, deduplicated and never shown on its own.
+    const prefetch = (path) => { if (path && !peek(path, 10_000) && !flights.has(path)) list(path).catch(() => {}); };
+    return { list, peek, prefetch, clear };
+  })();
+  const entriesSignature = (es) => (es || []).map((e) => `${e.name}|${e.type}|${e.size}|${e.mtime}|${e.mode}`).join('\n');
+
+  // Disk inventory and free space only change between volumes (or slowly): don't
+  // re-query them on every folder change.
+  let volumesAt = 0, dfKey = '', dfAt = 0;
+  function syncVolumeInfo() {
+    const token = S.volume?.token || '';
+    if (!S.volumes?.length || Date.now() - volumesAt > 60_000 || (token && !S.volumes.some((v) => v.id + ':' + v.mountId === token))) { volumesAt = Date.now(); void refreshVolumes(); }
+    if (token !== dfKey || Date.now() - dfAt > 30_000) { dfKey = token; dfAt = Date.now(); refreshDf(); } else updateStatusbar();
+  }
+
   async function navigate(p, fromRoute = false) {
     const nav = window.AxonNavigation;
-    if (nav?.ready && !nav.applying && !fromRoute) {
+    if (nav?.ready && !fromRoute) {
       const target = p || S.cwd || '~';
       const prior = fileLocations[target] || (target===S.cwd ? captureFiles() : undefined);
       return nav.go(nav.url('files', { ...fileParams(), path: target, item: null, edit: null, ...(target!==S.cwd?{search:null,q:S.filter || null}:{}) }), { view: prior });
     }
     S.catalogMark='';syncCatalogControls();
     S.navId++;
-    void refreshVolumes();
     const request = S.navId;
     if (S.searchMode) toggleSearch(false);
     S.anchor = null;
@@ -973,22 +1014,41 @@
       return;
     }
     S.sel.clear();
-    setState('Cargando…');
-    try {
-      const q = p ? `?path=${encodeURIComponent(p)}` : '';
-      const data = await api(`/api/files${q}`, { signal: AbortSignal.timeout(25_000) });
-      if (request !== S.navId) return;
-      S.cwd = data.path;
-      S.volume=data.volume;
-      S.renderLimit = RENDER_PAGE;
-      if (!S.home && data.home) S.home = data.home;
+    const key = p || '~';
+    // Same folder = explicit refresh: always show the server's current state.
+    const remembered = key !== S.cwd ? Dirs.peek(key) : null;
+    let shown = '';
+    const paint = async (data) => {
       if (inTrash(data.path)) await loadTrashNames(data.path);
-      await AxonFileCatalog.load(true).catch(()=>toast('No se pudo cargar la organización. Usá Actualizar para reintentar.','warn'));if(request!==S.navId)return;syncCatalogControls();
+      if (request !== S.navId) return false;
+      const sameDir = S.cwd === data.path;
+      S.cwd = data.path;
+      S.volume = data.volume;
+      if (!sameDir) S.renderLimit = RENDER_PAGE;
+      if (!S.home && data.home) S.home = data.home;
       S.entries = trashify(data.entries || [], data.path);
+      shown = entriesSignature(data.entries);
+      // Selection made on the remembered listing survives the revalidation.
+      if (sameDir) for (const n of [...S.sel]) if (!S.entries.some((e) => e.name === n)) S.sel.delete(n);
+      setState('');
       renderCrumbs();
       render();
-      refreshDf();
+      return true;
+    };
+    // Organization (colors, tags) is decorative here: never block the listing on it.
+    void AxonFileCatalog.load().catch(() => {});
+    if (remembered) await paint(remembered);
+    else { S.entries = []; render(); setState('Cargando…'); }
+    try {
+      const data = await Dirs.list(p, { fresh: true });
+      if (request !== S.navId) return;
+      if (!remembered || entriesSignature(data.entries) !== shown || data.path !== S.cwd) {
+        if (!(await paint(data))) return;
+        if (remembered) updateSelbar();
+      }
+      syncVolumeInfo();
     } catch (err) {
+      if (request !== S.navId) return;
       S.entries=[];S.sel.clear();render();
       setState('No se pudo cargar el directorio');
       errToast(err);
@@ -1006,8 +1066,6 @@
   // Re-fetches the listing while the tab sits open (files arriving via other
   // services/sync used to stay invisible until a manual refresh). Skips
   // re-render when nothing changed and never steals editor focus.
-  const entriesSig = (es) =>
-    (es || []).map((e) => `${e.name}|${e.type}|${e.size}|${e.mtime}|${e.mode}`).join('\n');
 
   let signedIn = false;
   document.addEventListener('axon:authenticated', () => { signedIn = true; });
@@ -1018,29 +1076,31 @@
     if (!signedIn || !sec.classList.contains('active') || dormant() || document.hidden || S.editingPath || !S.cwd) return;
     // The volume snapshot spawns a full disk inventory on the host — once a
     // minute is plenty for a passive poll (navigation refreshes on its own).
-    if (Date.now() - lastVolSync > 60_000) { lastVolSync = Date.now(); void refreshVolumes(); }
+    if (Date.now() - lastVolSync > 60_000) { lastVolSync = Date.now(); volumesAt = Date.now(); void refreshVolumes(); }
+    const here = S.cwd, ticket = S.navId;
     try {
-      const data = await api(`/api/files?path=${encodeURIComponent(S.cwd)}`, {
-        signal: AbortSignal.timeout(20_000),
-      });
+      const data = await Dirs.list(here, { fresh: true });
       await AxonFileCatalog.load().catch(()=>{});
+      // The user may have moved on while this was in flight: that listing is not this folder's.
+      if (ticket !== S.navId || here !== S.cwd || S.searchMode) return;
       const list = data.entries || [];
       // Column view keeps ancestor listings on screen; refresh them too or
       // external changes stay invisible until the next drill.
       if (S.view === 'cols') {
         for (const c of S.cols) {
           if (c.path === S.cwd) continue;
-          api(`/api/files?path=${encodeURIComponent(c.path)}`, { signal: AbortSignal.timeout(20_000) })
+          Dirs.list(c.path, { fresh: true })
             .then((d) => {
+              if (ticket !== S.navId || !S.cols.includes(c)) return;
               const next = trashify(d.entries || [], c.path);
-              if (entriesSig(next) === entriesSig(c.entries)) return;
+              if (entriesSignature(next) === entriesSignature(c.entries)) return;
               c.entries = next;
               renderCols();
             })
             .catch(() => {});
         }
       }
-      if (entriesSig(list) === entriesSig(S.entries)) return;
+      if (entriesSignature(list) === entriesSignature(S.entries)) return;
       if (inTrash(S.cwd)) await loadTrashNames(S.cwd);
       const names = new Set(list.map((e) => e.name));
       for (const n of [...S.sel]) if (!names.has(n)) S.sel.delete(n);
@@ -1050,6 +1110,7 @@
       render();
       updateSelbar();
     } catch(err) {
+      if (ticket !== S.navId || here !== S.cwd) return;
       if(err.status===404 || err.status===403 || err.status===409){S.entries=[];S.sel.clear();render();setState(err.message);}
     }
   }
@@ -2424,7 +2485,7 @@
   async function dirNames(dir) {
     if (dir === S.cwd) return S.entries.map((e) => e.name);
     try {
-      const data = await api(`/api/files?path=${encodeURIComponent(dir)}`, { signal: AbortSignal.timeout(20_000) });
+      const data = await Dirs.list(dir, { fresh: true });
       return (data.entries || []).map((e) => e.name);
     } catch {
       return [];
@@ -2453,7 +2514,7 @@
     transferDialog=history;
     history.addEventListener('close',()=>{history.remove();transferDialog=null;focus?.focus();});
     history.addEventListener('click',e=>{if(e.target.closest('[data-close]'))history.close();});
-    document.body.append(history);renderTransferHistory();history.showModal();
+    document.body.append(history);renderTransferHistory();history.showModal();void restoreTransfers();
   };
   function renderTransferHistory(){
     const history=transferDialog;if(!history)return;
@@ -3183,7 +3244,7 @@
       }
     } else if (k === 'ArrowLeft' || k === 'Backspace') {
       if (S.cols.length <= 1) return;
-      if(window.AxonNavigation?.ready && !window.AxonNavigation.applying){const snap=captureFiles();snap.cols.pop();void window.AxonNavigation.go(window.AxonNavigation.url('files',{...fileParams(),path:snap.cols.at(-1).path,item:null,edit:null}),{view:snap});return;}
+      if(window.AxonNavigation?.ready){const snap=captureFiles();snap.cols.pop();void window.AxonNavigation.go(window.AxonNavigation.url('files',{...fileParams(),path:snap.cols.at(-1).path,item:null,edit:null}),{view:snap});return;}
       S.cols.pop();
       const prev = S.cols[S.cols.length - 1];
       S.sel = prev.sel;
@@ -4198,19 +4259,22 @@
     if (!need.length) return;
     need.forEach((p) => dragLinks.set(p, { pending: true, expiresAt: Date.now() + 90_000 }));
     try {
-      const r = await api('/api/files/drag-links', { method: 'POST', body: { paths: need } });
+      const r = await api('/api/files/drag-links', { method: 'POST', body: { paths: need }, keepCache: true });
       for (const l of r.links || []) dragLinks.set(l.path, { ...l, url: new URL(l.url, location.origin).href });
     } catch { need.forEach((p) => dragLinks.delete(p)); }
   }
   let warmTimer = 0;
   listEl.addEventListener('pointerover', (e) => {
     const row = e.target.closest?.('tr.fm-row, .fm-card, .fm-col-row');
-    if (!row || row.dataset.name === '..' || row.dataset.type !== 'file' || inTrash(S.cwd)) return;
+    if (!row || row.dataset.name === '..' || inTrash(S.cwd)) return;
     clearTimeout(warmTimer);
     warmTimer = setTimeout(() => {
       const colI = row.dataset.col !== undefined ? parseInt(row.dataset.col, 10) : null;
       const dir = colI !== null ? S.cols[colI]?.path : S.cwd, sel = colI !== null ? S.cols[colI]?.sel : S.sel;
       if (dir == null) return;
+      // Hovering a folder loads it ahead, so the double-click opens it instantly.
+      if (row.dataset.type === 'dir') { Dirs.prefetch(join(dir, row.dataset.name)); return; }
+      if (row.dataset.type !== 'file') return;
       const entries = colI !== null ? S.cols[colI].entries : S.entries;
       const names = sel?.has(row.dataset.name) ? [...sel].filter((n) => entries.find((x) => x.name === n)?.type === 'file') : [row.dataset.name];
       void warmDragLinks(names.slice(0, 50).map((n) => join(dir, n)));
@@ -4302,7 +4366,7 @@
     if (S.view === 'cols') {
       // Source and destination may live in different columns — refresh all.
       for (const col of S.cols.filter((c) => c.path === dir || c.path === drag.dir)) {
-        api(`/api/files?path=${encodeURIComponent(col.path)}`)
+        Dirs.list(col.path, { fresh: true })
           .then((d) => { col.entries = d.entries || []; renderCols(); })
           .catch(() => {});
       }
@@ -4347,6 +4411,7 @@
     }
     return snapshot;
   }
+  let transfersLoaded = false;
   async function restoreFiles(params, snapshot) {
     if (S.editingPath && join(params.path || S.cwd, params.item || '') === S.editingPath && isDirty()) {
       setDocumentMode(params.edit === '1' ? 'edit' : 'read', false);
@@ -4366,9 +4431,11 @@
     el('fm-filter').value = S.filter;
     sec.querySelectorAll('.fm-vbtn[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===S.view));
     await navigate(params.path || '~', true);
-    S.catalogMark=params.mark==='*'||Object.hasOwn(AxonFileCatalog.marks,params.mark||'')?params.mark:'';S.catalogColor=params.color||'';S.catalogTag=params.tag||'';S.catalogKind=['dir','file'].includes(params.kind)?params.kind:'';syncCatalogControls();render();
-    await restoreTransfers();
+    // A newer location may already be applying: everything below belongs to this one only.
     if (window.AxonNavigation.current.section !== 'files' || window.AxonNavigation.current.params !== params) return;
+    S.catalogMark=params.mark==='*'||Object.hasOwn(AxonFileCatalog.marks,params.mark||'')?params.mark:'';S.catalogColor=params.color||'';S.catalogTag=params.tag||'';S.catalogKind=['dir','file'].includes(params.kind)?params.kind:'';syncCatalogControls();render();
+    // Transfer history is kept current by its own jobs; read it once, not on every folder.
+    if (!transfersLoaded) { transfersLoaded = true; void restoreTransfers(); }
     snapshot ||= fileLocations[S.cwd];
     if (S.view==='cols' && snapshot?.cols?.length) {
       const stop=snapshot.cols.findIndex(c=>c.path===S.cwd);
