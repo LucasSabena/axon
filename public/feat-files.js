@@ -2091,6 +2091,40 @@
   // it contains the target, otherwise just the target row.
   const clipTargets = (name) => (S.sel.has(name) ? [...S.sel] : [name]);
 
+  // ---------- Copy a file's content for other apps ----------
+  // Browsers can only hand a real file to another program by dropping it on a folder. Pasting
+  // works everywhere: images go as PNG (Figma, Illustrator, chats), SVG as markup (Figma and
+  // Illustrator paste it as editable vectors) and text/CSV as plain text.
+  const COPY_TEXT_LIMIT = 2 * 1024 * 1024;
+  function copyKind(name, size) {
+    const ext = extOf(name);
+    if (ext === 'svg') return 'svg';
+    if (kindFor(name) === 'image') return 'image';
+    if ((kindFor(name) === 'text' || ['csv', 'tsv', 'md', 'markdown'].includes(ext)) && !(size > COPY_TEXT_LIMIT)) return 'text';
+    return null;
+  }
+  async function pngFrom(url) {
+    const blob = await fetch(url, { credentials: 'same-origin' }).then((r) => { if (!r.ok) throw new Error('No se pudo leer la imagen'); return r.blob(); });
+    if (blob.type === 'image/png') return blob;
+    const bmp = await createImageBitmap(blob);
+    const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height;
+    c.getContext('2d').drawImage(bmp, 0, 0); bmp.close?.();
+    return new Promise((ok, bad) => c.toBlob((b) => (b ? ok(b) : bad(new Error('No se pudo convertir la imagen'))), 'image/png'));
+  }
+  async function copyForApps(p, name, kind) {
+    if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') return toast('Este navegador no permite copiar archivos', 'warn', 'Usá Descargar y arrastralo desde la carpeta de descargas.');
+    const raw = '/api/files/download?path=' + encodeURIComponent(p);
+    const text = () => fetch(raw, { credentials: 'same-origin' }).then((r) => { if (!r.ok) throw new Error('No se pudo leer el archivo'); return r.text(); }).then((t) => new Blob([t], { type: 'text/plain' }));
+    // Promises keep the click's user activation while the file downloads.
+    const item = kind === 'image'
+      ? { 'image/png': pngFrom(EXOTIC_EXT.has(extOf(name)) ? previewUrl(p) : raw) }
+      : { 'text/plain': text() };
+    try {
+      await navigator.clipboard.write([new ClipboardItem(item)]);
+      toast(kind === 'image' ? 'Imagen copiada' : kind === 'svg' ? 'SVG copiado' : 'Contenido copiado', 'ok', 'Pegalo con Ctrl+V (⌘V) en Figma, Illustrator, Claude o donde lo necesites.', 3500);
+    } catch (err) { toast('No se pudo copiar', 'error', err?.message || ''); }
+  }
+
   function copyPath(p) {
     navigator.clipboard?.writeText(p).then(
       () => toast(`Ruta copiada: ${p}`, 'ok', '', 2500),
@@ -2785,6 +2819,8 @@
     open.push(isDir || dirs
       ? { icon: 'archive', label: many ? 'Descargar como .zip' : 'Descargar como .zip', run: () => (many ? downloadZip(base, names) : downloadZip(p)) }
       : { icon: 'download', label: many ? `Descargar ${names.length} archivos` : 'Descargar', run: () => (many ? names.forEach((n, i) => setTimeout(() => download(join(base, n), n), i * 350)) : download(p, name)) });
+    const ck = !many && !isDir ? copyKind(name, t.entryOf(name)?.size) : null;
+    if (ck) open.push({ icon: 'clipboard-copy', label: ck === 'image' ? 'Copiar imagen' : ck === 'svg' ? 'Copiar SVG' : 'Copiar contenido', hint: 'Para pegar con Ctrl+V en Figma, Illustrator, Claude u otra app', run: () => copyForApps(p, name, ck) });
     items.push({ sep: true }, ...open);
 
     // ── share & process (library tools)
